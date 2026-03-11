@@ -1,55 +1,50 @@
-# Otto Data Service Starter (Go)
+# Basic FastAPI Template
 
-Starter template for a Go service that:
-- requires incoming auth (`Bearer` token + client id/key)
-- forwards data to Otto (`POST`)
-- retrieves data from Otto (`GET`)
+## Setup
 
-## 1) Setup
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+## Environment
+
+Create `.env` from `.env.example` and set your credentials.
 
 ```bash
 cp .env.example .env
-set -a; source .env; set +a
-go run .
 ```
 
-## 2) Configure Credentials
-
-Edit `.env` and replace placeholder values:
-- `SERVICE_BEARER_TOKEN`, `ALLOWED_CLIENT_ID`, `ALLOWED_CLIENT_KEY`: credentials required to call your service
-- `OTTO_BASE_URL`, `OTTO_API_TOKEN`, `OTTO_CLIENT_ID`, `OTTO_CLIENT_KEY`: credentials your service uses when calling Otto
-
-## 3) Health Check
+Export env vars before running (or use your own env loader):
 
 ```bash
-curl http://localhost:3000/health
+export OTTO_CLIENT_ID="your_client_id"
+export OTTO_CLIENT_SECRET="your_client_secret"
+export OTTO_SCOPE="orders products"
 ```
 
-## 4) Upload Data (POST)
+## Run
 
 ```bash
-curl -X POST http://localhost:3000/v1/otto/data \
-  -H "Authorization: Bearer replace_with_service_token" \
-  -H "x-client-id: replace_with_client_id" \
-  -H "x-client-key: replace_with_client_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "externalId": "abc-123",
-    "name": "Sample",
-    "metadata": { "source": "starter-template" }
-  }'
+uvicorn app.main:app --reload
 ```
 
-## 5) Retrieve Data (GET)
+App URLs:
+- `http://127.0.0.1:8000/`
+- `http://127.0.0.1:8000/health`
+- `http://127.0.0.1:8000/docs`
+- `http://127.0.0.1:8000/auth/token`
+- `http://127.0.0.1:8000/auth/token/with-claims`
+
+## Otto Token Request (equivalent curl)
 
 ```bash
-curl http://localhost:3000/v1/otto/data/abc-123 \
-  -H "Authorization: Bearer replace_with_service_token" \
-  -H "x-client-id: replace_with_client_id" \
-  -H "x-client-key: replace_with_client_key"
+curl --request POST \
+  --url 'https://api.otto.market/v1/token' \
+  --header 'Content-Type: application/x-www-form-urlencoded' \
+  --data grant_type=client_credentials \
+  --data client_id="$OTTO_CLIENT_ID" \
+  --data client_secret="$OTTO_CLIENT_SECRET" \
+  --data 'scope=orders products'
 ```
-
-## Notes
-
-- If your Otto API paths differ, update `main.go` routes from `/v1/data` to your real endpoint.
-- Use HTTPS and a secrets manager for production.

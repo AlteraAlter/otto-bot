@@ -1,0 +1,18 @@
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    otto_jv_client_id: str
+    otto_jv_client_secret: str
+    otto_base_url: str = "https://api.otto.market"
+    otto_scope: str = "orders products"
+    otto_timeout_seconds: float = 20.0
+
+
+settings = Settings()
