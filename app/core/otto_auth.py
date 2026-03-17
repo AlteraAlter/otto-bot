@@ -4,7 +4,14 @@ import time
 
 
 class OttoAuth:
-    def __init__(self, client_id: str, client_secret: str, base_url: str, scope: str, timeout: float):
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        base_url: str,
+        scope: str,
+        timeout: float,
+    ):
         self.client_id = client_id
         self.client_secret = client_secret
         self.base_url = base_url
@@ -37,6 +44,7 @@ class OttoAuth:
 
     async def get_token(self) -> str:
         if self._token and time.time() < self._expires_at:
+            print(f"TOKEN: {self._token}")
             return self._token
 
         return await self._request_token()

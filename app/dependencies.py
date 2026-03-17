@@ -3,6 +3,7 @@ from functools import lru_cache
 from app.clients.otto_client import OttoClient
 from app.core.configs import settings
 from app.core.otto_auth import OttoAuth
+from app.services.product_creation_service import ProductCreationService
 from app.services.product_service import ProductService
 
 
@@ -29,3 +30,8 @@ def get_otto_client() -> OttoClient:
 @lru_cache
 def get_product_service() -> ProductService:
     return ProductService(client=get_otto_client())
+
+
+@lru_cache
+def get_product_creation_service() -> ProductCreationService:
+    return ProductCreationService(product_service=get_product_service())
