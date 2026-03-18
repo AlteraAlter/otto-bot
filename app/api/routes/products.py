@@ -153,11 +153,15 @@ async def get_product(
 # <======= POST METHOD =======>
 @router.post("/create")
 async def create_or_update_products(
-    payload: ProductCreate,
+    payload: List[ProductCreate],
     product_service: ProductService = Depends(get_product_service),
 ):
+    payload_list = [
+        item.model_dump(mode="json", exclude_none=True)
+        for item in payload
+    ]
     return await product_service.create_or_update_products(
-        payload.model_dump(mode="json", exclude_none=True)
+        payload_list
     )
 
 

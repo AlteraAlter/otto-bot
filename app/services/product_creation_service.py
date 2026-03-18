@@ -1,14 +1,17 @@
 import json
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
+from app.mapper import get_default_category_mapper
+from app.mapper.normalizer import build_normalized_product
+from app.mapper.seo import build_seo_description, decode_with_fallback
 from app.schemas.product import ProductCreate
 from app.schemas.product_creation import ProductCreationIssue
 from app.services.product_service import ProductService
-from generate_seo_descriptions import build_seo_description, decode_with_fallback
-from normalize_product_to_schema import build_normalized_product
 
 
 @dataclass
@@ -23,6 +26,238 @@ class ProductCreationResult:
 class ProductCreationService:
     def __init__(self, product_service: ProductService):
         self.product_service = product_service
+        self._valid_categories_cache: set[str] | None = None
+
+    @staticmethod
+    def _extract_categories(payload: Any) -> set[str]:
+        found: set[str] = set()
+        if isinstance(payload, str):
+            cleaned = payload.strip()
+            if cleaned:
+                found.add(cleaned)
+            return found
+
+        if isinstance(payload, list):
+            for item in payload:
+                found.update(ProductCreationService._extract_categories(item))
+            return found
+
+        if isinstance(payload, dict):
+            groups = payload.get("categoryGroups")
+            if isinstance(groups, list):
+                for group in groups:
+                    found.update(ProductCreationService._extract_categories(group))
+
+            categories = payload.get("categories")
+            if isinstance(categories, list):
+                for item in categories:
+                    found.update(ProductCreationService._extract_categories(item))
+
+            for key in ("category", "name", "label", "categoryName"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    found.add(value.strip())
+
+        return found
+
+    @staticmethod
+    def _trim_product_line(payload: dict[str, Any], max_len: int = 70) -> None:
+        product_description = payload.get("productDescription")
+        if not isinstance(product_description, dict):
+            return
+        product_line = product_description.get("productLine")
+        if isinstance(product_line, str):
+            cleaned = product_line.strip()
+            product_description["productLine"] = cleaned[:max_len] if len(cleaned) > max_len else cleaned
+
+    @staticmethod
+    def _category_aliases() -> dict[str, str]:
+        return {
+            "Tische": "Tisch",
+            "Sideboards": "Sideboard",
+            "Regale": "Regal",
+            "Schränke": "Schrank",
+            "Stühle": "Stuhl",
+            "Sofas": "Sofa",
+            "Sitzbänke": "Sitzbank",
+            "Kissen": "Kissen",
+            "Spiegel": "Spiegel",
+            "Betten": "Bett",
+            "Matratzen": "Matratze",
+        }
+
+    @staticmethod
+    def _extract_source_field(item: dict[str, Any], *keys: str) -> str | None:
+        for key in keys:
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @classmethod
+    def _mapped_category_from_source(cls, item: dict[str, Any]) -> str | None:
+        mapper = get_default_category_mapper()
+        return mapper.map_category(
+            product_type=cls._extract_source_field(item, "Produktart", "Category", "Type", "type"),
+            title=cls._extract_source_field(item, "Artikelbeschreibung", "Title", "Titel", "TranslatedDescription"),
+            brand=cls._extract_source_field(item, "Marke", "Brand"),
+            room=cls._extract_source_field(item, "Zimmer", "Room"),
+            style=cls._extract_source_field(item, "Stil", "Style"),
+        )
+
+    @staticmethod
+    def _normalize_gender_value(raw: str) -> str | None:
+        value = raw.strip().lower()
+        value = (
+            value.replace("ä", "ae")
+            .replace("ö", "oe")
+            .replace("ü", "ue")
+            .replace("ß", "ss")
+        )
+
+        if any(token in value for token in ("damen", "weiblich", "frau")):
+            return "Damen"
+        if any(token in value for token in ("herren", "maennlich", "mann")):
+            return "Herren"
+        if "unisex" in value:
+            return "Unisex"
+        if any(token in value for token in ("kinder", "kind", "baby", "maedchen", "jungen")):
+            return "Kinder"
+        return None
+
+    @staticmethod
+    def _normalize_base_color_value(raw: str) -> str | None:
+        value = raw.strip().lower()
+        value = (
+            value.replace("ä", "ae")
+            .replace("ö", "oe")
+            .replace("ü", "ue")
+            .replace("ß", "ss")
+        )
+        known = {
+            "weiss": "Weiss",
+            "grau": "Grau",
+            "schwarz": "Schwarz",
+            "braun": "Braun",
+            "beige": "Beige",
+            "blau": "Blau",
+            "gruen": "Gruen",
+            "rot": "Rot",
+            "gelb": "Gelb",
+            "rosa": "Rosa",
+            "lila": "Lila",
+            "silber": "Silber",
+            "gold": "Gold",
+            "transparent": "Transparent",
+            "mehrfarbig": "Mehrfarbig",
+        }
+        return known.get(value)
+
+    @classmethod
+    def _sanitize_product_attributes(cls, payload: dict[str, Any]) -> None:
+        product_description = payload.get("productDescription")
+        if not isinstance(product_description, dict):
+            return
+
+        attributes = product_description.get("attributes")
+        if not isinstance(attributes, list):
+            return
+
+        single_value_names = {"Bezug", "Geschlecht", "Anzahl Teile", "Grundfarbe"}
+        cleaned_attributes: list[dict[str, Any]] = []
+
+        for attr in attributes:
+            if not isinstance(attr, dict):
+                continue
+
+            name = attr.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+
+            values = attr.get("values")
+            if not isinstance(values, list):
+                continue
+
+            normalized_values = [v.strip() for v in values if isinstance(v, str) and v.strip()]
+            if not normalized_values:
+                continue
+
+            if name in single_value_names:
+                normalized_values = normalized_values[:1]
+
+            if name == "Anzahl Teile":
+                match = re.search(r"\d+", normalized_values[0])
+                if not match:
+                    continue
+                normalized_values = [match.group(0)]
+
+            if name == "Geschlecht":
+                normalized_gender = cls._normalize_gender_value(normalized_values[0])
+                if not normalized_gender:
+                    continue
+                normalized_values = [normalized_gender]
+
+            if name == "Grundfarbe":
+                # Allowed values vary by category; drop this attribute if we cannot
+                # guarantee a category-valid enum value.
+                continue
+
+            attr["values"] = normalized_values
+            cleaned_attributes.append(attr)
+
+        product_description["attributes"] = cleaned_attributes
+
+    async def _get_valid_categories(self) -> set[str]:
+        if self._valid_categories_cache is not None:
+            return self._valid_categories_cache
+
+        try:
+            categories = await self.product_service.get_categories(
+                {"page": 0, "limit": 2000}
+            )
+        except Exception:
+            categories = []
+
+        extracted = self._extract_categories(categories)
+        if not extracted:
+            local_file = Path(__file__).resolve().parents[1] / "mapper" / "available_cats.json"
+            if local_file.exists():
+                try:
+                    extracted = self._extract_categories(json.loads(local_file.read_text(encoding="utf-8")))
+                except Exception:
+                    extracted = set()
+
+        self._valid_categories_cache = extracted
+
+        return self._valid_categories_cache
+
+    async def _normalize_category_for_payload(self, payload: dict[str, Any]) -> None:
+        product_description = payload.get("productDescription")
+        if not isinstance(product_description, dict):
+            return
+
+        category = product_description.get("category")
+        if not isinstance(category, str) or not category.strip():
+            return
+
+        valid_categories = await self._get_valid_categories()
+        category_clean = category.strip()
+
+        if category_clean in valid_categories:
+            product_description["category"] = category_clean
+            return
+
+        alias = self._category_aliases().get(category_clean)
+        if alias and alias in valid_categories:
+            product_description["category"] = alias
+            return
+
+        if "KOB Set-Artikel" in valid_categories:
+            product_description["category"] = "KOB Set-Artikel"
+            return
+
+        if valid_categories:
+            product_description["category"] = sorted(valid_categories)[0]
 
     def parse_json_bytes(self, raw: bytes) -> list[dict[str, Any]]:
         text, _encoding = decode_with_fallback(raw)
@@ -54,6 +289,10 @@ class ProductCreationService:
             try:
                 seo_html = build_seo_description(item, max_chars=max_chars)
                 normalized = build_normalized_product(item=item, seo_html=seo_html)
+                mapped_category = self._mapped_category_from_source(item)
+                if mapped_category and isinstance(normalized.get("productDescription"), dict):
+                    normalized["productDescription"]["category"] = mapped_category
+                self._sanitize_product_attributes(normalized)
                 normalized = self._sanitize_optional_fields(normalized)
             except Exception as exc:
                 issues.append(
@@ -104,13 +343,20 @@ class ProductCreationService:
         self, payloads: list[tuple[int, dict[str, Any]]]
     ) -> tuple[int, list[ProductCreationIssue]]:
         issues: list[ProductCreationIssue] = []
-        created = 0
+        if not payloads:
+            return 0, issues
 
-        for source_index, payload in payloads:
-            try:
-                await self.product_service.create_or_update_products(payload)
-                created += 1
-            except Exception as exc:
+        payload_list = [payload for _index, payload in payloads]
+        for payload in payload_list:
+            self._sanitize_product_attributes(payload)
+            self._trim_product_line(payload, max_len=70)
+            await self._normalize_category_for_payload(payload)
+
+        try:
+            await self.product_service.create_or_update_products(payload_list)
+            return len(payloads), issues
+        except Exception as exc:
+            for source_index, _payload in payloads:
                 issues.append(
                     ProductCreationIssue(
                         index=source_index,
@@ -118,8 +364,7 @@ class ProductCreationService:
                         message=f"Backend create failed: {exc}",
                     )
                 )
-
-        return created, issues
+            return 0, issues
 
     def validate_prepared_payloads(
         self, payloads: list[dict[str, Any]]
@@ -129,6 +374,7 @@ class ProductCreationService:
 
         for index, payload in enumerate(payloads):
             try:
+                self._sanitize_product_attributes(payload)
                 model = ProductCreate.model_validate(payload)
                 validated.append((index, model.model_dump(mode="json", exclude_none=True)))
             except ValidationError as exc:

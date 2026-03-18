@@ -1,9 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { ChangeEvent, DragEvent, FormEvent, useMemo, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, ReactNode, useMemo, useState } from "react";
 
 type UploadState = "idle" | "loading" | "success" | "error";
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type PathPart = string | number;
 
 type CreationIssue = {
   index: number;
@@ -22,8 +25,36 @@ type CreationResponse = {
   request_bodies?: Record<string, unknown>[];
 };
 
-function valueToCell(value: unknown): string {
-  if (value === undefined || value === null) return "";
+function isJsonObject(value: JsonValue): value is { [key: string]: JsonValue } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isBranchNode(value: JsonValue): boolean {
+  return Array.isArray(value) || isJsonObject(value);
+}
+
+function normalizeJsonValue(input: unknown): JsonValue {
+  if (input === null) return null;
+  if (typeof input === "string" || typeof input === "number" || typeof input === "boolean") {
+    return input;
+  }
+  if (Array.isArray(input)) {
+    return input.map((item) => normalizeJsonValue(item));
+  }
+  if (typeof input === "object") {
+    const result: { [key: string]: JsonValue } = {};
+    for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+      if (value !== undefined) {
+        result[key] = normalizeJsonValue(value);
+      }
+    }
+    return result;
+  }
+  return String(input);
+}
+
+function valueToCell(value: JsonValue): string {
+  if (value === null) return "null";
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   try {
@@ -33,9 +64,9 @@ function valueToCell(value: unknown): string {
   }
 }
 
-function cellToValue(raw: string): unknown {
+function cellToValue(raw: string): JsonValue | undefined {
   const trimmed = raw.trim();
-  if (trimmed.length === 0) return undefined;
+  if (trimmed.length === 0) return "";
   if (trimmed === "true") return true;
   if (trimmed === "false") return false;
   if (trimmed === "null") return null;
@@ -44,7 +75,7 @@ function cellToValue(raw: string): unknown {
   const first = trimmed[0];
   if (first === "{" || first === "[" || first === '"') {
     try {
-      return JSON.parse(trimmed);
+      return normalizeJsonValue(JSON.parse(trimmed));
     } catch {
       return raw;
     }
@@ -53,88 +84,91 @@ function cellToValue(raw: string): unknown {
   return raw;
 }
 
-function buildTableRows(items: Record<string, unknown>[]): {
-  columns: string[];
-  rows: Record<string, string>[];
-} {
-  const keySet = new Set<string>();
-  items.forEach((item) => Object.keys(item).forEach((key) => keySet.add(key)));
-  const columns = Array.from(keySet);
-  const rows = items.map((item) => {
-    const row: Record<string, string> = {};
-    columns.forEach((key) => {
-      row[key] = valueToCell(item[key]);
-    });
-    return row;
-  });
-  return { columns, rows };
+function pathToKey(path: PathPart[]): string {
+  if (path.length === 0) return "$";
+  return path.map((part) => String(part)).join("~");
 }
 
-function tableRowsToPayload(rows: Record<string, string>[], columns: string[]): Record<string, unknown>[] {
-  return rows.map((row) => {
-    const obj: Record<string, unknown> = {};
-    columns.forEach((column) => {
-      const parsed = cellToValue(row[column] ?? "");
-      if (parsed !== undefined) {
-        obj[column] = parsed;
-      }
-    });
-    return obj;
-  });
+function updateNodeAtPath(root: JsonValue, path: PathPart[], nextValue: JsonValue): JsonValue {
+  if (path.length === 0) {
+    return nextValue;
+  }
+
+  const [head, ...tail] = path;
+
+  if (typeof head === "number") {
+    if (!Array.isArray(root) || head < 0 || head >= root.length) {
+      return root;
+    }
+    const nextArray = [...root];
+    nextArray[head] = updateNodeAtPath(nextArray[head], tail, nextValue);
+    return nextArray;
+  }
+
+  if (!isJsonObject(root) || !(head in root)) {
+    return root;
+  }
+
+  const nextObject = { ...root };
+  nextObject[head] = updateNodeAtPath(nextObject[head], tail, nextValue);
+  return nextObject;
+}
+
+function nodeMeta(value: JsonValue): string {
+  if (Array.isArray(value)) return `array(${value.length})`;
+  if (isJsonObject(value)) return `object(${Object.keys(value).length})`;
+  if (value === null) return "null";
+  return typeof value;
 }
 
 export default function CreatorPage() {
   const [file, setFile] = useState<File | null>(null);
   const [state, setState] = useState<UploadState>("idle");
-  const [maxChars, setMaxChars] = useState<string>("2000");
   const [message, setMessage] = useState<string>(
-    "Upload JSON, run script, edit table cells, then send to create endpoint."
+    "Загрузите JSON, подготовьте данные, при необходимости отредактируйте поля и отправьте на создание."
   );
-  const [responseBody, setResponseBody] = useState<string>("");
   const [issues, setIssues] = useState<CreationIssue[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
-  const [tableColumns, setTableColumns] = useState<string[]>([]);
-  const [tableRows, setTableRows] = useState<Record<string, string>[]>([]);
+  const [editorData, setEditorData] = useState<JsonValue[]>([]);
+  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set(["$", "0"]));
 
   const fileLabel = useMemo(() => {
-    if (!file) return "No file selected";
+    if (!file) return "Файл не выбран";
     return `${file.name} (${Math.round(file.size / 1024)} KB)`;
   }, [file]);
 
   const currentJsonPreview = useMemo(() => {
     try {
-      const payload = tableRowsToPayload(tableRows, tableColumns);
-      return JSON.stringify(payload, null, 2);
+      return JSON.stringify(editorData, null, 2);
     } catch (e) {
       console.error("Preview error", e);
-      return "Invalid JSON preview";
+      return "Не удалось показать JSON";
     }
-  }, [tableRows, tableColumns]);
+  }, [editorData]);
 
   function pickFile(next: File | null) {
     if (!next) {
       setFile(null);
-      setTableColumns([]);
-      setTableRows([]);
+      setEditorData([]);
+      setExpandedKeys(new Set(["$", "0"]));
       return;
     }
 
     if (!next.name.toLowerCase().endsWith(".json")) {
       setState("error");
-      setMessage("Only .json files are allowed.");
+      setMessage("Поддерживаются только файлы .json.");
       setFile(null);
-      setTableColumns([]);
-      setTableRows([]);
+      setEditorData([]);
+      setExpandedKeys(new Set(["$", "0"]));
       return;
     }
 
     setFile(next);
     setState("idle");
-    setMessage("Ready to run script.");
-    setResponseBody("");
+    setMessage("Файл выбран. Нажмите «Подготовить данные».");
     setIssues([]);
-    setTableColumns([]);
-    setTableRows([]);
+    setEditorData([]);
+    setExpandedKeys(new Set(["$", "0"]));
   }
 
   function onInputChange(event: ChangeEvent<HTMLInputElement>) {
@@ -157,12 +191,76 @@ export default function CreatorPage() {
     setIsDragOver(false);
   }
 
-  function updateCell(rowIndex: number, column: string, value: string) {
-    setTableRows((prev) => {
-      const next = [...prev];
-      next[rowIndex] = { ...next[rowIndex], [column]: value };
+  function toggleExpanded(path: PathPart[]) {
+    const key = pathToKey(path);
+    setExpandedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
       return next;
     });
+  }
+
+  function updateLeaf(path: PathPart[], raw: string) {
+    setEditorData((prev) => {
+      const nextValue = cellToValue(raw);
+      const normalized = nextValue === undefined ? "" : nextValue;
+      const updated = updateNodeAtPath(prev, path, normalized);
+      return Array.isArray(updated) ? updated : prev;
+    });
+  }
+
+  function renderTreeNode(value: JsonValue, path: PathPart[], label: string, depth: number): ReactNode {
+    const branch = isBranchNode(value);
+    const paddingLeft = 10 + depth * 14;
+    const key = pathToKey(path);
+
+    if (branch) {
+      const expanded = expandedKeys.has(key);
+      const children: ReactNode[] = [];
+
+      if (Array.isArray(value)) {
+        for (let i = 0; i < value.length; i += 1) {
+          children.push(renderTreeNode(value[i], [...path, i], `[${i}]`, depth + 1));
+        }
+      } else if (isJsonObject(value)) {
+        for (const childKey of Object.keys(value)) {
+          children.push(renderTreeNode(value[childKey], [...path, childKey], childKey, depth + 1));
+        }
+      }
+
+      return (
+        <div key={`${key}-${label}`}>
+          <button
+            type="button"
+            className="tree-node-btn tree-node-branch"
+            style={{ paddingLeft }}
+            onClick={() => toggleExpanded(path)}
+          >
+            <span className="tree-node-left">
+              <span className="tree-node-arrow">{expanded ? "▾" : "▸"}</span>
+              <span className="tree-node-label">{label}</span>
+            </span>
+            <span className="tree-node-meta">{nodeMeta(value)}</span>
+          </button>
+          {expanded ? <div className="tree-node-children">{children}</div> : null}
+        </div>
+      );
+    }
+
+    return (
+      <div className="tree-leaf-row" key={`${key}-${label}`} style={{ paddingLeft }}>
+        <span className="tree-leaf-label">{label}</span>
+        <input
+          className="tree-leaf-input"
+          value={valueToCell(value)}
+          onChange={(event) => updateLeaf(path, event.target.value)}
+        />
+      </div>
+    );
   }
 
   async function handleRunScript(event: FormEvent<HTMLFormElement>) {
@@ -170,29 +268,26 @@ export default function CreatorPage() {
 
     if (!file) {
       setState("error");
-      setMessage("Please choose or drop a JSON file.");
+      setMessage("Выберите JSON-файл или перетащите его в область загрузки.");
       return;
     }
 
     setState("loading");
-    setMessage("Running script and preparing request JSON (no send yet)...");
-    setResponseBody("");
+    setMessage("Подготавливаем данные из файла...");
     setIssues([]);
 
     try {
       const formData = new FormData();
       formData.append("file", file);
-      formData.append("maxChars", maxChars);
+      formData.append("maxChars", "2000");
 
       const response = await fetch("/api/products/prepare-from-file", {
         method: "POST",
         body: formData,
         cache: "no-store"
       });
-      console.log(response)
 
       const text = await response.text();
-      console.log(text)
       const parsed = (() => {
         try {
           return JSON.parse(text) as CreationResponse;
@@ -201,51 +296,49 @@ export default function CreatorPage() {
         }
       })();
 
-      const pretty = parsed ? JSON.stringify(parsed, null, 2) : text;
-      setResponseBody(pretty);
       setIssues(Array.isArray(parsed?.issues) ? parsed.issues : []);
 
       if (!response.ok) {
         setState("error");
-        setMessage(parsed?.message ?? `Failed with status ${response.status}`);
-        setTableColumns([]);
-        setTableRows([]);
+        setMessage(parsed?.message ?? `Ошибка запроса (${response.status})`);
+        setEditorData([]);
+        setExpandedKeys(new Set(["$", "0"]));
         return;
       }
 
       const requestBodies = Array.isArray(parsed?.request_bodies) ? parsed.request_bodies : [];
-      const { columns, rows } = buildTableRows(requestBodies);
-      setTableColumns(columns);
-      setTableRows(rows);
+      const normalized = requestBodies.map((item) => normalizeJsonValue(item));
+      setEditorData(normalized);
+      setExpandedKeys(new Set(["$", "0"]));
 
       setState("success");
       setMessage(
-        `Script completed. ${rows.length} row(s) loaded into table editor. Edit any cell, then send.`
+        `Готово. Загружено элементов: ${normalized.length}. Вложенные узлы можно раскрывать, простые значения — редактировать.`
       );
     } catch (error) {
       setState("error");
-      const detail = error instanceof Error ? error.message : "Unknown error";
-      setMessage(`Request failed: ${detail}`);
+      const detail = error instanceof Error ? error.message : "Неизвестная ошибка";
+      setMessage(`Не удалось выполнить запрос: ${detail}`);
     }
   }
 
   async function handleSendToCreate() {
-    if (tableRows.length === 0 || tableColumns.length === 0) {
+    if (editorData.length === 0) {
       setState("error");
-      setMessage("Run script first so table has data.");
+      setMessage("Сначала подготовьте данные, чтобы заполнить дерево.");
       return;
     }
 
-    const requestBodies = tableRowsToPayload(tableRows, tableColumns);
+    const requestBodies = editorData.filter((item): item is { [key: string]: JsonValue } => isJsonObject(item));
 
     if (requestBodies.length === 0) {
       setState("error");
-      setMessage("No valid table rows to send.");
+      setMessage("В корневом массиве нет валидных объектов для отправки.");
       return;
     }
 
     setState("loading");
-    setMessage("Sending edited table data to create endpoint...");
+    setMessage("Отправляем данные на создание...");
     setIssues([]);
 
     try {
@@ -267,22 +360,20 @@ export default function CreatorPage() {
         }
       })();
 
-      const pretty = parsed ? JSON.stringify(parsed, null, 2) : text;
-      setResponseBody(pretty);
       setIssues(Array.isArray(parsed?.issues) ? parsed.issues : []);
 
       if (!response.ok) {
         setState("error");
-        setMessage(parsed?.message ?? `Failed with status ${response.status}`);
+        setMessage(parsed?.message ?? `Ошибка запроса (${response.status})`);
         return;
       }
 
       setState("success");
-      setMessage(`Created ${parsed?.created_items ?? 0}/${parsed?.source_items ?? 0} product(s).`);
+      setMessage(`Создано товаров: ${parsed?.created_items ?? 0} из ${parsed?.source_items ?? 0}.`);
     } catch (error) {
       setState("error");
-      const detail = error instanceof Error ? error.message : "Unknown error";
-      setMessage(`Request failed: ${detail}`);
+      const detail = error instanceof Error ? error.message : "Неизвестная ошибка";
+      setMessage(`Не удалось выполнить запрос: ${detail}`);
     }
   }
 
@@ -291,14 +382,13 @@ export default function CreatorPage() {
       <section className="creator-card">
         <div className="creator-head">
           <div>
-            <h1>Create Products From JSON</h1>
+            <h1>Создание товаров из JSON</h1>
             <p>
-              Run script first, then edit request JSON in a table (keys as columns, values as rows), and
-              send to create endpoint.
+              Раскрывайте вложенные поля и редактируйте простые значения прямо в дереве.
             </p>
           </div>
           <Link className="ghost-btn" href="/">
-            Back To Catalog
+            Назад к каталогу
           </Link>
         </div>
 
@@ -316,74 +406,39 @@ export default function CreatorPage() {
               accept="application/json,.json"
               onChange={onInputChange}
             />
-            <strong>Drag and drop JSON here</strong>
-            <span>or click to choose from your system</span>
+            <strong>Перетащите JSON-файл сюда</strong>
+            <span>или нажмите, чтобы выбрать файл</span>
             <em>{fileLabel}</em>
           </label>
 
-          <label>
-            SEO max chars
-            <input
-              type="number"
-              min="300"
-              max="5000"
-              value={maxChars}
-              onChange={(event) => setMaxChars(event.target.value)}
-            />
-          </label>
-
           <button className="primary-btn" type="submit" disabled={state === "loading"}>
-            {state === "loading" ? "Running..." : "Run Script"}
+            {state === "loading" ? "Подготовка..." : "Подготовить данные"}
           </button>
         </form>
 
         <section className="creator-editor">
           <div className="creator-editor-head">
-            <h2>Table Editor</h2>
+            <h2>Редактор дерева</h2>
             <button
               className="primary-btn"
               type="button"
               onClick={handleSendToCreate}
-              disabled={state === "loading" || tableRows.length === 0}
+              disabled={state === "loading" || editorData.length === 0}
             >
-              Send To Create Endpoint
+              Отправить на создание
             </button>
           </div>
-          <p>Edit any cell. If you need object/array values, put valid JSON in that cell.</p>
+          <p>Узлы-объекты и массивы раскрываются, простые значения можно редактировать.</p>
 
-          {tableRows.length > 0 && tableColumns.length > 0 ? (
-            <div className="creator-table-wrap">
-              <table className="creator-table">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    {tableColumns.map((column) => (
-                      <th key={column}>{column}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {tableRows.map((row, rowIndex) => (
-                    <tr key={`row-${rowIndex}`}>
-                      <td>{rowIndex + 1}</td>
-                      {tableColumns.map((column) => (
-                        <td key={`${rowIndex}-${column}`}>
-                          <input
-                            value={String(row[column] ?? "")}
-                            onChange={(event) => updateCell(rowIndex, column, event.target.value)}
-                          />
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          {editorData.length > 0 ? (
+            <div className="creator-tree-layout">
+              <div className="creator-tree-panel">{renderTreeNode(editorData, [], "request_bodies", 0)}</div>
             </div>
           ) : (
-            <div className="empty-state">Run script to load result JSON into table editor.</div>
+            <div className="empty-state">Подготовьте данные, чтобы они появились в редакторе.</div>
           )}
 
-          <h3>Resulting JSON</h3>
+          <h3>Итоговый JSON</h3>
           <pre className="uploader-response creator-json-preview">{currentJsonPreview}</pre>
         </section>
 
@@ -391,7 +446,7 @@ export default function CreatorPage() {
 
         {issues.length > 0 ? (
           <div className="creator-issues">
-            <h2>Issues</h2>
+            <h2>Замечания</h2>
             {issues.map((issue, index) => (
               <p key={`${issue.index}-${issue.stage}-${index}`}>
                 #{issue.index} [{issue.stage}] {issue.message}
@@ -400,7 +455,6 @@ export default function CreatorPage() {
           </div>
         ) : null}
 
-        {responseBody ? <pre className="uploader-response">{responseBody}</pre> : null}
       </section>
     </main>
   );

@@ -1,4 +1,6 @@
-# Basic FastAPI Template
+# OTTO Product Integration Service
+
+FastAPI backend + Next.js frontend for OTTO product retrieval, normalization, mapping, and creation.
 
 ## Setup
 
@@ -10,13 +12,11 @@ pip install -r requirements.txt
 
 ## Environment
 
-Create `.env` from `.env.example` and set your credentials.
-
 ```bash
 cp .env.example .env
 ```
 
-Export env vars before running (or use your own env loader):
+Required values:
 
 ```bash
 export OTTO_CLIENT_ID="your_client_id"
@@ -24,27 +24,45 @@ export OTTO_CLIENT_SECRET="your_client_secret"
 export OTTO_SCOPE="orders products"
 ```
 
-## Run
+Optional mapper override:
+
+```bash
+export OTTO_CATEGORIES_FILE="/absolute/path/to/available_cats.json"
+```
+
+## Run Backend
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-App URLs:
-- `http://127.0.0.1:8000/`
+Backend URLs:
 - `http://127.0.0.1:8000/health`
 - `http://127.0.0.1:8000/docs`
-- `http://127.0.0.1:8000/auth/token`
-- `http://127.0.0.1:8000/auth/token/with-claims`
 
-## Otto Token Request (equivalent curl)
+## Run Frontend
 
 ```bash
-curl --request POST \
-  --url 'https://api.otto.market/v1/token' \
-  --header 'Content-Type: application/x-www-form-urlencoded' \
-  --data grant_type=client_credentials \
-  --data client_id="$OTTO_CLIENT_ID" \
-  --data client_secret="$OTTO_CLIENT_SECRET" \
-  --data 'scope=orders products'
+cd frontend
+npm install
+npm run dev
 ```
+
+Default frontend URL:
+- `http://127.0.0.1:3000`
+
+## Project Structure
+
+- `app/api/routes/products.py`: OTTO products + creation workflow endpoints
+- `app/services/product_creation_service.py`: upload/prepare/validate/create pipeline
+- `app/mapper/category_mapper.py`: reusable category mapping engine
+- `app/mapper/normalizer.py`: normalized OTTO payload entrypoint
+- `app/mapper/seo.py`: SEO description generation entrypoint
+- `normalize_product_to_schema.py`: schema transformation implementation
+- `generate_seo_descriptions.py`: SEO generation implementation
+- `frontend/app/creator/page.tsx`: JSON upload, edit, prepare, create UI
+
+## Notes
+
+- Mapper category data lives in `app/mapper/available_cats.json`.
+- Legacy standalone uploader route/page were removed; product file flow is under `/v1/products/*`.

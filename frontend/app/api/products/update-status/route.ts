@@ -7,19 +7,13 @@ function withPath(path: string) {
 }
 
 export async function POST(request: Request) {
-  const incoming = await request.formData();
-  const file = incoming.get("file");
-
-  if (!(file instanceof File)) {
-    return NextResponse.json({ detail: "file is required" }, { status: 400 });
-  }
-
-  const formData = new FormData();
-  formData.append("file", file, file.name);
-
-  const response = await fetch(withPath("/v1/uploader/send-file"), {
+  const body = await request.text();
+  const response = await fetch(withPath("/v1/products/update-status"), {
     method: "POST",
-    body: formData,
+    headers: {
+      "content-type": "application/json"
+    },
+    body,
     cache: "no-store"
   });
 

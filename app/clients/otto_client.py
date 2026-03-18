@@ -83,17 +83,31 @@ class OttoClient:
             params=payload,
         )
 
-    async def create_or_update_products(self, payload: dict):
-        return await self._request("POST", "/v5/products", json=[payload])
+    async def create_or_update_products(self, payload: list[dict[str, Any]]):
+        return await self._request("POST", "/v5/products", json=payload)
 
     async def get_categories(self, payload: dict):
         body = await self._request("GET", "/v5/products/categories", params=payload)
         if isinstance(body, dict):
             groups = body.get("categoryGroups")
             if isinstance(groups, list):
-                return [
-                    group.get("categoryGroup")
-                    for group in groups
-                    if isinstance(group, dict) and group.get("categoryGroup")
-                ]
+                categories: list[str] = []
+                for group in groups:
+                    if not isinstance(group, dict):
+                        continue
+                    group_categories = group.get("categories")
+                    if not isinstance(group_categories, list):
+                        continue
+                    for item in group_categories:
+                        if isinstance(item, str) and item.strip():
+                            categories.append(item.strip())
+                            continue
+                        if isinstance(item, dict):
+                            for key in ("category", "name", "label", "categoryName"):
+                                value = item.get(key)
+                                if isinstance(value, str) and value.strip():
+                                    categories.append(value.strip())
+                                    break
+                if categories:
+                    return list(dict.fromkeys(categories))
         return body

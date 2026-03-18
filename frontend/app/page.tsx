@@ -134,6 +134,23 @@ function statusLabel(status: ProductStatus) {
   return "Черновик";
 }
 
+function comparableProductState(product: Product) {
+  return {
+    productReference: product.productReference,
+    name: product.name,
+    sku: product.sku,
+    ean: product.ean,
+    moin: product.moin,
+    category: product.category,
+    brand: product.brand,
+    brandId: product.brandId,
+    price: product.price,
+    stock: product.stock,
+    description: product.description,
+    bulletPoints: product.bulletPoints
+  };
+}
+
 function mapProduct(raw: unknown, index: number, statusBySku: Record<string, ProductStatus>): Product | null {
   if (!isObject(raw)) return null;
 
@@ -278,11 +295,12 @@ export default function Home() {
   const [selectedId, setSelectedId] = useState("");
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [isSaving, setIsSaving] = useState(false);
+  const [isApplying, setIsApplying] = useState(false);
   const [isSkuSearching, setIsSkuSearching] = useState(false);
   const [skuSearchResults, setSkuSearchResults] = useState<Product[] | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const statusCacheRef = useRef<Record<string, ProductStatus>>({});
+  const [originalById, setOriginalById] = useState<Record<string, Product>>({});
 
   const allKnownProducts = useMemo(() => {
     const map = new Map<string, Product>();
@@ -292,6 +310,20 @@ export default function Home() {
   }, [products, skuSearchResults]);
 
   const selectedProduct = allKnownProducts.find((product) => product.id === selectedId) ?? null;
+  const originalSelectedProduct = selectedProduct ? originalById[selectedProduct.id] ?? null : null;
+
+  const hasProductChanges = useMemo(() => {
+    if (!selectedProduct || !originalSelectedProduct) return false;
+    return (
+      JSON.stringify(comparableProductState(selectedProduct)) !==
+      JSON.stringify(comparableProductState(originalSelectedProduct))
+    );
+  }, [selectedProduct, originalSelectedProduct]);
+
+  const hasStatusChanges = useMemo(() => {
+    if (!selectedProduct || !originalSelectedProduct) return false;
+    return selectedProduct.status !== originalSelectedProduct.status;
+  }, [selectedProduct, originalSelectedProduct]);
 
   const categories = useMemo(() => {
     return Array.from(new Set(products.map((item) => item.category)));
@@ -351,6 +383,12 @@ export default function Home() {
         .filter((item): item is Product => item !== null);
 
       setProducts(mapped);
+      setOriginalById(
+        mapped.reduce<Record<string, Product>>((acc, product) => {
+          acc[product.id] = { ...product };
+          return acc;
+        }, {})
+      );
       setActivity(mapActivity(statusPayload));
 
       if (mapped.length > 0) {
@@ -407,6 +445,12 @@ export default function Home() {
 
         const mapped = mapProduct(payload, 0, statusBySku);
         setSkuSearchResults(mapped ? [mapped] : []);
+        if (mapped) {
+          setOriginalById((prev) => ({
+            ...prev,
+            [mapped.id]: prev[mapped.id] ?? { ...mapped }
+          }));
+        }
       } catch {
         setSkuSearchResults([]);
       } finally {
@@ -455,47 +499,130 @@ export default function Home() {
   }
 
   async function saveChanges() {
-    if (!selectedProduct) return;
+    if (!selectedProduct || !originalSelectedProduct) return;
+
+    if (!hasProductChanges && !hasStatusChanges) {
+      setNotice("Изменений нет: ничего отправлять не нужно.");
+      return;
+    }
 
     setNotice(null);
-    setIsSaving(true);
+    setIsApplying(true);
 
     try {
-      const detail = await ensureProductDetail(selectedProduct.sku);
-      if (!detail) {
-        throw new Error("Не удалось загрузить полные данные товара для сохранения");
+      const requests: Promise<{ kind: "product" | "status"; ok: boolean; message: string }>[] = [];
+
+      if (hasProductChanges) {
+        requests.push(
+          (async () => {
+            const detail = await ensureProductDetail(originalSelectedProduct.sku);
+            if (!detail) {
+              return {
+                kind: "product",
+                ok: false,
+                message: "Не удалось загрузить полные данные товара для /v1/products/create"
+              };
+            }
+
+            const payload = asCreatePayload(detail, selectedProduct);
+            if (!payload) {
+              return {
+                kind: "product",
+                ok: false,
+                message: "Формат товара не подходит для /v1/products/create"
+              };
+            }
+
+            const response = await fetch("/api/products", {
+              method: "POST",
+              headers: {
+                "content-type": "application/json"
+              },
+              body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+              const text = await response.text();
+              return {
+                kind: "product",
+                ok: false,
+                message: `Карточка не сохранена (${response.status}): ${text.slice(0, 180)}`
+              };
+            }
+
+            return {
+              kind: "product",
+              ok: true,
+              message: "Карточка обновлена через /v1/products/create"
+            };
+          })()
+        );
       }
 
-      const payload = asCreatePayload(detail, selectedProduct);
-      if (!payload) {
-        throw new Error("Формат товара не подходит для /v1/products/create");
+      if (hasStatusChanges) {
+        const targetStatus = selectedProduct.status;
+        if (targetStatus !== "active" && targetStatus !== "paused") {
+          throw new Error("Статус 'draft' не поддерживается endpoint /v1/products/update-status");
+        }
+
+        requests.push(
+          (async () => {
+            const response = await fetch("/api/products/update-status", {
+              method: "POST",
+              headers: {
+                "content-type": "application/json"
+              },
+              body: JSON.stringify({
+                status: [
+                  {
+                    sku: selectedProduct.sku,
+                    active: targetStatus === "active"
+                  }
+                ]
+              })
+            });
+
+            if (!response.ok) {
+              const text = await response.text();
+              return {
+                kind: "status",
+                ok: false,
+                message: `Статус не обновлён (${response.status}): ${text.slice(0, 180)}`
+              };
+            }
+
+            statusCacheRef.current = {
+              ...statusCacheRef.current,
+              [selectedProduct.sku]: targetStatus
+            };
+            return {
+              kind: "status",
+              ok: true,
+              message: "Статус обновлён через /v1/products/update-status"
+            };
+          })()
+        );
       }
 
-      const response = await fetch("/api/products", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json"
-        },
-        body: JSON.stringify(payload)
-      });
+      const results = await Promise.all(requests);
+      const failed = results.filter((result) => !result.ok);
 
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Сохранение не выполнено (${response.status}): ${text.slice(0, 220)}`);
+      if (failed.length > 0) {
+        setNotice(failed.map((result) => result.message).join(" | "));
+      } else {
+        setNotice(results.map((result) => result.message).join(" + "));
+        await loadProducts();
       }
-
-      setNotice("Изменения отправлены в ваш endpoint /v1/products/create");
-      await loadProducts();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Ошибка сохранения";
       setNotice(message);
     } finally {
-      setIsSaving(false);
+      setIsApplying(false);
     }
   }
 
   function deleteProduct() {
-    setNotice("Endpoint удаления не найден: в backend нет DELETE /v1/products/{sku}");
+    setNotice("Удаление пока недоступно: в backend нет DELETE /v1/products/{sku}");
   }
 
   return (
@@ -506,8 +633,8 @@ export default function Home() {
       <section className="app-shell">
         <aside className="sidebar">
           <div>
-            <p className="brand">OTTO Control</p>
-            <p className="brand-subtitle">Marketplace manager</p>
+            <p className="brand">OTTO Контроль</p>
+            <p className="brand-subtitle">Панель управления товарами</p>
           </div>
 
           <nav className="side-nav">
@@ -522,8 +649,8 @@ export default function Home() {
 
           <div className="side-card">
             <p className="side-card-title">Интеграция OTTO</p>
-            <p className="side-card-text">Данные загружаются из ваших endpoint в FastAPI</p>
-            <span className="sync-pill">api linked</span>
+            <p className="side-card-text">Данные загружаются и обновляются через FastAPI</p>
+            <span className="sync-pill">API подключен</span>
           </div>
         </aside>
 
@@ -531,7 +658,7 @@ export default function Home() {
           <header className="topbar">
             <div>
               <h1>Управление товарами</h1>
-              <p>Подключено к backend: список и обновление карточек через API</p>
+              <p>Одна кнопка применяет изменения: карточка и статус обновляются параллельно при необходимости</p>
             </div>
           </header>
 
@@ -561,7 +688,7 @@ export default function Home() {
               <div className="toolbar">
                 <input
                   type="search"
-                  placeholder="Поиск по SKU через endpoint /{sku}"
+                  placeholder="Поиск товара по SKU"
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                 />
@@ -656,14 +783,14 @@ export default function Home() {
                       />
                     </label>
                     <label>
-                      Brand
+                      Бренд
                       <input
                         value={selectedProduct.brand}
                         onChange={(event) => updateSelected("brand", event.target.value)}
                       />
                     </label>
                     <label>
-                      Brand ID
+                      ID бренда
                       <input
                         value={selectedProduct.brandId}
                         onChange={(event) => updateSelected("brandId", event.target.value)}
@@ -686,6 +813,7 @@ export default function Home() {
                         <option value="paused">Пауза</option>
                         <option value="draft">Черновик</option>
                       </select>
+                      <small className="field-note">В запрос статуса отправляются только «Активен» и «Пауза»</small>
                     </label>
                     <label>
                       EAN
@@ -718,7 +846,7 @@ export default function Home() {
                       />
                     </label>
                     <label>
-                      Product Reference
+                      Ссылка товара (Product Reference)
                       <input
                         value={selectedProduct.productReference}
                         onChange={(event) => updateSelected("productReference", event.target.value)}
@@ -765,8 +893,15 @@ export default function Home() {
                     </article>
                   </div>
 
-                  <button className="primary-btn full" onClick={saveChanges} disabled={isSaving}>
-                    {isSaving ? "Сохранение..." : "Сохранить изменения"}
+                  <div className="sync-summary">
+                    <p>Изменения карточки: {hasProductChanges ? "есть" : "нет"}</p>
+                    <p>Изменения статуса: {hasStatusChanges ? "есть" : "нет"}</p>
+                  </div>
+
+                  <button className="primary-btn full" onClick={saveChanges} disabled={isApplying}>
+                    {isApplying
+                      ? "Применяем изменения..."
+                      : "Применить изменения"}
                   </button>
 
                   <div className="timeline">

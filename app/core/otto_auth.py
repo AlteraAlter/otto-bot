@@ -44,7 +44,6 @@ class OttoAuth:
 
     async def get_token(self) -> str:
         if self._token and time.time() < self._expires_at:
-            print(f"TOKEN: {self._token}")
             return self._token
 
         return await self._request_token()

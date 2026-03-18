@@ -13,8 +13,8 @@ const outfit = Outfit({
 });
 
 export const metadata: Metadata = {
-  title: "OTTO Dashboard",
-  description: "Products dashboard UI"
+  title: "OTTO — Панель товаров",
+  description: "Управление товарами и статусами OTTO"
 };
 
 export default function RootLayout({

@@ -1,3 +1,5 @@
+from typing import Any
+
 from app.clients.otto_client import OttoClient
 
 
@@ -20,7 +22,7 @@ class ProductService:
     async def get_marketplace_status(self, payload: dict):
         return await self.client.get_marketplace_status(payload)
 
-    async def create_or_update_products(self, payload: dict):
+    async def create_or_update_products(self, payload: list[dict[str, Any]]):
         return await self.client.create_or_update_products(payload)
     
     async def update_status(self, payload: dict):

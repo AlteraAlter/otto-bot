@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import unicodedata
@@ -19,6 +20,7 @@ from typing import Any
 
 import ijson
 
+from app.mapper import get_default_category_mapper
 from generate_seo_descriptions import (
     build_seo_description,
     decode_with_fallback,
@@ -249,6 +251,19 @@ OTTO_CATEGORY_RULES: list[tuple[tuple[str, ...], str]] = [
     (("transmitter",), "Funkübertragungsgeräte"),
 ]
 
+CATEGORY_NAME_ALIASES = {
+    "Tische": "Tisch",
+    "Sideboards": "Sideboard",
+    "Schränke": "Schrank",
+    "Stühle": "Stuhl",
+    "Sofas": "Sofa",
+    "Regale": "Regal",
+    "Betten": "Bett",
+    "Matratzen": "Matratze",
+}
+
+_CACHED_ALLOWED_CATEGORIES: set[str] | None = None
+
 
 @dataclass(frozen=True)
 class NormalizeConfig:
@@ -262,6 +277,84 @@ class NormalizeConfig:
 def read_json(path: Path) -> Any:
     text, _encoding = decode_with_fallback(path.read_bytes())
     return json.loads(text)
+
+
+def _extract_categories_from_response(payload: Any) -> set[str]:
+    found: set[str] = set()
+
+    if isinstance(payload, list):
+        for item in payload:
+            found.update(_extract_categories_from_response(item))
+        return found
+
+    if isinstance(payload, str):
+        cleaned = payload.strip()
+        if cleaned:
+            found.add(cleaned)
+        return found
+
+    if isinstance(payload, dict):
+        groups = payload.get("categoryGroups")
+        if isinstance(groups, list):
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                categories = group.get("categories")
+                if not isinstance(categories, list):
+                    continue
+                for item in categories:
+                    if isinstance(item, str) and item.strip():
+                        found.add(item.strip())
+                        continue
+                    if isinstance(item, dict):
+                        for key in ("category", "name", "label", "categoryName"):
+                            value = item.get(key)
+                            if isinstance(value, str) and value.strip():
+                                found.add(value.strip())
+                                break
+        for key in ("category", "name", "label", "categoryName"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                found.add(value.strip())
+
+    return found
+
+
+def get_allowed_categories() -> set[str]:
+    global _CACHED_ALLOWED_CATEGORIES
+    if _CACHED_ALLOWED_CATEGORIES is not None:
+        return _CACHED_ALLOWED_CATEGORIES
+
+    default_allowed = set(OTTO_ALLOWED_CATEGORIES)
+    categories_file_env = os.getenv("OTTO_CATEGORIES_FILE")
+    categories_file = (
+        Path(categories_file_env)
+        if categories_file_env
+        else Path(__file__).resolve().parent / "app" / "mapper" / "available_cats.json"
+    )
+    if categories_file.exists():
+        try:
+            payload = read_json(categories_file)
+            extracted = _extract_categories_from_response(payload)
+            if extracted:
+                _CACHED_ALLOWED_CATEGORIES = extracted
+                return _CACHED_ALLOWED_CATEGORIES
+        except Exception:
+            pass
+
+    _CACHED_ALLOWED_CATEGORIES = default_allowed
+    return _CACHED_ALLOWED_CATEGORIES
+
+
+def resolve_to_allowed_category(candidate: str, allowed_categories: set[str]) -> str:
+    if candidate in allowed_categories:
+        return candidate
+    alias = CATEGORY_NAME_ALIASES.get(candidate)
+    if alias and alias in allowed_categories:
+        return alias
+    if OTTO_FALLBACK_CATEGORY in allowed_categories:
+        return OTTO_FALLBACK_CATEGORY
+    return sorted(allowed_categories)[0] if allowed_categories else OTTO_FALLBACK_CATEGORY
 
 
 def build_lookup(item: dict[str, Any]) -> dict[str, Any]:
@@ -333,11 +426,26 @@ def collect_category_source_texts(lookup: dict[str, Any]) -> list[str]:
 def map_to_otto_category(lookup: dict[str, Any]) -> str:
     source_texts = collect_category_source_texts(lookup)
     normalized_texts = [normalize_for_match(text) for text in source_texts if text]
+    allowed_categories = get_allowed_categories()
+
+    try:
+        mapper = get_default_category_mapper()
+        mapped = mapper.map_category(
+            product_type=as_text(pick_value(lookup, ["Produktart", "Category", "Type", "type"])),
+            title=as_text(pick_value(lookup, ["Artikelbeschreibung", "Title", "Titel", "TranslatedDescription"])),
+            brand=as_text(pick_value(lookup, ["Marke", "Brand"])),
+            room=as_text(pick_value(lookup, ["Zimmer", "Room"])),
+            style=as_text(pick_value(lookup, ["Stil", "Style"])),
+        )
+        if mapped:
+            return resolve_to_allowed_category(mapped, allowed_categories)
+    except Exception:
+        pass
 
     for text in normalized_texts:
         for keywords, category in OTTO_CATEGORY_RULES:
             if all(keyword in text for keyword in keywords):
-                return category if category in OTTO_ALLOWED_CATEGORIES else OTTO_FALLBACK_CATEGORY
+                return resolve_to_allowed_category(category, allowed_categories)
 
     for text in normalized_texts:
         if "set" in text:
@@ -345,13 +453,13 @@ def map_to_otto_category(lookup: dict[str, Any]) -> str:
                 token in text
                 for token in ("stuhl", "chair", "sessel", "sofa", "couch", "bench", "wohnzimmer")
             ):
-                return "Sitzmöbel-Sets"
+                return resolve_to_allowed_category("Sitzmöbel-Sets", allowed_categories)
             if any(token in text for token in ("schrank", "kommode", "sideboard", "wohnwand", "regal", "tv")):
-                return "Kastenmöbel-Sets"
+                return resolve_to_allowed_category("Kastenmöbel-Sets", allowed_categories)
             if any(token in text for token in ("desk", "schreibtisch", "office", "empfang")):
-                return "Arbeitsmöbel-Sets"
+                return resolve_to_allowed_category("Arbeitsmöbel-Sets", allowed_categories)
 
-    return OTTO_FALLBACK_CATEGORY
+    return resolve_to_allowed_category(OTTO_FALLBACK_CATEGORY, allowed_categories)
 
 
 def as_number(value: Any) -> float | None:
@@ -673,7 +781,7 @@ def build_product_line(lookup: dict[str, Any]) -> str | None:
     line = re.sub(r"\s+", " ", line).strip(" ,.;|-")
     if not line:
         return None
-    return sanitize_value(line, max_len=120)
+    return sanitize_value(line, max_len=70)
 
 
 def build_default_compliance() -> dict[str, Any]:
@@ -747,10 +855,8 @@ def build_bullets(lookup: dict[str, Any]) -> list[str]:
 
 
 def format_attribute_values(name: str, values: list[str]) -> list[str]:
-    if len(values) <= 1:
-        return values
-    label = ATTRIBUTE_LABEL_MAP.get(name, normalize_key(name) or "value")
-    return [f"{label}{idx}: {value}" for idx, value in enumerate(values, start=1)]
+    _ = name
+    return values
 
 
 def build_attributes(lookup: dict[str, Any], part_count: int) -> list[dict[str, Any]]:
@@ -768,6 +874,9 @@ def build_attributes(lookup: dict[str, Any], part_count: int) -> list[dict[str, 
 
         if name == "Grundfarbe" and not values:
             values = collect_alias_values(lookup, COLOR_ALIASES)
+
+        if name == "Geschlecht" and values:
+            values = values[:1]
 
         if name == "Hinweis Massangaben" and not values:
             has_dimensions = any(
