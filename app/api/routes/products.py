@@ -17,7 +17,7 @@ from app.schemas.product_query import (
     ProductListQuery,
     CategoryQuery,
 )
-from app.schemas.sortOrder import SortOrder
+from app.schemas.enums import SortOrderEnum
 from app.services.product_creation_service import ProductCreationService
 from app.services.product_service import ProductService
 
@@ -106,7 +106,7 @@ async def get_product_status(
     market_place_status: Optional[List[MarketPlaceStatus]] = Query(
         None, alias="marketPlaceStatus"
     ),
-    sort_order: SortOrder = Query(default=SortOrder.DESC, alias="sortOrder"),
+    sort_order: SortOrderEnum = Query(default=SortOrderEnum.DESC, alias="sortOrder"),
 ):
     payload = MarketplaceStatusQuery(
         sku=sku,

@@ -3,7 +3,7 @@ from typing import List, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.marketplaceStatus import MarketPlaceStatus
-from app.schemas.sortOrder import SortOrder
+from app.schemas.enums import SortOrderEnum
 
 
 def _normalize_category(payload: dict) -> dict:
@@ -43,7 +43,7 @@ class MarketplaceStatusQuery(BaseModel):
     market_place_status: Optional[List[MarketPlaceStatus]] = Field(
         default=None, alias="marketPlaceStatus"
     )
-    sort_order: SortOrder = Field(default=SortOrder.DESC, alias="sortOrder")
+    sort_order: SortOrderEnum = Field(default=SortOrderEnum.DESC, alias="sortOrder")
 
     def to_payload(self) -> dict:
         payload = self.model_dump(by_alias=True, exclude_none=True)

@@ -21,7 +21,7 @@ class ProductService:
 
     async def get_marketplace_status(self, payload: dict):
         return await self.client.get_marketplace_status(payload)
-
+    
     async def create_or_update_products(self, payload: list[dict[str, Any]]):
         return await self.client.create_or_update_products(payload)
     
