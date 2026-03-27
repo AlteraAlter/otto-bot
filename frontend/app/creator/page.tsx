@@ -4,6 +4,7 @@ import Link from "next/link";
 import { ChangeEvent, DragEvent, FormEvent, ReactNode, useMemo, useState } from "react";
 
 type UploadState = "idle" | "loading" | "success" | "error";
+type CreatorMode = "file" | "single";
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 type PathPart = string | number;
@@ -24,6 +25,38 @@ type CreationResponse = {
   issues?: CreationIssue[];
   request_bodies?: Record<string, unknown>[];
 };
+
+type SingleRow = {
+  id: string;
+  productReference: string;
+  sku: string;
+  ean: string;
+  moin: string;
+  category: string;
+  brandId: string;
+  productLine: string;
+  description: string;
+  bulletPoints: string;
+  price: string;
+  imageUrl: string;
+};
+
+function createEmptySingleRow(): SingleRow {
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    productReference: "",
+    sku: "",
+    ean: "",
+    moin: "",
+    category: "KOB Set-Artikel",
+    brandId: "JVmoebel",
+    productLine: "",
+    description: "",
+    bulletPoints: "",
+    price: "99.99",
+    imageUrl: "https://example.com/image.jpg"
+  };
+}
 
 function isJsonObject(value: JsonValue): value is { [key: string]: JsonValue } {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -121,16 +154,87 @@ function nodeMeta(value: JsonValue): string {
   return typeof value;
 }
 
+function splitBulletPoints(raw: string): string[] {
+  return raw
+    .split("|")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function rowToPreparedPayload(row: SingleRow): { payload: Record<string, unknown> | null; error?: string } {
+  if (!row.sku.trim()) return { payload: null, error: "SKU обязателен" };
+  if (!row.productReference.trim()) return { payload: null, error: "Product Reference обязателен" };
+  if (!row.category.trim()) return { payload: null, error: "Category обязателен" };
+  if (!row.brandId.trim()) return { payload: null, error: "Brand ID обязателен" };
+
+  const amount = Number(row.price);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { payload: null, error: "Цена должна быть положительным числом" };
+  }
+
+  const imageUrl = row.imageUrl.trim();
+  if (!/^https?:\/\//i.test(imageUrl)) {
+    return { payload: null, error: "Image URL должен начинаться с http:// или https://" };
+  }
+
+  const payload: Record<string, unknown> = {
+    productReference: row.productReference.trim(),
+    sku: row.sku.trim(),
+    ean: row.ean.trim() || undefined,
+    moin: row.moin.trim() || undefined,
+    productDescription: {
+      category: row.category.trim(),
+      brandId: row.brandId.trim(),
+      productLine: row.productLine.trim() || row.productReference.trim(),
+      multiPack: false,
+      bundle: false,
+      fscCertified: false,
+      disposal: false,
+      description: row.description.trim() || undefined,
+      bulletPoints: splitBulletPoints(row.bulletPoints),
+      attributes: []
+    },
+    mediaAssets: [
+      {
+        type: "IMAGE",
+        location: imageUrl
+      }
+    ],
+    pricing: {
+      standardPrice: {
+        amount,
+        currency: "EUR"
+      },
+      vat: "FULL"
+    },
+    logistics: {
+      packingUnitCount: 1,
+      packingUnits: [
+        {
+          weight: 1,
+          width: 1,
+          height: 1,
+          length: 1
+        }
+      ]
+    }
+  };
+
+  return { payload };
+}
+
 export default function CreatorPage() {
+  const [mode, setMode] = useState<CreatorMode>("file");
   const [file, setFile] = useState<File | null>(null);
   const [state, setState] = useState<UploadState>("idle");
   const [message, setMessage] = useState<string>(
-    "Загрузите JSON, подготовьте данные, при необходимости отредактируйте поля и отправьте на создание."
+    "Выберите режим создания: из JSON-файла или добавление товаров по одному."
   );
   const [issues, setIssues] = useState<CreationIssue[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [editorData, setEditorData] = useState<JsonValue[]>([]);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set(["$", "0"]));
+  const [singleRows, setSingleRows] = useState<SingleRow[]>([createEmptySingleRow()]);
 
   const fileLabel = useMemo(() => {
     if (!file) return "Файл не выбран";
@@ -139,12 +243,18 @@ export default function CreatorPage() {
 
   const currentJsonPreview = useMemo(() => {
     try {
-      return JSON.stringify(editorData, null, 2);
+      const source =
+        mode === "file"
+          ? editorData
+          : singleRows
+              .map((row) => rowToPreparedPayload(row).payload)
+              .filter((item): item is Record<string, unknown> => item !== null);
+      return JSON.stringify(source, null, 2);
     } catch (e) {
       console.error("Preview error", e);
       return "Не удалось показать JSON";
     }
-  }, [editorData]);
+  }, [editorData, mode, singleRows]);
 
   function pickFile(next: File | null) {
     if (!next) {
@@ -205,6 +315,7 @@ export default function CreatorPage() {
   }
 
   function updateLeaf(path: PathPart[], raw: string) {
+    if (mode !== "file") return;
     setEditorData((prev) => {
       const nextValue = cellToValue(raw);
       const normalized = nextValue === undefined ? "" : nextValue;
@@ -377,14 +488,109 @@ export default function CreatorPage() {
     }
   }
 
+  function updateSingleRow(id: string, field: keyof SingleRow, value: string) {
+    setSingleRows((prev) =>
+      prev.map((row) => (row.id === id ? { ...row, [field]: value } : row))
+    );
+  }
+
+  function addSingleRow() {
+    setSingleRows((prev) => [...prev, createEmptySingleRow()]);
+  }
+
+  function removeSingleRow(id: string) {
+    setSingleRows((prev) => {
+      const next = prev.filter((row) => row.id !== id);
+      return next.length > 0 ? next : [createEmptySingleRow()];
+    });
+  }
+
+  async function handleCreateSingleItems() {
+    const nonEmptyRows = singleRows.filter(
+      (row) =>
+        row.productReference.trim().length > 0 ||
+        row.sku.trim().length > 0 ||
+        row.productLine.trim().length > 0
+    );
+
+    if (nonEmptyRows.length === 0) {
+      setState("error");
+      setMessage("Заполните хотя бы одну строку таблицы.");
+      return;
+    }
+
+    const localIssues: CreationIssue[] = [];
+    const requestBodies: Record<string, unknown>[] = [];
+
+    nonEmptyRows.forEach((row, index) => {
+      const converted = rowToPreparedPayload(row);
+      if (!converted.payload) {
+        localIssues.push({
+          index,
+          stage: "validate",
+          message: converted.error ?? "Ошибка валидации строки"
+        });
+        return;
+      }
+      requestBodies.push(converted.payload);
+    });
+
+    if (localIssues.length > 0) {
+      setIssues(localIssues);
+      setState("error");
+      setMessage("Проверьте таблицу: есть ошибки в заполнении строк.");
+      return;
+    }
+
+    setState("loading");
+    setMessage("Создаем товары из таблицы...");
+    setIssues([]);
+
+    try {
+      const response = await fetch("/api/products/create-from-prepared", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ request_bodies: requestBodies }),
+        cache: "no-store"
+      });
+
+      const text = await response.text();
+      const parsed = (() => {
+        try {
+          return JSON.parse(text) as CreationResponse;
+        } catch {
+          return null;
+        }
+      })();
+
+      setIssues(Array.isArray(parsed?.issues) ? parsed.issues : []);
+
+      if (!response.ok) {
+        setState("error");
+        setMessage(parsed?.message ?? `Ошибка запроса (${response.status})`);
+        return;
+      }
+
+      setState("success");
+      setMessage(`Создано товаров: ${parsed?.created_items ?? 0} из ${requestBodies.length}.`);
+      setSingleRows([createEmptySingleRow()]);
+    } catch (error) {
+      setState("error");
+      const detail = error instanceof Error ? error.message : "Неизвестная ошибка";
+      setMessage(`Не удалось выполнить запрос: ${detail}`);
+    }
+  }
+
   return (
     <main className="creator-page">
       <section className="creator-card">
         <div className="creator-head">
           <div>
-            <h1>Создание товаров из JSON</h1>
+            <h1>Создание товаров</h1>
             <p>
-              Раскрывайте вложенные поля и редактируйте простые значения прямо в дереве.
+              Режимы разделены: из JSON-файла и добавление товаров по одному.
             </p>
           </div>
           <Link className="ghost-btn" href="/">
@@ -392,55 +598,179 @@ export default function CreatorPage() {
           </Link>
         </div>
 
-        <form className="creator-form" onSubmit={handleRunScript}>
-          <label
-            htmlFor="creator-file"
-            className={`dropzone ${isDragOver ? "drag-over" : ""}`}
-            onDrop={onDrop}
-            onDragOver={onDragOver}
-            onDragLeave={onDragLeave}
+        <div className="creator-mode-switch">
+          <button
+            type="button"
+            className={`mode-btn ${mode === "file" ? "active" : ""}`}
+            onClick={() => setMode("file")}
           >
-            <input
-              id="creator-file"
-              type="file"
-              accept="application/json,.json"
-              onChange={onInputChange}
-            />
-            <strong>Перетащите JSON-файл сюда</strong>
-            <span>или нажмите, чтобы выбрать файл</span>
-            <em>{fileLabel}</em>
-          </label>
-
-          <button className="primary-btn" type="submit" disabled={state === "loading"}>
-            {state === "loading" ? "Подготовка..." : "Подготовить данные"}
+            Из JSON-файла
           </button>
-        </form>
+          <button
+            type="button"
+            className={`mode-btn ${mode === "single" ? "active" : ""}`}
+            onClick={() => setMode("single")}
+          >
+            По одному
+          </button>
+        </div>
 
-        <section className="creator-editor">
-          <div className="creator-editor-head">
-            <h2>Редактор дерева</h2>
-            <button
-              className="primary-btn"
-              type="button"
-              onClick={handleSendToCreate}
-              disabled={state === "loading" || editorData.length === 0}
-            >
-              Отправить на создание
-            </button>
-          </div>
-          <p>Узлы-объекты и массивы раскрываются, простые значения можно редактировать.</p>
+        {mode === "file" ? (
+          <>
+            <form className="creator-form" onSubmit={handleRunScript}>
+              <label
+                htmlFor="creator-file"
+                className={`dropzone ${isDragOver ? "drag-over" : ""}`}
+                onDrop={onDrop}
+                onDragOver={onDragOver}
+                onDragLeave={onDragLeave}
+              >
+                <input
+                  id="creator-file"
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={onInputChange}
+                />
+                <strong>Перетащите JSON-файл сюда</strong>
+                <span>или нажмите, чтобы выбрать файл</span>
+                <em>{fileLabel}</em>
+              </label>
 
-          {editorData.length > 0 ? (
-            <div className="creator-tree-layout">
-              <div className="creator-tree-panel">{renderTreeNode(editorData, [], "request_bodies", 0)}</div>
+              <button className="primary-btn" type="submit" disabled={state === "loading"}>
+                {state === "loading" ? "Подготовка..." : "Подготовить данные"}
+              </button>
+            </form>
+
+            <section className="creator-editor">
+              <div className="creator-editor-head">
+                <h2>Редактор дерева</h2>
+                <button
+                  className="primary-btn"
+                  type="button"
+                  onClick={handleSendToCreate}
+                  disabled={state === "loading" || editorData.length === 0}
+                >
+                  Отправить на создание
+                </button>
+              </div>
+              <p>Узлы-объекты и массивы раскрываются, простые значения можно редактировать.</p>
+
+              {editorData.length > 0 ? (
+                <div className="creator-tree-layout">
+                  <div className="creator-tree-panel">{renderTreeNode(editorData, [], "request_bodies", 0)}</div>
+                </div>
+              ) : (
+                <div className="empty-state">Подготовьте данные, чтобы они появились в редакторе.</div>
+              )}
+
+              <h3>Итоговый JSON</h3>
+              <pre className="uploader-response creator-json-preview">{currentJsonPreview}</pre>
+            </section>
+          </>
+        ) : (
+          <section className="creator-editor">
+            <div className="creator-editor-head">
+              <h2>Табличное добавление товаров</h2>
+              <button
+                className="primary-btn"
+                type="button"
+                onClick={handleCreateSingleItems}
+                disabled={state === "loading"}
+              >
+                Создать из таблицы
+              </button>
             </div>
-          ) : (
-            <div className="empty-state">Подготовьте данные, чтобы они появились в редакторе.</div>
-          )}
+            <p>Заполняйте строки таблицы: одна строка = один товар.</p>
 
-          <h3>Итоговый JSON</h3>
-          <pre className="uploader-response creator-json-preview">{currentJsonPreview}</pre>
-        </section>
+            <div className="single-table-wrap">
+              <table className="single-create-table">
+                <thead>
+                  <tr>
+                    <th>Product Ref</th>
+                    <th>SKU</th>
+                    <th>EAN</th>
+                    <th>MOIN</th>
+                    <th>Category</th>
+                    <th>Brand ID</th>
+                    <th>Title</th>
+                    <th>Price EUR</th>
+                    <th>Image URL</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {singleRows.map((row) => (
+                    <tr key={row.id}>
+                      <td>
+                        <input value={row.productReference} onChange={(event) => updateSingleRow(row.id, "productReference", event.target.value)} />
+                      </td>
+                      <td>
+                        <input value={row.sku} onChange={(event) => updateSingleRow(row.id, "sku", event.target.value)} />
+                      </td>
+                      <td>
+                        <input value={row.ean} onChange={(event) => updateSingleRow(row.id, "ean", event.target.value)} />
+                      </td>
+                      <td>
+                        <input value={row.moin} onChange={(event) => updateSingleRow(row.id, "moin", event.target.value)} />
+                      </td>
+                      <td>
+                        <input value={row.category} onChange={(event) => updateSingleRow(row.id, "category", event.target.value)} />
+                      </td>
+                      <td>
+                        <input value={row.brandId} onChange={(event) => updateSingleRow(row.id, "brandId", event.target.value)} />
+                      </td>
+                      <td>
+                        <input value={row.productLine} onChange={(event) => updateSingleRow(row.id, "productLine", event.target.value)} />
+                      </td>
+                      <td>
+                        <input value={row.price} onChange={(event) => updateSingleRow(row.id, "price", event.target.value)} />
+                      </td>
+                      <td>
+                        <input value={row.imageUrl} onChange={(event) => updateSingleRow(row.id, "imageUrl", event.target.value)} />
+                      </td>
+                      <td>
+                        <button type="button" className="ghost-btn" onClick={() => removeSingleRow(row.id)}>
+                          Удалить
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="single-actions">
+              <button className="primary-btn" type="button" onClick={addSingleRow} disabled={state === "loading"}>
+                Добавить строку
+              </button>
+            </div>
+
+            <div className="single-extra-grid">
+              {singleRows.map((row) => (
+                <div key={`${row.id}-extra`} className="single-extra-card">
+                  <p>Доп. поля для SKU: {row.sku || "—"}</p>
+                  <input
+                    placeholder="Description"
+                    value={row.description}
+                    onChange={(event) => updateSingleRow(row.id, "description", event.target.value)}
+                  />
+                  <input
+                    placeholder="Bullet points через |"
+                    value={row.bulletPoints}
+                    onChange={(event) => updateSingleRow(row.id, "bulletPoints", event.target.value)}
+                  />
+                </div>
+              ))}
+            </div>
+
+            <h3>Итоговый JSON</h3>
+            <pre className="uploader-response creator-json-preview">{currentJsonPreview}</pre>
+
+            <div className="single-queue">
+              <h3>Строк в таблице: {singleRows.length}</h3>
+            </div>
+          </section>
+        )}
 
         <p className={`uploader-message ${state}`}>{message}</p>
 

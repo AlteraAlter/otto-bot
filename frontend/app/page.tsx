@@ -3,7 +3,14 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type ProductStatus = "active" | "draft" | "paused";
+type ProductStatus = "active" | "non_active";
+const BRAND_OPTIONS = ["JVmoebel", "XLmoebel"] as const;
+type ProductBrand = (typeof BRAND_OPTIONS)[number];
+type ProductAttribute = {
+  name: string;
+  values: string[];
+  additional: boolean;
+};
 
 type Product = {
   id: string;
@@ -13,12 +20,13 @@ type Product = {
   ean: string;
   moin: string;
   category: string;
-  brand: string;
+  brand: ProductBrand;
   brandId: string;
   price: number;
   stock: number;
   mediaCount: number;
   attributesCount: number;
+  attributes: ProductAttribute[];
   bulletPoints: string[];
   description: string;
   status: ProductStatus;
@@ -100,7 +108,7 @@ function statusFromText(value: string | undefined): ProductStatus | undefined {
     normalized.includes("inactive") ||
     normalized.includes("offline")
   ) {
-    return "paused";
+    return "non_active";
   }
   if (
     normalized.includes("active") ||
@@ -109,8 +117,21 @@ function statusFromText(value: string | undefined): ProductStatus | undefined {
   ) {
     return "active";
   }
-  if (normalized.includes("draft")) return "draft";
   return undefined;
+}
+
+function normalizeValuesCsv(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function normalizeBrand(value: string | undefined): ProductBrand {
+  if (!value) return "JVmoebel";
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "xlmoebel") return "XLmoebel";
+  return "JVmoebel";
 }
 
 function toDateLabel(input: unknown) {
@@ -130,8 +151,7 @@ function formatCurrency(value: number) {
 
 function statusLabel(status: ProductStatus) {
   if (status === "active") return "Активен";
-  if (status === "paused") return "Пауза";
-  return "Черновик";
+  return "Неактивен";
 }
 
 function comparableProductState(product: Product) {
@@ -147,7 +167,8 @@ function comparableProductState(product: Product) {
     price: product.price,
     stock: product.stock,
     description: product.description,
-    bulletPoints: product.bulletPoints
+    bulletPoints: product.bulletPoints,
+    attributes: product.attributes
   };
 }
 
@@ -164,18 +185,33 @@ function mapProduct(raw: unknown, index: number, statusBySku: Record<string, Pro
   const bulletPoints = Array.isArray(bulletPointsRaw)
     ? bulletPointsRaw.filter((item): item is string => typeof item === "string")
     : [];
-  const attributesCount = Array.isArray(attributesRaw) ? attributesRaw.length : 0;
+  const attributes = Array.isArray(attributesRaw)
+    ? attributesRaw
+        .map((item): ProductAttribute | null => {
+          if (!isObject(item)) return null;
+          const name = typeof item.name === "string" ? item.name : "";
+          const valuesRaw = item.values;
+          const values = Array.isArray(valuesRaw)
+            ? valuesRaw.filter((value): value is string => typeof value === "string")
+            : [];
+          const additional = typeof item.additional === "boolean" ? item.additional : false;
+          if (name.length === 0 && values.length === 0) return null;
+          return { name, values, additional };
+        })
+        .filter((item): item is ProductAttribute => item !== null)
+    : [];
+  const attributesCount = attributes.length;
   const mediaCount = Array.isArray(mediaAssetsRaw) ? mediaAssetsRaw.length : 0;
 
   const category = getString(raw, [["productDescription", "category"], ["category"]]) ?? "Без категории";
-  const brand = getString(raw, [["productDescription", "brand"]]) ?? "Без бренда";
+  const brand = normalizeBrand(getString(raw, [["productDescription", "brand"]]));
   const brandId = getString(raw, [["productDescription", "brandId"]]) ?? "-";
   const price = getNumber(raw, [["pricing", "standardPrice", "amount"], ["price", "amount"], ["price"]]) ?? 0;
   const stock =
     getNumber(raw, [["availability", "stockQuantity"], ["stock"], ["inventory"], ["quantity"], ["order", "maxOrderQuantity", "quantity"]]) ?? 0;
 
   const rawStatus =
-    statusFromText(getString(raw, [["marketPlaceStatus"], ["status"], ["activeStatus"]])) ?? "draft";
+    statusFromText(getString(raw, [["marketPlaceStatus"], ["status"], ["activeStatus"]])) ?? "non_active";
 
   const mappedStatus = sku ? statusBySku[sku] ?? rawStatus : rawStatus;
 
@@ -193,6 +229,7 @@ function mapProduct(raw: unknown, index: number, statusBySku: Record<string, Pro
     stock,
     mediaCount,
     attributesCount,
+    attributes,
     bulletPoints,
     description: getString(raw, [["productDescription", "description"]]) ?? "",
     status: mappedStatus,
@@ -213,7 +250,7 @@ function mapStatusBySku(payload: unknown): Record<string, ProductStatus> {
 
     const boolFlag = readPath(item, ["active"]);
     if (typeof boolFlag === "boolean") {
-      map[sku] = boolFlag ? "active" : "paused";
+      map[sku] = boolFlag ? "active" : "non_active";
       continue;
     }
 
@@ -269,7 +306,8 @@ function asCreatePayload(detail: JsonObject, product: Product): JsonObject | nul
       brandId: product.brandId,
       productLine: product.name,
       description: product.description,
-      bulletPoints: product.bulletPoints
+      bulletPoints: product.bulletPoints,
+      attributes: product.attributes
     },
     mediaAssets,
     order: isObject(readPath(detail, ["order"])) ? readPath(detail, ["order"]) : undefined,
@@ -296,6 +334,7 @@ export default function Home() {
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isApplying, setIsApplying] = useState(false);
+  const [isSyncingDb, setIsSyncingDb] = useState(false);
   const [isSkuSearching, setIsSkuSearching] = useState(false);
   const [skuSearchResults, setSkuSearchResults] = useState<Product[] | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -498,6 +537,66 @@ export default function Home() {
     );
   }
 
+  function updateBulletPoint(index: number, value: string) {
+    if (!selectedProduct) return;
+    const nextBulletPoints = selectedProduct.bulletPoints.map((item, itemIndex) =>
+      itemIndex === index ? value : item
+    );
+    updateSelected("bulletPoints", nextBulletPoints);
+  }
+
+  function addBulletPoint() {
+    if (!selectedProduct) return;
+    updateSelected("bulletPoints", [...selectedProduct.bulletPoints, ""]);
+  }
+
+  function removeBulletPoint(index: number) {
+    if (!selectedProduct) return;
+    const nextBulletPoints = selectedProduct.bulletPoints.filter((_, itemIndex) => itemIndex !== index);
+    updateSelected("bulletPoints", nextBulletPoints);
+  }
+
+  function updateAttributeName(index: number, value: string) {
+    if (!selectedProduct) return;
+    const nextAttributes = selectedProduct.attributes.map((item, itemIndex) =>
+      itemIndex === index ? { ...item, name: value } : item
+    );
+    updateSelected("attributes", nextAttributes);
+    updateSelected("attributesCount", nextAttributes.length);
+  }
+
+  function updateAttributeValues(index: number, value: string) {
+    if (!selectedProduct) return;
+    const nextAttributes = selectedProduct.attributes.map((item, itemIndex) =>
+      itemIndex === index ? { ...item, values: normalizeValuesCsv(value) } : item
+    );
+    updateSelected("attributes", nextAttributes);
+    updateSelected("attributesCount", nextAttributes.length);
+  }
+
+  function updateAttributeAdditional(index: number, value: boolean) {
+    if (!selectedProduct) return;
+    const nextAttributes = selectedProduct.attributes.map((item, itemIndex) =>
+      itemIndex === index ? { ...item, additional: value } : item
+    );
+    updateSelected("attributes", nextAttributes);
+    updateSelected("attributesCount", nextAttributes.length);
+  }
+
+  function addAttribute() {
+    if (!selectedProduct) return;
+    const nextAttributes = [...selectedProduct.attributes, { name: "", values: [], additional: false }];
+    updateSelected("attributes", nextAttributes);
+    updateSelected("attributesCount", nextAttributes.length);
+  }
+
+  function removeAttribute(index: number) {
+    if (!selectedProduct) return;
+    const nextAttributes = selectedProduct.attributes.filter((_, itemIndex) => itemIndex !== index);
+    updateSelected("attributes", nextAttributes);
+    updateSelected("attributesCount", nextAttributes.length);
+  }
+
   async function saveChanges() {
     if (!selectedProduct || !originalSelectedProduct) return;
 
@@ -561,9 +660,6 @@ export default function Home() {
 
       if (hasStatusChanges) {
         const targetStatus = selectedProduct.status;
-        if (targetStatus !== "active" && targetStatus !== "paused") {
-          throw new Error("Статус 'draft' не поддерживается endpoint /v1/products/update-status");
-        }
 
         requests.push(
           (async () => {
@@ -625,6 +721,38 @@ export default function Home() {
     setNotice("Удаление пока недоступно: в backend нет DELETE /v1/products/{sku}");
   }
 
+  async function syncProductsToDatabase() {
+    setIsSyncingDb(true);
+    setNotice("Синхронизация с БД запущена (аккаунт JV)...");
+
+    try {
+      const response = await fetch("/api/products/sync-to-db?accountSource=JV&limit=100&maxPages=5", {
+        method: "POST",
+        cache: "no-store"
+      });
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(
+          isObject(payload) && typeof payload.detail === "string"
+            ? payload.detail
+            : `Ошибка синхронизации (${response.status})`
+        );
+      }
+
+      const fetched = isObject(payload) && typeof payload.fetched === "number" ? payload.fetched : 0;
+      const upserted = isObject(payload) && typeof payload.upserted === "number" ? payload.upserted : 0;
+      const accountSource =
+        isObject(payload) && typeof payload.accountSource === "string" ? payload.accountSource : "JV";
+      setNotice(`Синхронизация завершена: account=${accountSource}, fetched=${fetched}, upserted=${upserted}.`);
+      await loadProducts();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Не удалось синхронизировать данные с БД";
+      setNotice(message);
+    } finally {
+      setIsSyncingDb(false);
+    }
+  }
+
   return (
     <main className="otto-page">
       <div className="ambient ambient-left" />
@@ -660,6 +788,9 @@ export default function Home() {
               <h1>Управление товарами</h1>
               <p>Одна кнопка применяет изменения: карточка и статус обновляются параллельно при необходимости</p>
             </div>
+            <button className="primary-btn" onClick={syncProductsToDatabase} disabled={isSyncingDb || isLoading}>
+              {isSyncingDb ? "Синхронизация с БД..." : "Синхронизировать с БД (JV)"}
+            </button>
           </header>
 
           {notice ? <p className="helper-banner">{notice}</p> : null}
@@ -698,8 +829,7 @@ export default function Home() {
                 >
                   <option value="all">Все статусы</option>
                   <option value="active">Активные</option>
-                  <option value="paused">Пауза</option>
-                  <option value="draft">Черновики</option>
+                  <option value="non_active">Неактивные</option>
                 </select>
                 <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
                   <option value="all">Все категории</option>
@@ -784,10 +914,16 @@ export default function Home() {
                     </label>
                     <label>
                       Бренд
-                      <input
+                      <select
                         value={selectedProduct.brand}
-                        onChange={(event) => updateSelected("brand", event.target.value)}
-                      />
+                        onChange={(event) => updateSelected("brand", event.target.value as ProductBrand)}
+                      >
+                        {BRAND_OPTIONS.map((brand) => (
+                          <option key={brand} value={brand}>
+                            {brand}
+                          </option>
+                        ))}
+                      </select>
                     </label>
                     <label>
                       ID бренда
@@ -810,10 +946,9 @@ export default function Home() {
                         onChange={(event) => updateSelected("status", event.target.value as ProductStatus)}
                       >
                         <option value="active">Активен</option>
-                        <option value="paused">Пауза</option>
-                        <option value="draft">Черновик</option>
+                        <option value="non_active">Неактивен</option>
                       </select>
-                      <small className="field-note">В запрос статуса отправляются только «Активен» и «Пауза»</small>
+                      <small className="field-note">В запрос статуса отправляются только «Активен» и «Неактивен»</small>
                     </label>
                     <label>
                       EAN
@@ -872,6 +1007,61 @@ export default function Home() {
                         <span key={`${point}-${index}`}>{point}</span>
                       ))}
                     </div>
+                  </div>
+
+                  <div className="product-detail-card">
+                    <p className="detail-title">Bullet points</p>
+                    <div className="dynamic-editor">
+                      {selectedProduct.bulletPoints.map((point, index) => (
+                        <div className="dynamic-editor-row" key={`bullet-${index}`}>
+                          <input
+                            value={point}
+                            onChange={(event) => updateBulletPoint(index, event.target.value)}
+                            placeholder={`Bullet point ${index + 1}`}
+                          />
+                          <button type="button" className="ghost-btn" onClick={() => removeBulletPoint(index)}>
+                            Удалить
+                          </button>
+                        </div>
+                      ))}
+                      <button type="button" className="ghost-btn" onClick={addBulletPoint}>
+                        Добавить bullet point
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="product-detail-card">
+                    <p className="detail-title">Attributes</p>
+                    <div className="dynamic-editor">
+                      {selectedProduct.attributes.map((attribute, index) => (
+                        <div className="dynamic-editor-row attribute-row" key={`attribute-${index}`}>
+                          <input
+                            value={attribute.name}
+                            onChange={(event) => updateAttributeName(index, event.target.value)}
+                            placeholder="Название атрибута"
+                          />
+                          <input
+                            value={attribute.values.join(", ")}
+                            onChange={(event) => updateAttributeValues(index, event.target.value)}
+                            placeholder="Значения через запятую"
+                          />
+                          <select
+                            value={attribute.additional ? "true" : "false"}
+                            onChange={(event) => updateAttributeAdditional(index, event.target.value === "true")}
+                          >
+                            <option value="false">Основной</option>
+                            <option value="true">Дополнительный</option>
+                          </select>
+                          <button type="button" className="ghost-btn" onClick={() => removeAttribute(index)}>
+                            Удалить
+                          </button>
+                        </div>
+                      ))}
+                      <button type="button" className="ghost-btn" onClick={addAttribute}>
+                        Добавить атрибут
+                      </button>
+                    </div>
+                    <small className="field-note">Значения атрибута вводите через запятую</small>
                   </div>
 
                   <div className="editor-analytics">

@@ -6,7 +6,7 @@ from app.database import Base
 
 class ProductAttributes(Base):
 
-    __tablename__ = "product descriptions"
+    __tablename__ = "product_descriptions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     product_sku: Mapped[str] = mapped_column(String, ForeignKey("products.sku"))

@@ -372,6 +372,33 @@ select {
   gap: 12px;
 }
 
+.creator-mode-switch {
+  margin-top: 14px;
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 4px;
+  border: 1px solid #d2dcd6;
+  border-radius: 12px;
+  background: #f5f9f6;
+}
+
+.mode-btn {
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-weight: 700;
+  color: #274236;
+  cursor: pointer;
+}
+
+.mode-btn.active {
+  border-color: #d5dcd8;
+  background: #fff;
+  color: #183226;
+}
+
 .creator-form label {
   display: grid;
   gap: 6px;
@@ -574,6 +601,146 @@ select {
 
 .creator-json-preview {
   margin-top: 8px;
+}
+
+.single-create-block {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.single-table-wrap {
+  margin-top: 10px;
+  border: 1px solid #d3ddd7;
+  border-radius: 10px;
+  background: #fff;
+  overflow: auto;
+}
+
+.single-create-table {
+  width: 100%;
+  min-width: 1180px;
+  border-collapse: collapse;
+}
+
+.single-create-table th,
+.single-create-table td {
+  border-bottom: 1px solid #edf2ee;
+  padding: 8px;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.single-create-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f3f7f4;
+  color: #395447;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.single-create-table td input {
+  width: 100%;
+  min-width: 120px;
+  border: 1px solid #c8d3cd;
+  border-radius: 8px;
+  background: #fff;
+  height: 34px;
+  padding: 0 9px;
+  color: var(--ink);
+}
+
+.single-create-table td input:focus {
+  outline: 2px solid #ecbcbe;
+  border-color: #da9fa3;
+}
+
+.single-json-input {
+  width: 100%;
+  min-height: 200px;
+  border: 1px solid #c8d3cd;
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px 12px;
+  color: var(--ink);
+  font: inherit;
+  resize: vertical;
+}
+
+.single-json-input:focus {
+  outline: 2px solid #ecbcbe;
+  border-color: #da9fa3;
+}
+
+.single-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+}
+
+.single-queue {
+  margin-top: 10px;
+}
+
+.single-queue h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.single-queue-list {
+  display: grid;
+  gap: 8px;
+}
+
+.single-queue-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid #d3ddd7;
+  border-radius: 10px;
+  background: #fff;
+  padding: 8px 10px;
+}
+
+.single-extra-grid {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.single-extra-card {
+  border: 1px solid #d3ddd7;
+  border-radius: 10px;
+  background: #fff;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.single-extra-card p {
+  margin: 0;
+  color: #395447;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.single-extra-card input {
+  width: 100%;
+  border: 1px solid #c8d3cd;
+  border-radius: 8px;
+  background: #fff;
+  height: 34px;
+  padding: 0 9px;
+  color: var(--ink);
+}
+
+.single-extra-card input:focus {
+  outline: 2px solid #ecbcbe;
+  border-color: #da9fa3;
 }
 
 .content-grid {
@@ -847,6 +1014,55 @@ select {
   color: #40584c;
 }
 
+.dynamic-editor {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.dynamic-editor-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.dynamic-editor-row input,
+.dynamic-editor-row select {
+  width: 100%;
+  border: 1px solid #c8d3cd;
+  background: #fff;
+  border-radius: 10px;
+  height: 38px;
+  padding: 0 11px;
+  color: var(--ink);
+}
+
+.dynamic-editor-row input:focus,
+.dynamic-editor-row select:focus {
+  outline: 2px solid #ecbcbe;
+  border-color: #da9fa3;
+}
+
+.attribute-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+}
+
+.attribute-row > :nth-child(3) {
+  grid-column: 1 / 2;
+}
+
+.attribute-row > :nth-child(4) {
+  grid-column: 2 / 3;
+  justify-self: end;
+}
+
+.attribute-row .ghost-btn {
+  min-width: 0;
+  white-space: nowrap;
+}
+
 .editor-analytics {
   margin-top: 10px;
   margin-bottom: 10px;
@@ -992,6 +1208,19 @@ select {
   .editor-grid,
   .editor-analytics {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .attribute-row {
+    grid-template-columns: 1fr;
+  }
+
+  .attribute-row > :nth-child(3),
+  .attribute-row > :nth-child(4) {
+    grid-column: 1 / -1;
+  }
+
+  .attribute-row > :nth-child(4) {
+    justify-self: stretch;
   }
 
   .creator-editor-head {

@@ -2,8 +2,10 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
 from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_product_creation_service, get_product_service
+from app.database import get_db
 from app.schemas.marketplaceStatus import MarketPlaceStatus
 from app.schemas.product_creation import (
     ProductCreationErrorResponse,
@@ -20,6 +22,7 @@ from app.schemas.product_query import (
 from app.schemas.enums import SortOrderEnum
 from app.services.product_creation_service import ProductCreationService
 from app.services.product_service import ProductService
+from app.services.product_sync_service import ProductSyncService
 
 router = APIRouter(prefix="/v1/products", tags=["Products"])
 
@@ -148,6 +151,22 @@ async def get_product(
     product_service: ProductService = Depends(get_product_service),
 ):
     return await product_service.get_product(sku)
+
+
+@router.post("/sync-to-db")
+async def sync_products_to_db(
+    product_service: ProductService = Depends(get_product_service),
+    db: AsyncSession = Depends(get_db),
+    account_source: str = Query(default="JV", alias="accountSource", min_length=2, max_length=20),
+    limit: int = Query(default=100, ge=10, le=100),
+    max_pages: int = Query(default=3, alias="maxPages", ge=1, le=100),
+):
+    sync_service = ProductSyncService(product_service=product_service, db=db)
+    return await sync_service.sync_products(
+        account_source=account_source.upper(),
+        limit=limit,
+        max_pages=max_pages,
+    )
 
 
 # <======= POST METHOD =======>

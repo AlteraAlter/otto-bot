@@ -1,26 +1,29 @@
-from enum import unique
-
-from sqlalchemy import String, Integer
+from sqlalchemy import String, Integer, Float, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy import Enum
+from typing import Optional
 
 from app.database import Base
 from app.schemas.enums import VatEnum
-
+w
 
 class Product(Base):
 
     __tablename__ = "products"
+    __table_args__ = (
+        UniqueConstraint("sku", "account_source", name="uq_products_sku_account"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    sku: Mapped[str] = mapped_column(String, unique=True, nullable=False)
-    ean: Mapped[str] = mapped_column(String)
-    pricing: Mapped[int] = mapped_column(Integer)
+    sku: Mapped[str] = mapped_column(String, nullable=False)
+    account_source: Mapped[str] = mapped_column(String(20), nullable=False, default="JV")
+    ean: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    pricing: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     vat: Mapped[VatEnum] = mapped_column(Enum(VatEnum, name="vat_enum"), nullable=False)
-    productReference: Mapped[int] = mapped_column(Integer)
-    brand_id: Mapped[str] = mapped_column(String)
-    category: Mapped[str] = mapped_column(String)
-    productLine: Mapped[str] = mapped_column(String)
-    description: Mapped[str] = mapped_column(String)
-    bullet_points: Mapped[list[str]] = mapped_column(ARRAY(String))
+    productReference: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    brand_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    productLine: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    bullet_points: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False, default=list)
