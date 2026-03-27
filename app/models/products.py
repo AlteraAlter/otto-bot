@@ -6,18 +6,18 @@ from typing import Optional
 
 from app.database import Base
 from app.schemas.enums import VatEnum
-w
+
 
 class Product(Base):
 
     __tablename__ = "products"
     __table_args__ = (
-        UniqueConstraint("sku", "account_source", name="uq_products_sku_account"),
+        UniqueConstraint("sku", name="uq_sku"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    sku: Mapped[str] = mapped_column(String, nullable=False)
-    account_source: Mapped[str] = mapped_column(String(20), nullable=False, default="JV")
+    sku: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    account_source: Mapped[str] = mapped_column(String(20), nullable=False)
     ean: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     pricing: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     vat: Mapped[VatEnum] = mapped_column(Enum(VatEnum, name="vat_enum"), nullable=False)

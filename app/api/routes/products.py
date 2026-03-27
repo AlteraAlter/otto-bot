@@ -2,10 +2,13 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
 from fastapi.responses import JSONResponse
+from sqlalchemy import asc, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_product_creation_service, get_product_service
 from app.database import get_db
+from app.models.product_attriutes import ProductAttributes
+from app.models.products import Product
 from app.schemas.marketplaceStatus import MarketPlaceStatus
 from app.schemas.product_creation import (
     ProductCreationErrorResponse,
@@ -25,6 +28,69 @@ from app.services.product_service import ProductService
 from app.services.product_sync_service import ProductSyncService
 
 router = APIRouter(prefix="/v1/products", tags=["Products"])
+
+
+def _group_attributes_by_sku(rows: list[ProductAttributes]) -> dict[str, list[dict]]:
+    grouped: dict[str, dict[str, list[str]]] = {}
+    for row in rows:
+        sku = row.product_sku
+        name = row.name
+        value = row.value
+        if not sku or not name or not value:
+            continue
+
+        sku_bucket = grouped.setdefault(sku, {})
+        values = sku_bucket.setdefault(name, [])
+        if value not in values:
+            values.append(value)
+
+    return {
+        sku: [
+            {
+                "name": name,
+                "values": values,
+                "additional": False,
+            }
+            for name, values in attrs.items()
+        ]
+        for sku, attrs in grouped.items()
+    }
+
+
+def _product_to_dict(product: Product, attributes: list[dict] | None = None) -> dict:
+    attrs = attributes or []
+    vat_value = product.vat.value if hasattr(product.vat, "value") else str(product.vat)
+    return {
+        "id": product.id,
+        "sku": product.sku,
+        "accountSource": product.account_source,
+        "ean": product.ean,
+        "pricing": {
+            "standardPrice": {
+                "amount": product.pricing,
+                "currency": "EUR",
+            },
+            "vat": vat_value,
+        },
+        "price": product.pricing,
+        "vat": vat_value,
+        "productReference": product.productReference,
+        "brandId": product.brand_id,
+        "category": product.category,
+        "productLine": product.productLine,
+        "description": product.description,
+        "bulletPoints": product.bullet_points,
+        "productDescription": {
+            "brandId": product.brand_id,
+            "category": product.category,
+            "productLine": product.productLine,
+            "description": product.description,
+            "bulletPoints": product.bullet_points,
+            "attributes": attrs,
+        },
+        "mediaAssets": [],
+        "attributes": attrs,
+    }
 
 
 def _product_list_payload(
@@ -48,23 +114,89 @@ def _product_list_payload(
 
 @router.get("")
 async def get_products(
-    product_service: ProductService = Depends(get_product_service),
+    db: AsyncSession = Depends(get_db),
     product_reference: Optional[str] = Query(None, alias="productReference"),
     page: int = Query(0, ge=0),
     sku: Optional[str] = Query(None),
-    limit: int = Query(100, ge=10, le=100),
+    limit: int = Query(30, ge=10, le=1000),
     category: Optional[str] = Query(None),
     brand_id: Optional[str] = Query(None, alias="brandId"),
+    account_source: Optional[str] = Query(None, alias="accountSource"),
+    search: Optional[str] = Query(None),
+    sort_by: str = Query("id", alias="sortBy"),
+    sort_order: SortOrderEnum = Query(default=SortOrderEnum.DESC, alias="sortOrder"),
 ):
-    payload = _product_list_payload(
-        product_reference=product_reference,
-        page=page,
-        sku=sku,
-        limit=limit,
-        category=category,
-        brand_id=brand_id,
+    sort_columns = {
+        "id": Product.id,
+        "sku": Product.sku,
+        "productReference": Product.productReference,
+        "productLine": Product.productLine,
+        "category": Product.category,
+        "brandId": Product.brand_id,
+        "ean": Product.ean,
+        "price": Product.pricing,
+    }
+    sort_column = sort_columns.get(sort_by, Product.id)
+    sorter = asc if sort_order == SortOrderEnum.ASC else desc
+
+    filters = []
+    if sku:
+        filters.append(Product.sku == sku)
+    if product_reference:
+        filters.append(Product.productReference == product_reference)
+    if category:
+        filters.append(Product.category == category)
+    if brand_id:
+        filters.append(Product.brand_id == brand_id)
+    if account_source:
+        filters.append(func.upper(Product.account_source) == account_source.upper())
+    if search:
+        term = search.strip()
+        if term:
+            pattern = f"%{term}%"
+            filters.append(
+                or_(
+                    Product.sku.ilike(pattern),
+                    Product.productReference.ilike(pattern),
+                    Product.productLine.ilike(pattern),
+                    Product.ean.ilike(pattern),
+                    Product.category.ilike(pattern),
+                    Product.brand_id.ilike(pattern),
+                    Product.description.ilike(pattern),
+                )
+            )
+
+    count_stmt = select(func.count()).select_from(Product)
+    if filters:
+        count_stmt = count_stmt.where(*filters)
+    total = await db.scalar(count_stmt)
+
+    stmt = (
+        select(Product)
+        .order_by(sorter(sort_column), sorter(Product.id))
+        .offset(page * limit)
+        .limit(limit)
     )
-    return await product_service.get_products(payload)
+    if filters:
+        stmt = stmt.where(*filters)
+
+    result = await db.execute(stmt)
+    items = result.scalars().all()
+
+    attrs_by_sku: dict[str, list[dict]] = {}
+    skus = [item.sku for item in items if item.sku]
+    if skus:
+        attrs_result = await db.execute(
+            select(ProductAttributes).where(ProductAttributes.product_sku.in_(skus))
+        )
+        attrs_by_sku = _group_attributes_by_sku(attrs_result.scalars().all())
+
+    return {
+        "items": [_product_to_dict(item, attrs_by_sku.get(item.sku, [])) for item in items],
+        "page": page,
+        "limit": limit,
+        "total": total or 0,
+    }
 
 
 @router.get("/active")
@@ -73,7 +205,7 @@ async def get_active_products(
     product_reference: Optional[str] = Query(None, alias="productReference"),
     page: int = Query(0, ge=0),
     sku: Optional[str] = Query(None),
-    limit: int = Query(100, ge=10, le=100),
+    limit: int = Query(30, ge=10, le=1000),
     category: Optional[str] = Query(None),
     brand_id: Optional[str] = Query(None, alias="brandId"),
 ):
@@ -140,17 +272,53 @@ async def get_categories(
 @router.get("/status/{sku}")
 async def get_product_by_status_path(
     sku: str,
-    product_service: ProductService = Depends(get_product_service),
+    db: AsyncSession = Depends(get_db),
+    account_source: Optional[str] = Query(None, alias="accountSource"),
 ):
-    return await product_service.get_product(sku)
+    stmt = select(Product).where(Product.sku == sku)
+    if account_source:
+        stmt = stmt.where(func.upper(Product.account_source) == account_source.upper())
+    stmt = stmt.order_by(Product.id.desc())
+
+    result = await db.execute(stmt)
+    product = result.scalars().first()
+    if not product:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"message": f"Product with sku '{sku}' not found in DB"},
+        )
+
+    attrs_result = await db.execute(
+        select(ProductAttributes).where(ProductAttributes.product_sku == product.sku)
+    )
+    attrs_by_sku = _group_attributes_by_sku(attrs_result.scalars().all())
+    return _product_to_dict(product, attrs_by_sku.get(product.sku, []))
 
 
 @router.get("/{sku}")
 async def get_product(
     sku: str,
-    product_service: ProductService = Depends(get_product_service),
+    db: AsyncSession = Depends(get_db),
+    account_source: Optional[str] = Query(None, alias="accountSource"),
 ):
-    return await product_service.get_product(sku)
+    stmt = select(Product).where(Product.sku == sku)
+    if account_source:
+        stmt = stmt.where(func.upper(Product.account_source) == account_source.upper())
+    stmt = stmt.order_by(Product.id.desc())
+
+    result = await db.execute(stmt)
+    product = result.scalars().first()
+    if not product:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"message": f"Product with sku '{sku}' not found in DB"},
+        )
+
+    attrs_result = await db.execute(
+        select(ProductAttributes).where(ProductAttributes.product_sku == product.sku)
+    )
+    attrs_by_sku = _group_attributes_by_sku(attrs_result.scalars().all())
+    return _product_to_dict(product, attrs_by_sku.get(product.sku, []))
 
 
 @router.post("/sync-to-db")
@@ -159,7 +327,7 @@ async def sync_products_to_db(
     db: AsyncSession = Depends(get_db),
     account_source: str = Query(default="JV", alias="accountSource", min_length=2, max_length=20),
     limit: int = Query(default=100, ge=10, le=100),
-    max_pages: int = Query(default=3, alias="maxPages", ge=1, le=100),
+    max_pages: Optional[int] = Query(default=None, alias="maxPages", ge=1, le=10000),
 ):
     sync_service = ProductSyncService(product_service=product_service, db=db)
     return await sync_service.sync_products(

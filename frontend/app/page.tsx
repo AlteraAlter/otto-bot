@@ -35,13 +35,17 @@ type Product = {
   views: number;
   updatedAt: string;
 };
-
-type Activity = {
-  id: string;
-  productId: string;
-  message: string;
-  time: string;
-};
+type SortByField =
+  | "id"
+  | "productLine"
+  | "sku"
+  | "productReference"
+  | "category"
+  | "brandId"
+  | "ean"
+  | "price";
+type SortOrder = "ASC" | "DESC";
+type BulkPriceOperation = "delta" | "percent" | "set";
 
 type JsonObject = Record<string, unknown>;
 
@@ -154,6 +158,45 @@ function statusLabel(status: ProductStatus) {
   return "Неактивен";
 }
 
+function parseBulkPriceExpression(
+  rawExpression: string
+): { operation: BulkPriceOperation; value: number } | null {
+  const expression = rawExpression.trim();
+  if (expression.length === 0) return null;
+
+  if (expression.endsWith("%")) {
+    const percentValue = Number(expression.slice(0, -1).trim());
+    if (!Number.isFinite(percentValue)) return null;
+    return { operation: "percent", value: percentValue };
+  }
+
+  if (expression.startsWith("=")) {
+    const absoluteValue = Number(expression.slice(1).trim());
+    if (!Number.isFinite(absoluteValue)) return null;
+    return { operation: "set", value: absoluteValue };
+  }
+
+  const deltaValue = Number(expression);
+  if (!Number.isFinite(deltaValue)) return null;
+  return { operation: "delta", value: deltaValue };
+}
+
+function applyPriceOperation(
+  currentPrice: number,
+  operation: BulkPriceOperation,
+  value: number
+): number {
+  let nextPrice = currentPrice;
+  if (operation === "percent") {
+    nextPrice = currentPrice * (1 + value / 100);
+  } else if (operation === "set") {
+    nextPrice = value;
+  } else {
+    nextPrice = currentPrice + value;
+  }
+  return Math.max(0, Number(nextPrice.toFixed(2)));
+}
+
 function comparableProductState(product: Product) {
   return {
     productReference: product.productReference,
@@ -240,44 +283,6 @@ function mapProduct(raw: unknown, index: number, statusBySku: Record<string, Pro
   };
 }
 
-function mapStatusBySku(payload: unknown): Record<string, ProductStatus> {
-  const map: Record<string, ProductStatus> = {};
-  for (const item of extractCollection(payload)) {
-    if (!isObject(item)) continue;
-
-    const sku = getString(item, [["sku"], ["productSku"]]);
-    if (!sku) continue;
-
-    const boolFlag = readPath(item, ["active"]);
-    if (typeof boolFlag === "boolean") {
-      map[sku] = boolFlag ? "active" : "non_active";
-      continue;
-    }
-
-    const fromString = statusFromText(getString(item, [["status"], ["marketPlaceStatus"], ["activeStatus"]]));
-    if (fromString) map[sku] = fromString;
-  }
-  return map;
-}
-
-function mapActivity(payload: unknown): Activity[] {
-  return extractCollection(payload)
-    .map((item, index) => {
-      if (!isObject(item)) return null;
-      const sku = getString(item, [["sku"], ["productSku"]]);
-      const message =
-        getString(item, [["reason"], ["message"], ["status"], ["marketPlaceStatus"]]) ?? "Изменение статуса товара";
-
-      return {
-        id: `act-${index}-${sku ?? "unknown"}`,
-        productId: sku ?? "unknown",
-        message,
-        time: toDateLabel(readPath(item, ["changedAt"]) ?? readPath(item, ["updatedAt"]) ?? readPath(item, ["fromDate"]))
-      };
-    })
-    .filter((item): item is Activity => item !== null);
-}
-
 function asCreatePayload(detail: JsonObject, product: Product): JsonObject | null {
   const productDescription = readPath(detail, ["productDescription"]);
   const mediaAssets = readPath(detail, ["mediaAssets"]);
@@ -324,32 +329,39 @@ function asCreatePayload(detail: JsonObject, product: Product): JsonObject | nul
 }
 
 export default function Home() {
+  const TABLE_PAGE_SIZE = 30;
+  const PREFETCH_BATCH_SIZE = 1000;
+  const SEARCH_PAGE_SIZE = 100;
+  const SEARCH_DEBOUNCE_MS = 350;
+
   const [products, setProducts] = useState<Product[]>([]);
   const [detailsBySku, setDetailsBySku] = useState<Record<string, JsonObject>>({});
-  const [activity, setActivity] = useState<Activity[]>([]);
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [sortBy, setSortBy] = useState<SortByField>("id");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("DESC");
   const [statusFilter, setStatusFilter] = useState<"all" | ProductStatus>("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
+  const [multiSelectedIds, setMultiSelectedIds] = useState<string[]>([]);
+  const [bulkPriceExpression, setBulkPriceExpression] = useState("");
   const [selectedId, setSelectedId] = useState("");
   const [isDetailOpen, setIsDetailOpen] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
+  const [isBulkSaving, setIsBulkSaving] = useState(false);
   const [isSyncingDb, setIsSyncingDb] = useState(false);
-  const [isSkuSearching, setIsSkuSearching] = useState(false);
-  const [skuSearchResults, setSkuSearchResults] = useState<Product[] | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [tablePage, setTablePage] = useState(1);
+  const [dbTotal, setDbTotal] = useState(0);
+  const [loadedCount, setLoadedCount] = useState(0);
   const statusCacheRef = useRef<Record<string, ProductStatus>>({});
+  const loadedChunkIndexesRef = useRef<Set<number>>(new Set());
+  const isChunkLoadingRef = useRef(false);
   const [originalById, setOriginalById] = useState<Record<string, Product>>({});
 
-  const allKnownProducts = useMemo(() => {
-    const map = new Map<string, Product>();
-    for (const item of products) map.set(item.id, item);
-    for (const item of skuSearchResults ?? []) map.set(item.id, item);
-    return Array.from(map.values());
-  }, [products, skuSearchResults]);
-
-  const selectedProduct = allKnownProducts.find((product) => product.id === selectedId) ?? null;
+  const selectedProduct = products.find((product) => product.id === selectedId) ?? null;
   const originalSelectedProduct = selectedProduct ? originalById[selectedProduct.id] ?? null : null;
+  const selectedIdSet = useMemo(() => new Set(multiSelectedIds), [multiSelectedIds]);
 
   const hasProductChanges = useMemo(() => {
     if (!selectedProduct || !originalSelectedProduct) return false;
@@ -368,7 +380,7 @@ export default function Home() {
     return Array.from(new Set(products.map((item) => item.category)));
   }, [products]);
 
-  const catalogFiltered = useMemo(() => {
+  const visibleProducts = useMemo(() => {
     return products.filter((product) => {
       const inStatus = statusFilter === "all" || product.status === statusFilter;
       const inCategory = categoryFilter === "all" || product.category === categoryFilter;
@@ -376,131 +388,188 @@ export default function Home() {
     });
   }, [products, statusFilter, categoryFilter]);
 
-  const visibleProducts = useMemo(() => {
-    const source = query.trim().length > 0 ? skuSearchResults ?? [] : catalogFiltered;
-    return source.filter((product) => {
-      const inStatus = statusFilter === "all" || product.status === statusFilter;
-      const inCategory = categoryFilter === "all" || product.category === categoryFilter;
-      return inStatus && inCategory;
+  const totalTablePages = useMemo(() => {
+    const sourceCount =
+      statusFilter === "all" ? Math.max(dbTotal, loadedCount) : visibleProducts.length;
+    return Math.max(1, Math.ceil(sourceCount / TABLE_PAGE_SIZE));
+  }, [dbTotal, loadedCount, statusFilter, visibleProducts.length]);
+
+  const pagedVisibleProducts = useMemo(() => {
+    const safePage = Math.min(tablePage, totalTablePages);
+    const start = (safePage - 1) * TABLE_PAGE_SIZE;
+    return visibleProducts.slice(start, start + TABLE_PAGE_SIZE);
+  }, [visibleProducts, tablePage, totalTablePages]);
+
+  const allPagedSelected =
+    pagedVisibleProducts.length > 0 &&
+    pagedVisibleProducts.every((product) => selectedIdSet.has(product.id));
+
+  function toggleProductSelection(productId: string) {
+    setMultiSelectedIds((prev) =>
+      prev.includes(productId) ? prev.filter((id) => id !== productId) : [...prev, productId]
+    );
+  }
+
+  function togglePageSelection() {
+    const pageIds = pagedVisibleProducts.map((item) => item.id);
+    setMultiSelectedIds((prev) => {
+      const prevSet = new Set(prev);
+      const everySelected = pageIds.every((id) => prevSet.has(id));
+
+      if (everySelected) {
+        return prev.filter((id) => !pageIds.includes(id));
+      }
+
+      const next = [...prev];
+      for (const id of pageIds) {
+        if (!prevSet.has(id)) next.push(id);
+      }
+      return next;
     });
-  }, [query, skuSearchResults, catalogFiltered, statusFilter, categoryFilter]);
+  }
 
   const kpi = useMemo(() => {
-    const total = products.length;
+    const total = dbTotal;
     const active = products.filter((p) => p.status === "active").length;
     const lowStock = products.filter((p) => p.stock > 0 && p.stock < 15).length;
     const totalValue = products.reduce((sum, p) => sum + p.price * p.stock, 0);
     return { total, active, lowStock, totalValue };
-  }, [products]);
+  }, [products, dbTotal]);
 
-  const productActivity = useMemo(() => {
-    if (!selectedProduct) return [];
-    return activity.filter((item) => item.productId === selectedProduct.sku).slice(0, 6);
-  }, [activity, selectedProduct]);
-
-  const loadProducts = useCallback(async () => {
-    setIsLoading(true);
-    setNotice(null);
-
-    try {
-      const [productsRes, statusRes] = await Promise.all([
-        fetch("/api/products?limit=100", { cache: "no-store" }),
-        fetch("/api/products/marketplace-status?limit=100", { cache: "no-store" })
-      ]);
-
-      if (!productsRes.ok) {
-        throw new Error(`Не удалось получить товары (${productsRes.status})`);
+  const fetchChunk = useCallback(
+    async (chunkIndex: number, opts?: { reset?: boolean }) => {
+      if (isChunkLoadingRef.current || loadedChunkIndexesRef.current.has(chunkIndex)) return;
+      isChunkLoadingRef.current = true;
+      if (opts?.reset) {
+        setIsLoading(true);
       }
+      setNotice(null);
 
-      const productPayload: unknown = await productsRes.json();
-      const statusPayload: unknown = statusRes.ok ? await statusRes.json() : [];
-
-      const statusBySku = mapStatusBySku(statusPayload);
-      statusCacheRef.current = { ...statusCacheRef.current, ...statusBySku };
-      const mapped = extractCollection(productPayload)
-        .map((item, index) => mapProduct(item, index, statusBySku))
-        .filter((item): item is Product => item !== null);
-
-      setProducts(mapped);
-      setOriginalById(
-        mapped.reduce<Record<string, Product>>((acc, product) => {
-          acc[product.id] = { ...product };
-          return acc;
-        }, {})
-      );
-      setActivity(mapActivity(statusPayload));
-
-      if (mapped.length > 0) {
-        setSelectedId((current) => current || mapped[0].id);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Ошибка загрузки товаров";
-      setNotice(message);
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadProducts();
-  }, [loadProducts]);
-
-  useEffect(() => {
-    const sku = query.trim();
-    if (sku.length === 0) {
-      setSkuSearchResults(null);
-      return;
-    }
-
-    const timeoutId = window.setTimeout(async () => {
-      setIsSkuSearching(true);
       try {
-        const productResponse = await fetch(`/api/products/${encodeURIComponent(sku)}`, {
+        const trimmedQuery = debouncedQuery.trim();
+        const isSearchMode = trimmedQuery.length >= 2;
+        const params = new URLSearchParams({
+          page: String(chunkIndex),
+          limit: String(isSearchMode ? SEARCH_PAGE_SIZE : PREFETCH_BATCH_SIZE)
+        });
+        if (categoryFilter !== "all") {
+          params.set("category", categoryFilter);
+        }
+        if (isSearchMode) {
+          params.set("search", trimmedQuery);
+        }
+        params.set("sortBy", sortBy);
+        params.set("sortOrder", sortOrder);
+
+        const productsRes = await fetch(`/api/products?${params.toString()}`, {
           cache: "no-store"
         });
-
-        if (!productResponse.ok) {
-          setSkuSearchResults([]);
-          return;
+        if (!productsRes.ok) {
+          throw new Error(`Не удалось получить товары (${productsRes.status})`);
         }
 
-        const payload: unknown = await productResponse.json();
-        let statusBySku = { ...statusCacheRef.current };
+        const productPayload: unknown = await productsRes.json();
+        const productItems = extractCollection(productPayload);
+        const total = isObject(productPayload) && typeof productPayload.total === "number" ? productPayload.total : 0;
+        setDbTotal(total);
 
-        if (!statusBySku[sku]) {
-          const statusResponse = await fetch(
-            `/api/products/marketplace-status?sku=${encodeURIComponent(sku)}&limit=10`,
-            {
-              cache: "no-store"
-            }
-          );
-          if (statusResponse.ok) {
-            const statusPayload: unknown = await statusResponse.json();
-            const fromSearch = mapStatusBySku(statusPayload);
-            statusBySku = { ...statusBySku, ...fromSearch };
-            statusCacheRef.current = statusBySku;
+        const mapped = productItems
+          .map((item, index) => mapProduct(item, chunkIndex * PREFETCH_BATCH_SIZE + index, statusCacheRef.current))
+          .filter((item): item is Product => item !== null);
+
+        loadedChunkIndexesRef.current.add(chunkIndex);
+        setProducts((prev) => {
+          const next = opts?.reset ? [] : prev;
+          const byId = new Map<string, Product>();
+          for (const item of next) byId.set(item.id, item);
+          for (const item of mapped) byId.set(item.id, item);
+          const merged = Array.from(byId.values());
+          setLoadedCount(merged.length);
+          return merged;
+        });
+        setOriginalById((prev) => {
+          const base = opts?.reset ? {} : prev;
+          const next = { ...base };
+          for (const item of mapped) {
+            if (!next[item.id]) next[item.id] = { ...item };
           }
-        }
-
-        const mapped = mapProduct(payload, 0, statusBySku);
-        setSkuSearchResults(mapped ? [mapped] : []);
-        if (mapped) {
-          setOriginalById((prev) => ({
-            ...prev,
-            [mapped.id]: prev[mapped.id] ?? { ...mapped }
-          }));
-        }
-      } catch {
-        setSkuSearchResults([]);
+          return next;
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Ошибка загрузки товаров";
+        setNotice(message);
       } finally {
-        setIsSkuSearching(false);
+        isChunkLoadingRef.current = false;
+        setIsLoading(false);
       }
-    }, 350);
+    },
+    [categoryFilter, debouncedQuery, sortBy, sortOrder]
+  );
 
+  const ensureChunkForPage = useCallback(
+    async (targetPage: number) => {
+      const requiredItems = targetPage * TABLE_PAGE_SIZE;
+      if (requiredItems <= loadedCount || loadedCount >= dbTotal) return;
+
+      const nextChunk = Math.floor(loadedCount / PREFETCH_BATCH_SIZE);
+      await fetchChunk(nextChunk);
+    },
+    [loadedCount, dbTotal, fetchChunk]
+  );
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      setDebouncedQuery(query);
+    }, SEARCH_DEBOUNCE_MS);
     return () => {
       window.clearTimeout(timeoutId);
     };
   }, [query]);
+
+  useEffect(() => {
+    loadedChunkIndexesRef.current = new Set();
+    setProducts([]);
+    setOriginalById({});
+    setLoadedCount(0);
+    setDbTotal(0);
+    setMultiSelectedIds([]);
+    setSelectedId("");
+    void fetchChunk(0, { reset: true });
+  }, [categoryFilter, debouncedQuery, sortBy, sortOrder, fetchChunk]);
+
+  useEffect(() => {
+    void ensureChunkForPage(tablePage);
+  }, [tablePage, ensureChunkForPage]);
+
+  useEffect(() => {
+    setTablePage(1);
+  }, [query, statusFilter, categoryFilter, sortBy, sortOrder]);
+
+  useEffect(() => {
+    if (tablePage > totalTablePages) {
+      setTablePage(totalTablePages);
+    }
+  }, [tablePage, totalTablePages]);
+
+  useEffect(() => {
+    if (selectedId.length === 0) return;
+    const exists = products.some((item) => item.id === selectedId);
+    if (!exists) {
+      const fallback = products[0];
+      setSelectedId(fallback ? fallback.id : "");
+      if (!fallback) setIsDetailOpen(false);
+    }
+  }, [products, selectedId]);
+
+  useEffect(() => {
+    setMultiSelectedIds((prev) => prev.filter((id) => products.some((item) => item.id === id)));
+  }, [products]);
+
+  useEffect(() => {
+    if (multiSelectedIds.length > 1) {
+      setIsDetailOpen(false);
+    }
+  }, [multiSelectedIds]);
 
   const ensureProductDetail = useCallback(
     async (sku: string): Promise<JsonObject | null> => {
@@ -707,7 +776,12 @@ export default function Home() {
         setNotice(failed.map((result) => result.message).join(" | "));
       } else {
         setNotice(results.map((result) => result.message).join(" + "));
-        await loadProducts();
+        loadedChunkIndexesRef.current = new Set();
+        setProducts([]);
+        setOriginalById({});
+        setLoadedCount(0);
+        await fetchChunk(0, { reset: true });
+        await ensureChunkForPage(tablePage);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Ошибка сохранения";
@@ -717,16 +791,165 @@ export default function Home() {
     }
   }
 
+  function buildBulkPricePlan() {
+    if (multiSelectedIds.length === 0) {
+      return { ok: false as const, error: "Сначала выберите товары для группового изменения цены." };
+    }
+
+    const parsed = parseBulkPriceExpression(bulkPriceExpression);
+    if (!parsed) {
+      return {
+        ok: false as const,
+        error:
+          "Неверный формат операции. Примеры: 15 (добавить 15), -20 (уменьшить на 20), -20% (снизить на 20%), =99.99 (установить цену)."
+      };
+    }
+
+    const selectedProducts = products.filter((item) => multiSelectedIds.includes(item.id));
+    if (selectedProducts.length === 0) {
+      return { ok: false as const, error: "Выбранные товары не найдены в текущем списке." };
+    }
+
+    const updatesById = new Map<string, number>();
+    for (const product of selectedProducts) {
+      const nextPrice = applyPriceOperation(product.price, parsed.operation, parsed.value);
+      updatesById.set(product.id, nextPrice);
+    }
+
+    return { ok: true as const, updatesById, selectedProducts, parsed };
+  }
+
+  function applyBulkPriceLocally(updatesById: Map<string, number>) {
+    setProducts((prev) =>
+      prev.map((item) => {
+        const nextPrice = updatesById.get(item.id);
+        if (nextPrice === undefined) return item;
+        return {
+          ...item,
+          price: nextPrice,
+          updatedAt: new Date().toLocaleDateString("ru-RU")
+        };
+      })
+    );
+  }
+
+  function applyBulkPriceChanges() {
+    const plan = buildBulkPricePlan();
+    if (!plan.ok) {
+      setNotice(plan.error);
+      return;
+    }
+
+    applyBulkPriceLocally(plan.updatesById);
+    setNotice(`Изменена цена у ${plan.selectedProducts.length} товаров.`);
+  }
+
+  async function applyAndSaveBulkPriceChanges() {
+    const plan = buildBulkPricePlan();
+    if (!plan.ok) {
+      setNotice(plan.error);
+      return;
+    }
+
+    applyBulkPriceLocally(plan.updatesById);
+    setNotice(`Применяем и сохраняем цену для ${plan.selectedProducts.length} товаров...`);
+    setIsBulkSaving(true);
+
+    try {
+      const succeededIds: string[] = [];
+      const failures: string[] = [];
+
+      for (const selectedProduct of plan.selectedProducts) {
+        const originalProduct = originalById[selectedProduct.id];
+        if (!originalProduct) {
+          failures.push(`${selectedProduct.sku}: нет исходных данных`);
+          continue;
+        }
+
+        const nextPrice = plan.updatesById.get(selectedProduct.id);
+        if (nextPrice === undefined) {
+          failures.push(`${selectedProduct.sku}: не удалось рассчитать цену`);
+          continue;
+        }
+
+        const detail = await ensureProductDetail(originalProduct.sku);
+        if (!detail) {
+          failures.push(`${selectedProduct.sku}: нет данных товара для payload`);
+          continue;
+        }
+
+        const nextProduct: Product = {
+          ...selectedProduct,
+          price: nextPrice
+        };
+        const payload = asCreatePayload(detail, nextProduct);
+        if (!payload) {
+          failures.push(`${selectedProduct.sku}: не удалось собрать payload`);
+          continue;
+        }
+
+        const response = await fetch("/api/products", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json"
+          },
+          body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+          const text = await response.text();
+          failures.push(`${selectedProduct.sku}: ${response.status} ${text.slice(0, 80)}`);
+          continue;
+        }
+
+        succeededIds.push(selectedProduct.id);
+      }
+
+      if (succeededIds.length > 0) {
+        const succeededSet = new Set(succeededIds);
+        setOriginalById((prev) => {
+          const next = { ...prev };
+          for (const product of products) {
+            if (!succeededSet.has(product.id)) continue;
+            const updatedPrice = plan.updatesById.get(product.id);
+            if (updatedPrice === undefined) continue;
+            next[product.id] = {
+              ...product,
+              price: updatedPrice,
+              updatedAt: new Date().toLocaleDateString("ru-RU")
+            };
+          }
+          return next;
+        });
+      }
+
+      if (failures.length > 0) {
+        setNotice(
+          `Сохранено: ${succeededIds.length}, ошибок: ${failures.length}. ${failures
+            .slice(0, 3)
+            .join(" | ")}`
+        );
+      } else {
+        setNotice(`Цены обновлены и сохранены для ${succeededIds.length} товаров.`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Ошибка группового сохранения";
+      setNotice(message);
+    } finally {
+      setIsBulkSaving(false);
+    }
+  }
+
   function deleteProduct() {
     setNotice("Удаление пока недоступно: в backend нет DELETE /v1/products/{sku}");
   }
 
   async function syncProductsToDatabase() {
     setIsSyncingDb(true);
-    setNotice("Синхронизация с БД запущена (аккаунт JV)...");
+    setNotice("Загрузка из API запущена (аккаунт JV)...");
 
     try {
-      const response = await fetch("/api/products/sync-to-db?accountSource=JV&limit=100&maxPages=5", {
+      const response = await fetch("/api/products/sync-to-db?accountSource=JV&limit=100", {
         method: "POST",
         cache: "no-store"
       });
@@ -741,10 +964,19 @@ export default function Home() {
 
       const fetched = isObject(payload) && typeof payload.fetched === "number" ? payload.fetched : 0;
       const upserted = isObject(payload) && typeof payload.upserted === "number" ? payload.upserted : 0;
+      const pagesProcessed =
+        isObject(payload) && typeof payload.pagesProcessed === "number" ? payload.pagesProcessed : 0;
       const accountSource =
         isObject(payload) && typeof payload.accountSource === "string" ? payload.accountSource : "JV";
-      setNotice(`Синхронизация завершена: account=${accountSource}, fetched=${fetched}, upserted=${upserted}.`);
-      await loadProducts();
+      setNotice(
+        `Синхронизация завершена: account=${accountSource}, pages=${pagesProcessed}, fetched=${fetched}, upserted=${upserted}.`
+      );
+      setTablePage(1);
+      loadedChunkIndexesRef.current = new Set();
+      setProducts([]);
+      setOriginalById({});
+      setLoadedCount(0);
+      await fetchChunk(0, { reset: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Не удалось синхронизировать данные с БД";
       setNotice(message);
@@ -762,14 +994,11 @@ export default function Home() {
         <aside className="sidebar">
           <div>
             <p className="brand">OTTO Контроль</p>
-            <p className="brand-subtitle">Панель управления товарами</p>
+            <p className="brand-subtitle">DB</p>
           </div>
 
           <nav className="side-nav">
             <button className="nav-item active">Каталог</button>
-            <button className="nav-item">Аналитика</button>
-            <button className="nav-item">Заказы</button>
-            <button className="nav-item">Промо</button>
             <Link className="nav-item" href="/creator">
               Создание товара
             </Link>
@@ -777,8 +1006,8 @@ export default function Home() {
 
           <div className="side-card">
             <p className="side-card-title">Интеграция OTTO</p>
-            <p className="side-card-text">Данные загружаются и обновляются через FastAPI</p>
-            <span className="sync-pill">API подключен</span>
+            <p className="side-card-text">Источник: база данных</p>
+            <span className="sync-pill">DB</span>
           </div>
         </aside>
 
@@ -786,10 +1015,9 @@ export default function Home() {
           <header className="topbar">
             <div>
               <h1>Управление товарами</h1>
-              <p>Одна кнопка применяет изменения: карточка и статус обновляются параллельно при необходимости</p>
             </div>
             <button className="primary-btn" onClick={syncProductsToDatabase} disabled={isSyncingDb || isLoading}>
-              {isSyncingDb ? "Синхронизация с БД..." : "Синхронизировать с БД (JV)"}
+              {isSyncingDb ? "Загрузка..." : "Синк DB"}
             </button>
           </header>
 
@@ -797,7 +1025,7 @@ export default function Home() {
 
           <section className="kpi-grid">
             <article className="kpi-card">
-              <p>Всего товаров</p>
+              <p>Всего в БД</p>
               <strong>{kpi.total}</strong>
             </article>
             <article className="kpi-card">
@@ -809,7 +1037,7 @@ export default function Home() {
               <strong>{kpi.lowStock}</strong>
             </article>
             <article className="kpi-card">
-              <p>Складская стоимость</p>
+              <p>Стоимость</p>
               <strong>{formatCurrency(kpi.totalValue)}</strong>
             </article>
           </section>
@@ -819,10 +1047,24 @@ export default function Home() {
               <div className="toolbar">
                 <input
                   type="search"
-                  placeholder="Поиск товара по SKU"
+                  placeholder="Поиск: SKU, название, reference, EAN, категория..."
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                 />
+                <select value={sortBy} onChange={(event) => setSortBy(event.target.value as SortByField)}>
+                  <option value="id">Сортировка: новые</option>
+                  <option value="productLine">По названию</option>
+                  <option value="sku">По SKU</option>
+                  <option value="productReference">По Reference</option>
+                  <option value="category">По категории</option>
+                  <option value="brandId">По бренду</option>
+                  <option value="ean">По EAN</option>
+                  <option value="price">По цене</option>
+                </select>
+                <select value={sortOrder} onChange={(event) => setSortOrder(event.target.value as SortOrder)}>
+                  <option value="DESC">По убыванию</option>
+                  <option value="ASC">По возрастанию</option>
+                </select>
                 <select
                   value={statusFilter}
                   onChange={(event) => setStatusFilter(event.target.value as "all" | ProductStatus)}
@@ -841,56 +1083,147 @@ export default function Home() {
                 </select>
               </div>
 
+              <div className="bulk-toolbar">
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={togglePageSelection}
+                  disabled={pagedVisibleProducts.length === 0}
+                >
+                  {allPagedSelected ? "Снять страницу" : "Выбрать страницу"}
+                </button>
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={() => setMultiSelectedIds([])}
+                  disabled={multiSelectedIds.length === 0}
+                >
+                  Снять выбор
+                </button>
+                <span className="bulk-selected-count">Выбрано: {multiSelectedIds.length}</span>
+                <input
+                  type="text"
+                  value={bulkPriceExpression}
+                  onChange={(event) => setBulkPriceExpression(event.target.value)}
+                  placeholder="Операция цены: 15, -20, -20%, =99.99"
+                />
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={applyBulkPriceChanges}
+                  disabled={multiSelectedIds.length === 0}
+                >
+                  Применить
+                </button>
+                <button
+                  type="button"
+                  className="primary-btn"
+                  onClick={applyAndSaveBulkPriceChanges}
+                  disabled={multiSelectedIds.length === 0 || isBulkSaving}
+                >
+                  {isBulkSaving ? "Сохраняем..." : "Применить и сохранить"}
+                </button>
+              </div>
+
               <div className="product-list">
                 {isLoading ? <div className="empty-state">Загрузка товаров...</div> : null}
-                {!isLoading && isSkuSearching ? <div className="empty-state">Поиск товара по SKU...</div> : null}
-                {!isLoading && !isSkuSearching && visibleProducts.length === 0 ? (
+                {!isLoading && products.length === 0 ? (
+                  <div className="empty-state">В БД нет товаров</div>
+                ) : null}
+
+                {!isLoading && products.length > 0 && visibleProducts.length === 0 ? (
                   <div className="empty-state">По заданным фильтрам товары не найдены</div>
                 ) : null}
 
-                {!isLoading && !isSkuSearching
+                {!isLoading
                   ? (
                     <div className="product-table">
                       <div className="product-row product-row-head">
-                        <span>Товар</span>
-                        <span>SKU</span>
-                        <span>Категория</span>
-                        <span>Цена</span>
+                        <span>Выбор</span>
+                        <div className="row-open-head">
+                          <span>Товар</span>
+                          <span>SKU</span>
+                          <span>Категория</span>
+                          <span>Цена</span>
+                        </div>
                       </div>
-                      {visibleProducts.map((product) => {
-                        const isSelected = selectedId === product.id;
+                      {pagedVisibleProducts.map((product) => {
+                        const isActiveRow = selectedId === product.id;
+                        const isMultiSelected = selectedIdSet.has(product.id);
                         return (
-                          <button
+                          <div
                             key={product.id}
-                            type="button"
-                            className={`product-row ${isSelected ? "selected" : ""}`}
-                            onClick={() => {
-                              setSelectedId(product.id);
-                              setIsDetailOpen(true);
-                            }}
+                            className={`product-row ${isActiveRow ? "selected" : ""} ${
+                              isMultiSelected ? "multi-selected" : ""
+                            }`}
                           >
-                            <span className="row-name" title={product.name}>
-                              {product.name}
-                            </span>
-                            <span title={product.sku}>{product.sku}</span>
-                            <span title={product.category}>{product.category}</span>
-                            <span>{formatCurrency(product.price)}</span>
-                          </button>
+                            <button
+                              type="button"
+                              className={`row-select-btn ${isMultiSelected ? "active" : ""}`}
+                              onClick={() => toggleProductSelection(product.id)}
+                              title={
+                                isMultiSelected
+                                  ? "Убрать из группового выбора"
+                                  : "Добавить в групповой выбор"
+                              }
+                            >
+                              {isMultiSelected ? "✓" : "+"}
+                            </button>
+                            <button
+                              type="button"
+                              className="row-open-btn"
+                              onClick={() => {
+                                setSelectedId(product.id);
+                                setIsDetailOpen(true);
+                              }}
+                            >
+                              <span className="row-name" title={product.name}>
+                                {product.name}
+                              </span>
+                              <span title={product.sku}>{product.sku}</span>
+                              <span title={product.category}>{product.category}</span>
+                              <span>{formatCurrency(product.price)}</span>
+                            </button>
+                          </div>
                         );
                       })}
                     </div>
                   )
                   : null}
+
+                {!isLoading && visibleProducts.length > 0 ? (
+                  <div className="pagination-bar">
+                    <span className="pagination-info">
+                      {`${tablePage}/${totalTablePages} • ${products.length}/${dbTotal}`}
+                    </span>
+                    <div className="pagination-actions">
+                      <button
+                        className="secondary-btn"
+                        onClick={() => setTablePage((prev) => Math.max(1, prev - 1))}
+                        disabled={tablePage <= 1}
+                      >
+                        Назад
+                      </button>
+                      <button
+                        className="secondary-btn"
+                        onClick={() => setTablePage((prev) => Math.min(totalTablePages, prev + 1))}
+                        disabled={tablePage >= totalTablePages}
+                      >
+                        Вперёд
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             </div>
 
             <aside className="editor-panel">
-              {selectedProduct && isDetailOpen ? (
+              {selectedProduct && isDetailOpen && multiSelectedIds.length <= 1 ? (
                 <>
                   <div className="editor-head">
                     <div>
                       <h2>Карточка товара</h2>
-                      <p>Обновлено: {selectedProduct.updatedAt}</p>
+                      <p>{selectedProduct.updatedAt}</p>
                     </div>
                     <button className="ghost-btn" onClick={() => setIsDetailOpen(false)}>
                       Закрыть
@@ -948,7 +1281,6 @@ export default function Home() {
                         <option value="active">Активен</option>
                         <option value="non_active">Неактивен</option>
                       </select>
-                      <small className="field-note">В запрос статуса отправляются только «Активен» и «Неактивен»</small>
                     </label>
                     <label>
                       EAN
@@ -981,7 +1313,7 @@ export default function Home() {
                       />
                     </label>
                     <label>
-                      Ссылка товара (Product Reference)
+                      Product Reference
                       <input
                         value={selectedProduct.productReference}
                         onChange={(event) => updateSelected("productReference", event.target.value)}
@@ -1061,7 +1393,6 @@ export default function Home() {
                         Добавить атрибут
                       </button>
                     </div>
-                    <small className="field-note">Значения атрибута вводите через запятую</small>
                   </div>
 
                   <div className="editor-analytics">
@@ -1084,29 +1415,12 @@ export default function Home() {
                   </div>
 
                   <div className="sync-summary">
-                    <p>Изменения карточки: {hasProductChanges ? "есть" : "нет"}</p>
-                    <p>Изменения статуса: {hasStatusChanges ? "есть" : "нет"}</p>
+                    <p>Карточка: {hasProductChanges ? "есть" : "нет"} | Статус: {hasStatusChanges ? "есть" : "нет"}</p>
                   </div>
 
-                  <button className="primary-btn full" onClick={saveChanges} disabled={isApplying}>
-                    {isApplying
-                      ? "Применяем изменения..."
-                      : "Применить изменения"}
+                  <button className="primary-btn full" onClick={saveChanges} disabled={isApplying || isBulkSaving}>
+                    {isApplying ? "Сохраняем..." : "Сохранить"}
                   </button>
-
-                  <div className="timeline">
-                    <h3>История статусов</h3>
-                    {productActivity.length > 0 ? (
-                      productActivity.map((item) => (
-                        <div key={item.id} className="timeline-item">
-                          <p>{item.message}</p>
-                          <time>{item.time}</time>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="timeline-empty">Нет событий по выбранному товару</p>
-                    )}
-                  </div>
                 </>
               ) : (
                 <div className="empty-state">Выберите мини-карточку слева, чтобы открыть все данные товара</div>
