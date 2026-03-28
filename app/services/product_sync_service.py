@@ -1,3 +1,10 @@
+"""Synchronize OTTO products into local relational tables.
+
+The sync process fetches pages from OTTO, maps each item into local DB columns,
+upserts product rows, and replaces associated attribute rows so the local store
+can back UI-heavy querying.
+"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -13,12 +20,16 @@ from app.services.product_service import ProductService
 
 
 class ProductSyncService:
+    """Service that performs paginated upstream-to-local product synchronization."""
+
     def __init__(self, product_service: ProductService, db: AsyncSession):
+        """Wire OTTO product service and async SQLAlchemy session."""
         self.product_service = product_service
         self.db = db
 
     @staticmethod
     def _extract_collection(payload: Any) -> list[dict[str, Any]]:
+        """Extract list-like product collections from various upstream envelopes."""
         if isinstance(payload, list):
             return [item for item in payload if isinstance(item, dict)]
         if not isinstance(payload, dict):
@@ -39,6 +50,7 @@ class ProductSyncService:
 
     @staticmethod
     def _read_path(source: dict[str, Any], path: list[str]) -> Any:
+        """Safely read nested dictionary value using path segments."""
         current: Any = source
         for key in path:
             if not isinstance(current, dict):
@@ -48,6 +60,7 @@ class ProductSyncService:
 
     @classmethod
     def _get_string(cls, source: dict[str, Any], paths: list[list[str]]) -> str | None:
+        """Return first non-empty string found among alternative nested paths."""
         for path in paths:
             value = cls._read_path(source, path)
             if isinstance(value, str) and value.strip():
@@ -56,6 +69,7 @@ class ProductSyncService:
 
     @classmethod
     def _get_float(cls, source: dict[str, Any], paths: list[list[str]]) -> float | None:
+        """Return first numeric value from candidate paths, coercing strings."""
         for path in paths:
             value = cls._read_path(source, path)
             if isinstance(value, (int, float)):
@@ -69,6 +83,7 @@ class ProductSyncService:
 
     @staticmethod
     def _normalize_vat(raw: str | None) -> VatEnum:
+        """Map raw VAT strings to known enum values with safe default fallback."""
         if not raw:
             return VatEnum.FULL
         value = raw.strip().upper()
@@ -80,6 +95,7 @@ class ProductSyncService:
 
     @classmethod
     def _to_db_record(cls, item: dict[str, Any], account_source: str) -> dict[str, Any] | None:
+        """Map one upstream product payload to `products` table-compatible record."""
         sku = cls._get_string(item, [["sku"], ["productSku"]])
         if not sku:
             return None
@@ -107,6 +123,7 @@ class ProductSyncService:
 
     @classmethod
     def _to_description_records(cls, item: dict[str, Any]) -> list[dict[str, str]]:
+        """Flatten product attribute lists into `product_descriptions` row payloads."""
         sku = cls._get_string(item, [["sku"], ["productSku"]])
         if not sku:
             return []
@@ -178,6 +195,11 @@ class ProductSyncService:
         limit: int,
         max_pages: int | None,
     ) -> dict[str, Any]:
+        """Fetch OTTO products by page and persist them into local DB tables.
+
+        Returns counters that summarize fetch, upsert, attribute writes, failures,
+        and total pages processed.
+        """
         total_fetched = 0
         total_upserted = 0
         total_descriptions_written = 0

@@ -1,3 +1,16 @@
+"""File-upload product creation pipeline.
+
+This service converts raw source JSON into OTTO-compatible product payloads.
+Pipeline stages:
+1. Decode + parse uploaded bytes.
+2. Normalize each source item (SEO text, attributes, category mapping).
+3. Validate against `ProductCreate` schema.
+4. Send valid payloads to OTTO create/upsert endpoint.
+
+Issues from each stage are collected with source item indices so callers can
+return actionable feedback to users.
+"""
+
 import json
 import re
 from dataclasses import dataclass
@@ -16,6 +29,8 @@ from app.services.product_service import ProductService
 
 @dataclass
 class ProductCreationResult:
+    """Summary of the end-to-end upload processing and creation outcome."""
+
     source_items: int
     normalized_items: int
     created_items: int
@@ -24,12 +39,16 @@ class ProductCreationResult:
 
 
 class ProductCreationService:
+    """Coordinate normalization, validation, and creation for uploaded products."""
+
     def __init__(self, product_service: ProductService):
+        """Initialize service and local category cache."""
         self.product_service = product_service
         self._valid_categories_cache: set[str] | None = None
 
     @staticmethod
     def _extract_categories(payload: Any) -> set[str]:
+        """Recursively collect category names from OTTO category API payload shapes."""
         found: set[str] = set()
         if isinstance(payload, str):
             cleaned = payload.strip()
@@ -62,6 +81,7 @@ class ProductCreationService:
 
     @staticmethod
     def _trim_product_line(payload: dict[str, Any], max_len: int = 70) -> None:
+        """Ensure `productLine` satisfies upstream length constraints."""
         product_description = payload.get("productDescription")
         if not isinstance(product_description, dict):
             return
@@ -72,6 +92,7 @@ class ProductCreationService:
 
     @staticmethod
     def _category_aliases() -> dict[str, str]:
+        """Return fallback singular/plural aliases for known category names."""
         return {
             "Tische": "Tisch",
             "Sideboards": "Sideboard",
@@ -88,6 +109,7 @@ class ProductCreationService:
 
     @staticmethod
     def _extract_source_field(item: dict[str, Any], *keys: str) -> str | None:
+        """Return the first non-empty string from a list of possible source keys."""
         for key in keys:
             value = item.get(key)
             if isinstance(value, str) and value.strip():
@@ -96,6 +118,7 @@ class ProductCreationService:
 
     @classmethod
     def _mapped_category_from_source(cls, item: dict[str, Any]) -> str | None:
+        """Infer OTTO category from raw source text fields using `CategoryMapper`."""
         mapper = get_default_category_mapper()
         return mapper.map_category(
             product_type=cls._extract_source_field(item, "Produktart", "Category", "Type", "type"),
@@ -107,6 +130,7 @@ class ProductCreationService:
 
     @staticmethod
     def _normalize_gender_value(raw: str) -> str | None:
+        """Map raw gender text to OTTO-compatible enum-like display values."""
         value = raw.strip().lower()
         value = (
             value.replace("ä", "ae")
@@ -127,6 +151,7 @@ class ProductCreationService:
 
     @staticmethod
     def _normalize_base_color_value(raw: str) -> str | None:
+        """Normalize free-form base color values to canonical attribute strings."""
         value = raw.strip().lower()
         value = (
             value.replace("ä", "ae")
@@ -155,6 +180,12 @@ class ProductCreationService:
 
     @classmethod
     def _sanitize_product_attributes(cls, payload: dict[str, Any]) -> None:
+        """Clean and constrain product attributes before schema validation/create.
+
+        The method removes malformed attributes, enforces single-value fields,
+        normalizes selected values (like gender), and drops fields that cannot be
+        validated reliably across categories (for example `Grundfarbe`).
+        """
         product_description = payload.get("productDescription")
         if not isinstance(product_description, dict):
             return
@@ -208,6 +239,7 @@ class ProductCreationService:
         product_description["attributes"] = cleaned_attributes
 
     async def _get_valid_categories(self) -> set[str]:
+        """Load valid categories from OTTO, falling back to local bundled list."""
         if self._valid_categories_cache is not None:
             return self._valid_categories_cache
 
@@ -232,6 +264,7 @@ class ProductCreationService:
         return self._valid_categories_cache
 
     async def _normalize_category_for_payload(self, payload: dict[str, Any]) -> None:
+        """Replace invalid category values with safe/known alternatives."""
         product_description = payload.get("productDescription")
         if not isinstance(product_description, dict):
             return
@@ -260,6 +293,7 @@ class ProductCreationService:
             product_description["category"] = sorted(valid_categories)[0]
 
     def parse_json_bytes(self, raw: bytes) -> list[dict[str, Any]]:
+        """Decode uploaded bytes and enforce object-or-array JSON root semantics."""
         text, _encoding = decode_with_fallback(raw)
         payload = json.loads(text)
 
@@ -282,6 +316,12 @@ class ProductCreationService:
         *,
         max_chars: int,
     ) -> tuple[list[tuple[int, dict[str, Any]]], list[ProductCreationIssue]]:
+        """Normalize each source item and validate it against `ProductCreate`.
+
+        Returns:
+            A list of `(source_index, validated_payload)` tuples and collected
+            stage-specific issues for items that failed.
+        """
         issues: list[ProductCreationIssue] = []
         validated: list[tuple[int, dict[str, Any]]] = []
 
@@ -324,6 +364,7 @@ class ProductCreationService:
 
     @staticmethod
     def _sanitize_optional_fields(payload: dict[str, Any]) -> dict[str, Any]:
+        """Drop optional sections that are structurally present but invalid."""
         order = payload.get("order")
         if isinstance(order, dict):
             max_order = order.get("maxOrderQuantity")
@@ -342,6 +383,7 @@ class ProductCreationService:
     async def create_products(
         self, payloads: list[tuple[int, dict[str, Any]]]
     ) -> tuple[int, list[ProductCreationIssue]]:
+        """Create validated payloads in OTTO and map transport errors to issues."""
         issues: list[ProductCreationIssue] = []
         if not payloads:
             return 0, issues
@@ -369,6 +411,7 @@ class ProductCreationService:
     def validate_prepared_payloads(
         self, payloads: list[dict[str, Any]]
     ) -> tuple[list[tuple[int, dict[str, Any]]], list[ProductCreationIssue]]:
+        """Validate user-edited prepared payloads before create-from-prepared call."""
         issues: list[ProductCreationIssue] = []
         validated: list[tuple[int, dict[str, Any]]] = []
 
@@ -395,6 +438,7 @@ class ProductCreationService:
     async def prepare_upload(
         self, raw: bytes, *, max_chars: int
     ) -> tuple[int, list[tuple[int, dict[str, Any]]], list[ProductCreationIssue]]:
+        """Run parse + normalize + validate stages without creating products."""
         source_items = self.parse_json_bytes(raw)
         validated_payloads, issues = self.normalize_and_validate(
             source_items,
@@ -403,6 +447,7 @@ class ProductCreationService:
         return len(source_items), validated_payloads, issues
 
     async def process_upload(self, raw: bytes, *, max_chars: int) -> ProductCreationResult:
+        """Run the full upload pipeline, including product creation in OTTO."""
         source_count, validated_payloads, prepare_issues = await self.prepare_upload(
             raw,
             max_chars=max_chars,

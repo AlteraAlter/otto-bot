@@ -1,3 +1,15 @@
+"""HTTP endpoints for product read/write and file-based creation workflows.
+
+This router combines three responsibilities:
+1. Direct read/write operations against local product tables.
+2. Proxy-style calls to OTTO APIs through service objects.
+3. Batch creation flows that normalize uploaded JSON before sending it upstream.
+
+Keeping those concerns in one place allows the frontend to work with a single
+resource surface (`/v1/products`) while the backend decides whether data should
+be served from the local database or from OTTO-facing services.
+"""
+
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
@@ -31,6 +43,12 @@ router = APIRouter(prefix="/v1/products", tags=["Products"])
 
 
 def _group_attributes_by_sku(rows: list[ProductAttributes]) -> dict[str, list[dict]]:
+    """Transform flat attribute rows into OTTO-like grouped attributes per SKU.
+
+    The DB stores one row per `(sku, attribute_name, value)`. API payloads expect
+    one attribute object per name with all values collected under `values`.
+    This helper performs that grouping and de-duplicates repeated values.
+    """
     grouped: dict[str, dict[str, list[str]]] = {}
     for row in rows:
         sku = row.product_sku
@@ -58,6 +76,11 @@ def _group_attributes_by_sku(rows: list[ProductAttributes]) -> dict[str, list[di
 
 
 def _product_to_dict(product: Product, attributes: list[dict] | None = None) -> dict:
+    """Serialize a `Product` ORM object into the response contract used by routes.
+
+    Some route responses mirror OTTO payload shapes while still including local
+    convenience fields such as `id`, `price`, and flattened `vat`.
+    """
     attrs = attributes or []
     vat_value = product.vat.value if hasattr(product.vat, "value") else str(product.vat)
     return {
@@ -102,6 +125,7 @@ def _product_list_payload(
     category: Optional[str],
     brand_id: Optional[str],
 ) -> dict:
+    """Build a sanitized upstream list query payload from request parameters."""
     return ProductListQuery(
         page=page,
         sku=sku,
@@ -126,6 +150,11 @@ async def get_products(
     sort_by: str = Query("id", alias="sortBy"),
     sort_order: SortOrderEnum = Query(default=SortOrderEnum.DESC, alias="sortOrder"),
 ):
+    """Return paginated products from the local DB with optional filtering/search.
+
+    This endpoint is intended for internal UI usage, so it supports richer local
+    filtering and free-text search than OTTO list endpoints usually provide.
+    """
     sort_columns = {
         "id": Product.id,
         "sku": Product.sku,
@@ -209,6 +238,7 @@ async def get_active_products(
     category: Optional[str] = Query(None),
     brand_id: Optional[str] = Query(None, alias="brandId"),
 ):
+    """Proxy active-product status listing from OTTO using typed query building."""
     payload = _product_list_payload(
         product_reference=product_reference,
         page=page,
@@ -225,6 +255,7 @@ async def update_tasks(
     pid: str,
     product_service: ProductService = Depends(get_product_service),
 ):
+    """Trigger OTTO update-task execution for a single product id (`pid`)."""
     return await product_service.update_tasks(pid)
 
 
@@ -243,6 +274,7 @@ async def get_product_status(
     ),
     sort_order: SortOrderEnum = Query(default=SortOrderEnum.DESC, alias="sortOrder"),
 ):
+    """Return marketplace-status entries from OTTO for filtered products."""
     payload = MarketplaceStatusQuery(
         sku=sku,
         productReference=product_reference,
@@ -265,6 +297,7 @@ async def get_categories(
     limit: int = Query(default=10, ge=0, le=2000),
     category: Optional[str] = Query(None),
 ):
+    """List available categories from OTTO, optionally filtered by category name."""
     payload = CategoryQuery(page=page, limit=limit, category=category).to_payload()
     return await product_service.get_categories(payload)
 
@@ -275,6 +308,11 @@ async def get_product_by_status_path(
     db: AsyncSession = Depends(get_db),
     account_source: Optional[str] = Query(None, alias="accountSource"),
 ):
+    """Fetch one product from the local DB by SKU and return API-shaped payload.
+
+    Historical entries may exist per SKU and account source, so records are
+    ordered by latest `id` and only the newest one is returned.
+    """
     stmt = select(Product).where(Product.sku == sku)
     if account_source:
         stmt = stmt.where(func.upper(Product.account_source) == account_source.upper())
@@ -301,6 +339,7 @@ async def get_product(
     db: AsyncSession = Depends(get_db),
     account_source: Optional[str] = Query(None, alias="accountSource"),
 ):
+    """Fetch one product from the local DB by SKU (generic product lookup path)."""
     stmt = select(Product).where(Product.sku == sku)
     if account_source:
         stmt = stmt.where(func.upper(Product.account_source) == account_source.upper())
@@ -329,6 +368,7 @@ async def sync_products_to_db(
     limit: int = Query(default=100, ge=10, le=100),
     max_pages: Optional[int] = Query(default=None, alias="maxPages", ge=1, le=10000),
 ):
+    """Pull OTTO products page-by-page and upsert them into local DB tables."""
     sync_service = ProductSyncService(product_service=product_service, db=db)
     return await sync_service.sync_products(
         account_source=account_source.upper(),
@@ -343,6 +383,7 @@ async def create_or_update_products(
     payload: List[ProductCreate],
     product_service: ProductService = Depends(get_product_service),
 ):
+    """Create or update products in OTTO from already validated request payloads."""
     payload_list = [
         item.model_dump(mode="json", exclude_none=True)
         for item in payload
@@ -357,6 +398,7 @@ async def update_status(
     payload: Status,
     product_service: ProductService = Depends(get_product_service),
 ):
+    """Update active/inactive state for one or more SKUs in OTTO."""
     return await product_service.update_status(
         payload.model_dump(mode="json", exclude_none=True)
     )
@@ -375,6 +417,11 @@ async def prepare_products_from_file(
     max_chars: int = Form(default=2000, ge=300, le=5000),
     creation_service: ProductCreationService = Depends(get_product_creation_service),
 ):
+    """Normalize and validate uploaded JSON without creating products yet.
+
+    This is the "preview" step used by the two-phase create flow:
+    parse input -> normalize to schema -> validate -> return prepared bodies.
+    """
     if not file.filename or not file.filename.lower().endswith(".json"):
         return JSONResponse(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -440,6 +487,7 @@ async def create_products_from_prepared(
     payload: ProductCreationPreparedRequest,
     creation_service: ProductCreationService = Depends(get_product_creation_service),
 ):
+    """Create products from pre-validated request bodies produced by prepare step."""
     if not payload.request_bodies:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -497,6 +545,7 @@ async def create_products_from_file(
     max_chars: int = Form(default=2000, ge=300, le=5000),
     creation_service: ProductCreationService = Depends(get_product_creation_service),
 ):
+    """One-shot flow: upload file, normalize/validate, and create in OTTO."""
     if not file.filename or not file.filename.lower().endswith(".json"):
         return JSONResponse(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,

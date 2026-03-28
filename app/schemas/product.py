@@ -1,15 +1,25 @@
+"""Pydantic models for OTTO product payloads.
+
+These schemas describe the canonical request body shape used when creating or
+updating products through OTTO APIs.
+"""
+
 from pydantic import BaseModel, HttpUrl
 from typing import List, Optional
 from datetime import datetime
 
 
 class Attribute(BaseModel):
+    """Single product attribute with one or more textual values."""
+
     name: str
     values: List[str]
     additional: bool
 
 
 class ProductDescription(BaseModel):
+    """Core merchandising details shown on product detail pages."""
+
     category: str
     brandId: str
     productLine: Optional[str] = None
@@ -25,31 +35,43 @@ class ProductDescription(BaseModel):
 
 
 class MediaAsset(BaseModel):
+    """Image or media resource attached to a product."""
+
     type: str
     location: HttpUrl
 
 
 class MaxOrderQuantity(BaseModel):
+    """Maximum purchasable quantity in a time window."""
+
     quantity: int
     periodInDays: int
 
 
 class Order(BaseModel):
+    """Order constraints for a product."""
+
     maxOrderQuantity: MaxOrderQuantity
 
 
 class Price(BaseModel):
+    """Monetary amount with ISO-like currency code."""
+
     amount: float
     currency: str
 
 
 class Sale(BaseModel):
+    """Sale window and discounted price information."""
+
     salePrice: Price
     startDate: datetime
     endDate: datetime
 
 
 class NormPriceInfo(BaseModel):
+    """Normalized unit-pricing metadata used for price transparency."""
+
     normAmount: float
     normUnit: str
     salesAmount: float
@@ -57,6 +79,8 @@ class NormPriceInfo(BaseModel):
 
 
 class Pricing(BaseModel):
+    """Complete pricing object including VAT and optional MSRP/sale details."""
+
     standardPrice: Price
     vat: str
     msrp: Optional[Price] = None
@@ -65,6 +89,8 @@ class Pricing(BaseModel):
 
 
 class PackingUnit(BaseModel):
+    """Physical dimensions and weight for one packaging unit."""
+
     weight: float
     width: float
     height: float
@@ -72,11 +98,15 @@ class PackingUnit(BaseModel):
 
 
 class Logistics(BaseModel):
+    """Shipping/logistics information for product fulfillment."""
+
     packingUnitCount: int
     packingUnits: List[PackingUnit]
 
 
 class Address(BaseModel):
+    """Contact/compliance address record used in safety or food sections."""
+
     name: str
     address: str
     regionCode: str
@@ -88,19 +118,27 @@ class Address(BaseModel):
 
 
 class ProductSafety(BaseModel):
+    """Compliance block for product safety contact addresses."""
+
     addresses: List[Address]
 
 
 class FoodInformation(BaseModel):
+    """Compliance block for food information contact addresses."""
+
     addresses: List[Address]
 
 
 class Compliance(BaseModel):
+    """Optional compliance container for safety and food declarations."""
+
     productSafety: Optional[ProductSafety] = None
     foodInformation: Optional[FoodInformation] = None
 
 
 class ProductCreate(BaseModel):
+    """Top-level product create/update payload sent to OTTO."""
+
     productReference: str
     sku: str
     ean: Optional[str] = None
@@ -117,9 +155,13 @@ class ProductCreate(BaseModel):
 
 
 class StatusList(BaseModel):
+    """SKU-level active status toggle entry."""
+
     sku: str
     active: bool
 
 
 class Status(BaseModel):
+    """Batch status update payload."""
+
     status: List[StatusList]

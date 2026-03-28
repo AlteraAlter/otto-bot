@@ -1,3 +1,10 @@
+"""Category inference helpers for mapping source products to OTTO categories.
+
+`CategoryMapper` builds token-based indexes from category synonym groups and
+uses weighted matching across selected product text fields to pick the most
+likely canonical OTTO category.
+"""
+
 from __future__ import annotations
 
 import json
@@ -53,13 +60,17 @@ STOP_TOKENS = {
 
 
 class CategoryMapper:
+    """Infer canonical categories from noisy source metadata fields."""
+
     def __init__(self, category_groups: list[list[str]]):
+        """Precompute category/token indices for fast repeated matching."""
         self.categories = self._build_category_index(category_groups)
         self.token_index = self._build_token_index(self.categories)
         self.idf = self._build_idf(self.categories)
 
     @classmethod
     def from_default_file(cls) -> "CategoryMapper":
+        """Create mapper from default JSON file or `OTTO_CATEGORIES_FILE` override."""
         env_path = os.getenv("OTTO_CATEGORIES_FILE")
         if env_path:
             path = Path(env_path)
@@ -162,6 +173,7 @@ class CategoryMapper:
         room: str | None = None,
         style: str | None = None,
     ) -> str | None:
+        """Select the best matching category using exact and weighted token scoring."""
         fields = {
             "Produktart": product_type,
             "Artikelbeschreibung": title,
@@ -282,6 +294,7 @@ _default_mapper: CategoryMapper | None = None
 
 
 def get_default_category_mapper() -> CategoryMapper:
+    """Return a singleton mapper loaded from bundled categories file."""
     global _default_mapper
     if _default_mapper is None:
         _default_mapper = CategoryMapper.from_default_file()

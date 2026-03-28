@@ -1,3 +1,5 @@
+"""Typed query builders for product and marketplace-status endpoints."""
+
 from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -7,6 +9,7 @@ from app.schemas.enums import SortOrderEnum
 
 
 def _normalize_category(payload: dict) -> dict:
+    """Trim/capitalize category value to match upstream formatting expectations."""
     category = payload.get("category")
     if isinstance(category, str):
         cleaned = category.strip()
@@ -16,6 +19,8 @@ def _normalize_category(payload: dict) -> dict:
 
 
 class ProductListQuery(BaseModel):
+    """Query parameters for listing active products from upstream services."""
+
     model_config = ConfigDict(populate_by_name=True)
 
     page: int = Field(default=0, ge=0)
@@ -26,11 +31,14 @@ class ProductListQuery(BaseModel):
     brand_id: Optional[str] = Field(default=None, alias="brandId")
 
     def to_payload(self) -> dict:
+        """Serialize model to upstream payload, excluding empty fields."""
         payload = self.model_dump(by_alias=True, exclude_none=True)
         return _normalize_category(payload)
 
 
 class MarketplaceStatusQuery(BaseModel):
+    """Query parameters for marketplace-status listing endpoint."""
+
     model_config = ConfigDict(populate_by_name=True)
 
     sku: Optional[str] = None
@@ -46,6 +54,7 @@ class MarketplaceStatusQuery(BaseModel):
     sort_order: SortOrderEnum = Field(default=SortOrderEnum.DESC, alias="sortOrder")
 
     def to_payload(self) -> dict:
+        """Serialize and normalize enum/category fields for HTTP query usage."""
         payload = self.model_dump(by_alias=True, exclude_none=True)
         _normalize_category(payload)
         if "marketPlaceStatus" in payload:
@@ -57,10 +66,13 @@ class MarketplaceStatusQuery(BaseModel):
 
 
 class CategoryQuery(BaseModel):
+    """Query parameters for fetching category lists from upstream service."""
+
     page: int = Field(0, ge=0)
     limit: int = Field(10, ge=10, le=2000)
     category: Optional[str] = Field(None)
 
     def to_payload(self) -> dict:
+        """Serialize model to payload while normalizing category formatting."""
         payload = self.model_dump(by_alias=True, exclude_none=True)
         return _normalize_category(payload)

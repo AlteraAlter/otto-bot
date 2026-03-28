@@ -1,3 +1,5 @@
+"""Database engine/session configuration for async SQLAlchemy usage."""
+
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
     async_sessionmaker,
@@ -30,9 +32,12 @@ SessionLocal = async_sessionmaker(
 
 
 class Base(DeclarativeBase):
+    """Declarative base class for all ORM models."""
+
     pass
 
 
 async def get_db():
+    """Yield a request-scoped async DB session for FastAPI dependencies."""
     async with SessionLocal() as session:
         yield session

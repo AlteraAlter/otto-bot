@@ -1,1 +1,1 @@
-# Marks `app` as a package for stable absolute imports.
+"""Application package root for backend API, data, and service modules."""

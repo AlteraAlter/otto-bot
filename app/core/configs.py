@@ -1,7 +1,11 @@
+"""Application settings loaded from environment and optional `.env` file."""
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """Typed configuration container for API, OTTO auth, and database settings."""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

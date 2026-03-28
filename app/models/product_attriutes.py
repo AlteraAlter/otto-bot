@@ -1,3 +1,5 @@
+"""ORM model for flattened product attribute/value pairs per SKU."""
+
 from sqlalchemy import ForeignKey, String, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -5,6 +7,7 @@ from app.database import Base
 
 
 class ProductAttributes(Base):
+    """Stores one attribute value per row for a synchronized product SKU."""
 
     __tablename__ = "product_descriptions"
 

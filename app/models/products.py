@@ -1,3 +1,5 @@
+"""ORM model for persisted product snapshots used by local querying endpoints."""
+
 from sqlalchemy import String, Integer, Float, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import ARRAY
@@ -9,6 +11,7 @@ from app.schemas.enums import VatEnum
 
 
 class Product(Base):
+    """Product master row synchronized from OTTO and queried by local API routes."""
 
     __tablename__ = "products"
     __table_args__ = (
