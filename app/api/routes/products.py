@@ -155,6 +155,7 @@ async def get_products(
     This endpoint is intended for internal UI usage, so it supports richer local
     filtering and free-text search than OTTO list endpoints usually provide.
     """
+    print(product_reference, page, sku, category, search, sort_by, sort_order)
     sort_columns = {
         "id": Product.id,
         "sku": Product.sku,
@@ -166,6 +167,7 @@ async def get_products(
         "price": Product.pricing,
     }
     sort_column = sort_columns.get(sort_by, Product.id)
+    print(f"The sort column is: {sort_column}")
     sorter = asc if sort_order == SortOrderEnum.ASC else desc
 
     filters = []
@@ -221,7 +223,9 @@ async def get_products(
         attrs_by_sku = _group_attributes_by_sku(attrs_result.scalars().all())
 
     return {
-        "items": [_product_to_dict(item, attrs_by_sku.get(item.sku, [])) for item in items],
+        "items": [
+            _product_to_dict(item, attrs_by_sku.get(item.sku, [])) for item in items
+        ],
         "page": page,
         "limit": limit,
         "total": total or 0,
@@ -364,7 +368,9 @@ async def get_product(
 async def sync_products_to_db(
     product_service: ProductService = Depends(get_product_service),
     db: AsyncSession = Depends(get_db),
-    account_source: str = Query(default="JV", alias="accountSource", min_length=2, max_length=20),
+    account_source: str = Query(
+        default="JV", alias="accountSource", min_length=2, max_length=20
+    ),
     limit: int = Query(default=100, ge=10, le=100),
     max_pages: Optional[int] = Query(default=None, alias="maxPages", ge=1, le=10000),
 ):
@@ -384,13 +390,8 @@ async def create_or_update_products(
     product_service: ProductService = Depends(get_product_service),
 ):
     """Create or update products in OTTO from already validated request payloads."""
-    payload_list = [
-        item.model_dump(mode="json", exclude_none=True)
-        for item in payload
-    ]
-    return await product_service.create_or_update_products(
-        payload_list
-    )
+    payload_list = [item.model_dump(mode="json", exclude_none=True) for item in payload]
+    return await product_service.create_or_update_products(payload_list)
 
 
 @router.post("/update-status")
@@ -409,11 +410,16 @@ async def update_status(
     response_model=ProductCreationPrepareResponse,
     responses={
         400: {"model": ProductCreationErrorResponse, "description": "Invalid request"},
-        415: {"model": ProductCreationErrorResponse, "description": "Unsupported media type"},
+        415: {
+            "model": ProductCreationErrorResponse,
+            "description": "Unsupported media type",
+        },
     },
 )
 async def prepare_products_from_file(
-    file: UploadFile = File(..., description="JSON file with one object or an array of objects"),
+    file: UploadFile = File(
+        ..., description="JSON file with one object or an array of objects"
+    ),
     max_chars: int = Form(default=2000, ge=300, le=5000),
     creation_service: ProductCreationService = Depends(get_product_creation_service),
 ):
@@ -443,7 +449,9 @@ async def prepare_products_from_file(
     if not raw:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            content=ProductCreationErrorResponse(message="Uploaded file is empty").model_dump(),
+            content=ProductCreationErrorResponse(
+                message="Uploaded file is empty"
+            ).model_dump(),
         )
 
     try:
@@ -479,8 +487,14 @@ async def prepare_products_from_file(
     response_model=ProductCreationFileResponse,
     responses={
         400: {"model": ProductCreationErrorResponse, "description": "Invalid request"},
-        422: {"model": ProductCreationErrorResponse, "description": "Validation failed"},
-        502: {"model": ProductCreationErrorResponse, "description": "Upstream creation failed"},
+        422: {
+            "model": ProductCreationErrorResponse,
+            "description": "Validation failed",
+        },
+        502: {
+            "model": ProductCreationErrorResponse,
+            "description": "Upstream creation failed",
+        },
     },
 )
 async def create_products_from_prepared(
@@ -508,7 +522,9 @@ async def create_products_from_prepared(
             ).model_dump(),
         )
 
-    created_items, create_issues = await creation_service.create_products(validated_payloads)
+    created_items, create_issues = await creation_service.create_products(
+        validated_payloads
+    )
     issues = validation_issues + create_issues
 
     if created_items == 0 or any(issue.stage == "create" for issue in issues):
@@ -535,13 +551,24 @@ async def create_products_from_prepared(
     response_model=ProductCreationFileResponse,
     responses={
         400: {"model": ProductCreationErrorResponse, "description": "Invalid request"},
-        415: {"model": ProductCreationErrorResponse, "description": "Unsupported media type"},
-        422: {"model": ProductCreationErrorResponse, "description": "Validation failed"},
-        502: {"model": ProductCreationErrorResponse, "description": "Upstream creation failed"},
+        415: {
+            "model": ProductCreationErrorResponse,
+            "description": "Unsupported media type",
+        },
+        422: {
+            "model": ProductCreationErrorResponse,
+            "description": "Validation failed",
+        },
+        502: {
+            "model": ProductCreationErrorResponse,
+            "description": "Upstream creation failed",
+        },
     },
 )
 async def create_products_from_file(
-    file: UploadFile = File(..., description="JSON file with one object or an array of objects"),
+    file: UploadFile = File(
+        ..., description="JSON file with one object or an array of objects"
+    ),
     max_chars: int = Form(default=2000, ge=300, le=5000),
     creation_service: ProductCreationService = Depends(get_product_creation_service),
 ):
@@ -567,7 +594,9 @@ async def create_products_from_file(
     if not raw:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            content=ProductCreationErrorResponse(message="Uploaded file is empty").model_dump(),
+            content=ProductCreationErrorResponse(
+                message="Uploaded file is empty"
+            ).model_dump(),
         )
 
     try:
@@ -594,7 +623,9 @@ async def create_products_from_file(
             ).model_dump(),
         )
 
-    if result.created_items == 0 or any(issue.stage == "create" for issue in result.issues):
+    if result.created_items == 0 or any(
+        issue.stage == "create" for issue in result.issues
+    ):
         return JSONResponse(
             status_code=status.HTTP_502_BAD_GATEWAY,
             content=ProductCreationErrorResponse(
