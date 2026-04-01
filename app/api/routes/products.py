@@ -17,7 +17,11 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import asc, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_product_creation_service, get_product_service
+from app.dependencies import (
+    get_current_user,
+    get_product_creation_service,
+    get_product_service,
+)
 from app.database import get_db
 from app.models.product_attriutes import ProductAttributes
 from app.models.products import Product
@@ -39,7 +43,11 @@ from app.services.product_creation_service import ProductCreationService
 from app.services.product_service import ProductService
 from app.services.product_sync_service import ProductSyncService
 
-router = APIRouter(prefix="/v1/products", tags=["Products"])
+router = APIRouter(
+    prefix="/v1/products",
+    tags=["Products"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 def _group_attributes_by_sku(rows: list[ProductAttributes]) -> dict[str, list[dict]]:

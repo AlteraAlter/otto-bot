@@ -6,11 +6,20 @@ instead of being recreated for each injection.
 
 from functools import lru_cache
 
+from fastapi import Depends
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.clients.otto_client import OttoClient
+from app.database import get_db
 from app.core.configs import settings
 from app.core.otto_auth import OttoAuth
+from app.core.user_auth import UserAuth
+from app.repository.user_repository import UserRepository
 from app.services.product_creation_service import ProductCreationService
 from app.services.product_service import ProductService
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/v1/auth/login")
 
 
 @lru_cache
@@ -45,3 +54,28 @@ def get_product_service() -> ProductService:
 def get_product_creation_service() -> ProductCreationService:
     """Create a cached upload/normalization creation service."""
     return ProductCreationService(product_service=get_product_service())
+
+
+def get_user_repository(db: AsyncSession = Depends(get_db)) -> UserRepository:
+    """Create a request-scoped user repository bound to the active DB session."""
+    return UserRepository(db=db)
+
+
+def get_user_auth(
+    user_repository: UserRepository = Depends(get_user_repository),
+) -> UserAuth:
+    """Create a request-scoped user auth service."""
+    return UserAuth(
+        user_repository=user_repository,
+        secret_key=settings.jwt_secret_key,
+        algorithm=settings.jwt_algorithm,
+        access_token_expire_minutes=settings.jwt_access_token_expire_minutes,
+    )
+
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    user_auth: UserAuth = Depends(get_user_auth),
+):
+    """Resolve the current authenticated user from the bearer token."""
+    return await user_auth.get_current_user(token)
