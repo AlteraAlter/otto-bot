@@ -13,7 +13,7 @@ async def register(
     payload: UserRegisterDTO,
     user_auth: UserAuth = Depends(get_user_auth),
 ) -> TokenDTO:
-    """Create a new local user account with a hashed password and signed"""
+    """Create a new local user account with a hashed password and signed bearer token"""
     return await user_auth.register_user(payload)
 
 
