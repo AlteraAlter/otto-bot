@@ -52,7 +52,7 @@ LENGTH_ALIASES = ["Länge", "Laenge", "Lange", "LГ¤nge", "Length"]
 DEPTH_ALIASES = ["Tiefe", "Depth"]
 
 DIMENSION_BULLET_FIELDS = [
-    ("Breite", WIDTH_ALIASES),  
+    ("Breite", WIDTH_ALIASES),
     ("Hoehe", HEIGHT_ALIASES),
     ("Laenge", LENGTH_ALIASES),
     ("Tiefe", DEPTH_ALIASES),
@@ -81,9 +81,7 @@ ATTRIBUTE_CANDIDATES = [
 DIMENSION_ATTRIBUTE_NAMES = {"Breite", "Hoehe", "Tiefe"}
 
 PART_COUNT_PATTERN = re.compile(r"\b(\d{1,2})\s*(?:tlg|teilig|teile?)\b", re.I)
-ISO_DATETIME_Z_PATTERN = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
-)
+ISO_DATETIME_Z_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 NUMBER_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
 SCALAR_SPLIT_PATTERN = re.compile(r"[|;]")
@@ -354,7 +352,9 @@ def resolve_to_allowed_category(candidate: str, allowed_categories: set[str]) ->
         return alias
     if OTTO_FALLBACK_CATEGORY in allowed_categories:
         return OTTO_FALLBACK_CATEGORY
-    return sorted(allowed_categories)[0] if allowed_categories else OTTO_FALLBACK_CATEGORY
+    return (
+        sorted(allowed_categories)[0] if allowed_categories else OTTO_FALLBACK_CATEGORY
+    )
 
 
 def build_lookup(item: dict[str, Any]) -> dict[str, Any]:
@@ -431,8 +431,15 @@ def map_to_otto_category(lookup: dict[str, Any]) -> str:
     try:
         mapper = get_default_category_mapper()
         mapped = mapper.map_category(
-            product_type=as_text(pick_value(lookup, ["Produktart", "Category", "Type", "type"])),
-            title=as_text(pick_value(lookup, ["Artikelbeschreibung", "Title", "Titel", "TranslatedDescription"])),
+            product_type=as_text(
+                pick_value(lookup, ["Produktart", "Category", "Type", "type"])
+            ),
+            title=as_text(
+                pick_value(
+                    lookup,
+                    ["Artikelbeschreibung", "Title", "Titel", "TranslatedDescription"],
+                )
+            ),
             brand=as_text(pick_value(lookup, ["Marke", "Brand"])),
             room=as_text(pick_value(lookup, ["Zimmer", "Room"])),
             style=as_text(pick_value(lookup, ["Stil", "Style"])),
@@ -451,13 +458,37 @@ def map_to_otto_category(lookup: dict[str, Any]) -> str:
         if "set" in text:
             if any(
                 token in text
-                for token in ("stuhl", "chair", "sessel", "sofa", "couch", "bench", "wohnzimmer")
+                for token in (
+                    "stuhl",
+                    "chair",
+                    "sessel",
+                    "sofa",
+                    "couch",
+                    "bench",
+                    "wohnzimmer",
+                )
             ):
                 return resolve_to_allowed_category("Sitzmöbel-Sets", allowed_categories)
-            if any(token in text for token in ("schrank", "kommode", "sideboard", "wohnwand", "regal", "tv")):
-                return resolve_to_allowed_category("Kastenmöbel-Sets", allowed_categories)
-            if any(token in text for token in ("desk", "schreibtisch", "office", "empfang")):
-                return resolve_to_allowed_category("Arbeitsmöbel-Sets", allowed_categories)
+            if any(
+                token in text
+                for token in (
+                    "schrank",
+                    "kommode",
+                    "sideboard",
+                    "wohnwand",
+                    "regal",
+                    "tv",
+                )
+            ):
+                return resolve_to_allowed_category(
+                    "Kastenmöbel-Sets", allowed_categories
+                )
+            if any(
+                token in text for token in ("desk", "schreibtisch", "office", "empfang")
+            ):
+                return resolve_to_allowed_category(
+                    "Arbeitsmöbel-Sets", allowed_categories
+                )
 
     return resolve_to_allowed_category(OTTO_FALLBACK_CATEGORY, allowed_categories)
 
@@ -508,7 +539,9 @@ def split_media_urls(value: Any) -> list[str]:
     if isinstance(value, list):
         raw_values = [str(v).strip() for v in value if is_meaningful(v)]
     else:
-        raw_values = [v.strip() for v in MEDIA_SPLIT_PATTERN.split(str(value)) if v.strip()]
+        raw_values = [
+            v.strip() for v in MEDIA_SPLIT_PATTERN.split(str(value)) if v.strip()
+        ]
     urls = [u for u in raw_values if u.startswith(("http://", "https://"))]
     return list(dict.fromkeys(urls))
 
@@ -585,7 +618,9 @@ def collect_alias_values(lookup: dict[str, Any], aliases: list[str]) -> list[str
             if key in seen_keys:
                 continue
             is_exact = key == n_alias
-            is_suffixed_variant = key.startswith(n_alias) and key[len(n_alias) :].isdigit()
+            is_suffixed_variant = (
+                key.startswith(n_alias) and key[len(n_alias) :].isdigit()
+            )
             if not (is_exact or is_suffixed_variant):
                 continue
             values.extend(to_text_values(raw_value))
@@ -673,11 +708,15 @@ def build_style_phrase(style_value: str | None) -> str | None:
     return f"im {natural_join(normalized_tokens)} Stil"
 
 
-def build_leading_style_adjective(product_name: str, style_value: str | None) -> str | None:
+def build_leading_style_adjective(
+    product_name: str, style_value: str | None
+) -> str | None:
     if not style_value:
         return None
     product_key = product_name.lower()
-    style_key = style_value.lower().replace("ö", "oe").replace("ä", "ae").replace("ü", "ue")
+    style_key = (
+        style_value.lower().replace("ö", "oe").replace("ä", "ae").replace("ü", "ue")
+    )
 
     if "tisch" in product_key and "modern" in style_key:
         return "Moderner"
@@ -720,7 +759,11 @@ def build_product_line_details(
 
     if materials:
         material = materials[0]
-        if "tisch" in product_key and "glas" not in product_key and "glas" in material.lower():
+        if (
+            "tisch" in product_key
+            and "glas" not in product_key
+            and "glas" in material.lower()
+        ):
             details.append("Glaselementen")
         elif "aus " not in material.lower():
             details.append(f"Material aus {material}")
@@ -881,7 +924,12 @@ def build_attributes(lookup: dict[str, Any], part_count: int) -> list[dict[str, 
         if name == "Hinweis Massangaben" and not values:
             has_dimensions = any(
                 as_text(pick_value(lookup, aliases))
-                for aliases in [WIDTH_ALIASES, HEIGHT_ALIASES, DEPTH_ALIASES, LENGTH_ALIASES]
+                for aliases in [
+                    WIDTH_ALIASES,
+                    HEIGHT_ALIASES,
+                    DEPTH_ALIASES,
+                    LENGTH_ALIASES,
+                ]
             )
             if has_dimensions:
                 values = ["Alle Angaben sind ca.-Masse."]
@@ -902,7 +950,9 @@ def build_attributes(lookup: dict[str, Any], part_count: int) -> list[dict[str, 
 
 def build_media_assets(lookup: dict[str, Any]) -> list[dict[str, str]]:
     media_sources: list[str] = []
-    media_sources.extend(split_media_urls(pick_value(lookup, ["PictureURL", "pictureurls"])))
+    media_sources.extend(
+        split_media_urls(pick_value(lookup, ["PictureURL", "pictureurls"]))
+    )
     media_sources.extend(split_media_urls(pick_value(lookup, ["GalleryURL"])))
     deduped = list(dict.fromkeys(media_sources))
     return [{"type": "IMAGE", "location": url} for url in deduped]
@@ -926,7 +976,9 @@ def build_pricing(lookup: dict[str, Any], currency: str) -> dict[str, Any]:
         "vat": "FULL",
         "normPriceInfo": {
             "normAmount": as_number(pick_value(lookup, ["AuffuellMindestMenge"])),
-            "normUnit": as_text(pick_value(lookup, ["AuffuellMindestEinheit", "NormUnit"])),
+            "normUnit": as_text(
+                pick_value(lookup, ["AuffuellMindestEinheit", "NormUnit"])
+            ),
             "salesAmount": as_number(pick_value(lookup, ["AuffuellMenge"])),
             "salesUnit": as_text(pick_value(lookup, ["AuffuellEinheit", "SalesUnit"])),
         },
@@ -962,7 +1014,9 @@ def build_normalized_product(item: dict[str, Any], seo_html: str) -> dict[str, A
         "sku": sku,
         "ean": ean,
         "pzn": as_text(pick_value(lookup, ["PZN"])),
-        "mpn": as_text(pick_value(lookup, ["MPN", "Herstellernummer", "ManufacturerPartNumber"])),
+        "mpn": as_text(
+            pick_value(lookup, ["MPN", "Herstellernummer", "ManufacturerPartNumber"])
+        ),
         "moin": as_text(pick_value(lookup, ["MOIN"])),
         "releaseDate": normalize_iso_date(
             pick_value(lookup, ["releaseDate", "ReleaseDate", "Erscheinungsdatum"])
@@ -1021,7 +1075,9 @@ def iter_input_files(config: NormalizeConfig) -> list[Path]:
     return [
         path
         for path in files
-        if path.is_file() and path.suffix.lower() == ".json" and not should_skip_input_file(path, config)
+        if path.is_file()
+        and path.suffix.lower() == ".json"
+        and not should_skip_input_file(path, config)
     ]
 
 
@@ -1042,7 +1098,9 @@ def load_input_items(input_file: Path) -> list[dict[str, Any]]:
     return []
 
 
-def normalize_items(items: list[dict[str, Any]], max_chars: int) -> tuple[list[dict[str, Any]], int]:
+def normalize_items(
+    items: list[dict[str, Any]], max_chars: int
+) -> tuple[list[dict[str, Any]], int]:
     normalized: list[dict[str, Any]] = []
     skipped_items = 0
     for item in items:
@@ -1085,7 +1143,9 @@ def main() -> None:
             processed_files += 1
             total_products += written_count
             total_skipped_products += skipped_count
-            print(f"{input_file.name} -> {output_file.name} | products: {written_count}, skipped: {skipped_count}")
+            print(
+                f"{input_file.name} -> {output_file.name} | products: {written_count}, skipped: {skipped_count}"
+            )
         except Exception as exc:
             failed_files += 1
             print(f"FAILED {input_file.name}: {exc}", file=sys.stderr)

@@ -16,8 +16,7 @@ class UserRegisterDTO(BaseModel):
     last_name: str
     email: EmailStr
     password: str
-    
-    
+
     @field_validator("password")
     @classmethod
     def validate_password(cls, value: str) -> str:

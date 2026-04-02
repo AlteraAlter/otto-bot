@@ -17,8 +17,8 @@ class Settings(BaseSettings):
     otto_base_url: str = "https://api.otto.market"
     otto_scope: str = "orders products"
     otto_timeout_seconds: float = 20.0
-    
-    #DATABESE
+
+    # DATABASE
     db_host: str
     db_port: int
     db_name: str

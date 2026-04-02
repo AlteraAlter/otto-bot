@@ -14,9 +14,7 @@ class Product(Base):
     """Product master row synchronized from OTTO and queried by local API routes."""
 
     __tablename__ = "products"
-    __table_args__ = (
-        UniqueConstraint("sku", name="uq_sku"),
-    )
+    __table_args__ = (UniqueConstraint("sku", name="uq_sku"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     sku: Mapped[str] = mapped_column(String, nullable=False, unique=True)
@@ -29,4 +27,6 @@ class Product(Base):
     category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     productLine: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    bullet_points: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False, default=list)
+    bullet_points: Mapped[list[str]] = mapped_column(
+        ARRAY(String), nullable=False, default=list
+    )

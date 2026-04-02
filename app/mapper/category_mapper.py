@@ -114,7 +114,9 @@ class CategoryMapper:
         return [token for token in text.split() if cls._usable_token(token)]
 
     @classmethod
-    def _build_category_index(cls, category_groups: list[list[str]]) -> list[dict[str, Any]]:
+    def _build_category_index(
+        cls, category_groups: list[list[str]]
+    ) -> list[dict[str, Any]]:
         index: list[dict[str, Any]] = []
         for cat_id, group in enumerate(category_groups):
             if not group:
@@ -137,7 +139,9 @@ class CategoryMapper:
         return index
 
     @staticmethod
-    def _build_token_index(categories: list[dict[str, Any]]) -> dict[str, set[tuple[int, int]]]:
+    def _build_token_index(
+        categories: list[dict[str, Any]],
+    ) -> dict[str, set[tuple[int, int]]]:
         token_index: dict[str, set[tuple[int, int]]] = {}
         for cat_pos, category in enumerate(categories):
             for syn_pos, synonym in enumerate(category["synonyms"]):
@@ -198,7 +202,9 @@ class CategoryMapper:
                     continue
                 field_texts[field] = (field_texts.get(field, "") + " " + norm).strip()
                 for token in self._tokenize(norm):
-                    token_weights[token] = max(token_weights.get(token, 0), FIELD_WEIGHTS[field])
+                    token_weights[token] = max(
+                        token_weights.get(token, 0), FIELD_WEIGHTS[field]
+                    )
                 joined_parts.append(norm)
 
         if not token_weights:
@@ -228,7 +234,9 @@ class CategoryMapper:
         if exact_title is not None:
             return exact_title
 
-        return self._best_idf_match(" ".join(joined_parts).strip(), token_weights, candidates)
+        return self._best_idf_match(
+            " ".join(joined_parts).strip(), token_weights, candidates
+        )
 
     def _best_exact_match(
         self,
@@ -276,7 +284,9 @@ class CategoryMapper:
             if not overlap:
                 continue
 
-            overlap_weighted = sum(self.idf.get(t, 1.0) * token_weights[t] for t in overlap)
+            overlap_weighted = sum(
+                self.idf.get(t, 1.0) * token_weights[t] for t in overlap
+            )
             total_syn_weight = sum(self.idf.get(t, 1.0) for t in synonym_tokens)
             coverage = overlap_weighted / max(total_syn_weight, 1e-9)
             phrase_bonus = 1.0 if f" {synonym['norm']} " in haystack else 0.0

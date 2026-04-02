@@ -18,6 +18,7 @@ from app.core.user_auth import UserAuth
 from app.repository.user_repository import UserRepository
 from app.services.product_creation_service import ProductCreationService
 from app.services.product_service import ProductService
+from app.schemas.userDTO import UserDTO
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/v1/auth/login")
 
@@ -79,3 +80,12 @@ async def get_current_user(
 ):
     """Resolve the current authenticated user from the bearer token."""
     return await user_auth.get_current_user(token)
+
+
+def require_role(allowed_roles: list[str]):
+    
+    async def role_checker(
+        current_user: UserDTO = Depends(get_current_user)
+        
+    ):
+        user_role = getattr(current_user, "role", None)

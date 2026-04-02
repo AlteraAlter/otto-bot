@@ -1,6 +1,6 @@
 from app.database import Base
 from sqlalchemy.orm import Mapped, mapped_column, validates
-from sqlalchemy import String, Integer
+from sqlalchemy import String, Integer, Enum, null
 
 
 class User(Base):

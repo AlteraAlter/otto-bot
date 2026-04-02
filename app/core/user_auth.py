@@ -90,6 +90,7 @@ class UserAuth:
         return f"{header_segment}.{payload_segment}.{signature}"
 
     def decode_token(self, token: str) -> dict[str, Any]:
+        
         credentials_exception = HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
@@ -127,9 +128,7 @@ class UserAuth:
         user = await self.user_repository.select_user_by_email(email)
         if not user:
             return None
-        if not self.verify_password(password, user.password):
-            return None
-        return user
+        return user if self.verify_password(password, user.password) else None
 
     async def login_for_access_token(self, credentials: UserLoginDTO) -> TokenDTO:
         user = await self.validate_user(credentials.email, credentials.password)
@@ -165,7 +164,7 @@ class UserAuth:
             email=payload.email,
             password=self.hash_password(payload.password),
         )
-        
+
         access_token_expires = timedelta(minutes=self.access_token_expire_minutes)
         access_token = self.create_access_token(
             data={"sub": str(user.id), "email": user.email},

@@ -36,15 +36,15 @@ class ProductService:
     async def get_marketplace_status(self, payload: dict):
         """Fetch marketplace status information for products from OTTO."""
         return await self.client.get_marketplace_status(payload)
-    
+
     async def create_or_update_products(self, payload: list[dict[str, Any]]):
         """Create or upsert products in OTTO with normalized payload bodies."""
         return await self.client.create_or_update_products(payload)
-    
+
     async def update_status(self, payload: dict):
         """Update active flags/status for one or more products in OTTO."""
         return await self.client.update_status(payload)
-    
+
     async def get_categories(self, payload: dict):
         """Fetch category information from OTTO, normalized by the client."""
         return await self.client.get_categories(payload)

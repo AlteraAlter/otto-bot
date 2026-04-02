@@ -23,7 +23,7 @@ from app.dependencies import (
     get_product_service,
 )
 from app.database import get_db
-from app.models.product_attriutes import ProductAttributes
+from app.models.product_attributes import ProductAttributes
 from app.models.products import Product
 from app.schemas.marketplaceStatus import MarketPlaceStatus
 from app.schemas.product_creation import (
@@ -190,8 +190,7 @@ async def get_products(
     if account_source:
         filters.append(func.upper(Product.account_source) == account_source.upper())
     if search:
-        term = search.strip()
-        if term:
+        if term := search.strip():
             pattern = f"%{term}%"
             filters.append(
                 or_(
@@ -228,7 +227,7 @@ async def get_products(
         attrs_result = await db.execute(
             select(ProductAttributes).where(ProductAttributes.product_sku.in_(skus))
         )
-        attrs_by_sku = _group_attributes_by_sku(attrs_result.scalars().all())
+        attrs_by_sku = _group_attributes_by_sku(list(attrs_result.scalars().all()))
 
     return {
         "items": [
@@ -341,7 +340,7 @@ async def get_product_by_status_path(
     attrs_result = await db.execute(
         select(ProductAttributes).where(ProductAttributes.product_sku == product.sku)
     )
-    attrs_by_sku = _group_attributes_by_sku(attrs_result.scalars().all())
+    attrs_by_sku = _group_attributes_by_sku(list(attrs_result.scalars().all()))
     return _product_to_dict(product, attrs_by_sku.get(product.sku, []))
 
 
@@ -368,7 +367,7 @@ async def get_product(
     attrs_result = await db.execute(
         select(ProductAttributes).where(ProductAttributes.product_sku == product.sku)
     )
-    attrs_by_sku = _group_attributes_by_sku(attrs_result.scalars().all())
+    attrs_by_sku = _group_attributes_by_sku(list(attrs_result.scalars().all()))
     return _product_to_dict(product, attrs_by_sku.get(product.sku, []))
 
 
