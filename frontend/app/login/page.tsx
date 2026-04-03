@@ -4,6 +4,9 @@ import Link from "next/link";
 import { FormEvent, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
+import { readApiErrorMessage } from "../lib/api";
+import { AuthShell } from "../ui/auth-shell";
+
 export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -31,10 +34,8 @@ export default function LoginPage() {
       if (!response.ok) {
         let detail = "Не удалось выполнить вход";
         try {
-          const payload = (await response.json()) as { detail?: string };
-          if (payload.detail) {
-            detail = payload.detail;
-          }
+          const payload: unknown = await response.json();
+          detail = readApiErrorMessage(payload, detail, response.status);
         } catch {
           detail = `${detail} (${response.status})`;
         }
@@ -52,18 +53,22 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="login-page">
-      <section className="login-shell">
-        <div className="login-hero">
-          <p className="brand">OTTO Контроль</p>
-          <h1>Вход в панель управления товарами</h1>
-          <p className="login-copy">
-            Авторизуйтесь локальным аккаунтом, чтобы работать с защищённым API
-            продуктов.
-          </p>
+    <AuthShell
+      title="Вход в рабочее пространство OTTO"
+      description="Спокойный, прямой вход без лишних шагов. Авторизуйтесь, чтобы открыть каталог, создание товаров и служебные инструменты."
+      sideContent={
+        <div className="auth-note">
+          <p>Что доступно после входа:</p>
+          <ul className="auth-list">
+            <li>каталог товаров и массовые действия</li>
+            <li>создание новых товаров</li>
+            <li>приглашения сотрудников для SEO</li>
+          </ul>
         </div>
-
-        <form className="login-card" onSubmit={handleSubmit}>
+      }
+    >
+      <form onSubmit={handleSubmit}>
+        <div className="form-stack">
           <label className="field">
             <span>Email</span>
             <input
@@ -93,15 +98,15 @@ export default function LoginPage() {
           <button className="primary-btn full" disabled={isSubmitting} type="submit">
             {isSubmitting ? "Входим..." : "Войти"}
           </button>
+        </div>
 
-          <p className="auth-footer">
-            Нет аккаунта?{" "}
-            <Link className="auth-link" href="/register">
-              Зарегистрироваться
-            </Link>
-          </p>
-        </form>
-      </section>
-    </main>
+        <p className="auth-footer">
+          Самостоятельная регистрация отключена.{" "}
+          <Link className="auth-link" href="/register">
+            Посмотреть правила доступа
+          </Link>
+        </p>
+      </form>
+    </AuthShell>
   );
 }

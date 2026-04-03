@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 1200
+    frontend_app_url: str = "http://127.0.0.1:3000"
+    employee_invitation_expire_hours: int = 48
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_sender_email: str | None = None
+    smtp_use_tls: bool = True
 
 
 settings = Settings()

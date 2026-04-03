@@ -50,7 +50,7 @@ router = APIRouter(
     tags=["Products"],
     dependencies=[
         Depends(get_current_user),
-        Depends(require_role([RoleEnum.EMPLOYEE])),
+        Depends(require_role([RoleEnum.EMPLOYEE, RoleEnum.SEO])),
     ],
 )
 

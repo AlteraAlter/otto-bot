@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
+import { useCurrentUser } from "./hooks/use-current-user";
 import { CatalogPanel } from "./products-dashboard/catalog-panel";
 import { EditorPanel } from "./products-dashboard/editor-panel";
 import { useProductDashboard } from "./products-dashboard/use-product-dashboard";
@@ -11,6 +12,15 @@ import { formatCurrency } from "./products-dashboard/utils";
 export default function Home() {
   const dashboard = useProductDashboard();
   const router = useRouter();
+  const { currentUser, error } = useCurrentUser();
+
+  const navItems = [
+    { href: "/", label: "Каталог", active: true },
+    { href: "/creator", label: "Создание товара", active: false },
+    ...(currentUser?.role === "SEO"
+      ? [{ href: "/invitations", label: "Приглашения", active: false }]
+      : []),
+  ];
 
   async function handleLogout() {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -20,36 +30,56 @@ export default function Home() {
 
   return (
     <main className="otto-page">
-      <div className="ambient ambient-left" />
-      <div className="ambient ambient-right" />
-
       <section className="app-shell">
         <aside className="sidebar">
           <div>
             <p className="brand">OTTO Контроль</p>
-            <p className="brand-subtitle">DB</p>
+            <p className="brand-subtitle">
+              {currentUser?.email ? currentUser.email : "Product workspace"}
+            </p>
           </div>
 
           <nav className="side-nav">
-            <button className="nav-item active">Каталог</button>
-            <Link className="nav-item" href="/creator">
-              Создание товара
-            </Link>
+            {navItems.map((item) =>
+              item.active ? (
+                <button key={item.label} className="nav-item active">
+                  {item.label}
+                </button>
+              ) : (
+                <Link key={item.href} className="nav-item" href={item.href}>
+                  {item.label}
+                </Link>
+              ),
+            )}
           </nav>
 
           <div className="side-card">
-            <p className="side-card-title">Интеграция OTTO</p>
-            <p className="side-card-text">Источник: база данных</p>
-            <span className="sync-pill">DB</span>
+            <p className="side-card-title">Рабочий контур</p>
+            <p className="side-card-text">
+              Каталог читает данные из базы, а массовые изменения остаются в одном
+              месте без лишних переходов.
+            </p>
+            <span className="sync-pill">{currentUser?.role ?? "USER"}</span>
           </div>
         </aside>
 
         <section className="workspace">
           <header className="topbar">
             <div>
+              <p className="page-section-label">Каталог</p>
               <h1>Управление товарами</h1>
+              <p>
+                Чистый обзор каталога, быстрый поиск и редактирование карточки без
+                перегруженного интерфейса.
+              </p>
             </div>
             <div className="topbar-actions">
+              <div className="user-context-mini">
+                <div className="user-context-mini-head">
+                  <strong>{currentUser?.email ?? "Профиль"}</strong>
+                  <span className="sync-pill">{currentUser?.role ?? "USER"}</span>
+                </div>
+              </div>
               <button
                 className="secondary-btn"
                 onClick={handleLogout}
@@ -67,11 +97,12 @@ export default function Home() {
             </div>
           </header>
 
+          {error ? <p className="helper-banner">{error}</p> : null}
           {dashboard.notice ? <p className="helper-banner">{dashboard.notice}</p> : null}
 
           <section className="kpi-grid">
             <article className="kpi-card">
-              <p>Всего в БД</p>
+              <p>Всего в каталоге</p>
               <strong>{dashboard.kpi.total}</strong>
             </article>
             <article className="kpi-card">
@@ -83,7 +114,7 @@ export default function Home() {
               <strong>{dashboard.kpi.lowStock}</strong>
             </article>
             <article className="kpi-card">
-              <p>Стоимость</p>
+              <p>Общая стоимость</p>
               <strong>{formatCurrency(dashboard.kpi.totalValue)}</strong>
             </article>
           </section>

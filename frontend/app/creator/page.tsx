@@ -243,6 +243,8 @@ export default function CreatorPage() {
 
   const currentJsonPreview = useMemo(() => {
     try {
+      // We keep the preview derived from the same in-memory source the user edits,
+      // so the JSON preview always matches what will actually be sent to the backend.
       const source =
         mode === "file"
           ? editorData
@@ -588,9 +590,11 @@ export default function CreatorPage() {
       <section className="creator-card">
         <div className="creator-head">
           <div>
+            <p className="page-section-label">Создание</p>
             <h1>Создание товаров</h1>
             <p>
-              Режимы разделены: из JSON-файла и добавление товаров по одному.
+              Два понятных сценария: подготовка из JSON-файла и ручное добавление
+              товаров по одному.
             </p>
           </div>
           <Link className="ghost-btn" href="/">
@@ -632,7 +636,7 @@ export default function CreatorPage() {
                   onChange={onInputChange}
                 />
                 <strong>Перетащите JSON-файл сюда</strong>
-                <span>или нажмите, чтобы выбрать файл</span>
+                <span>или нажмите, чтобы выбрать файл с компьютера</span>
                 <em>{fileLabel}</em>
               </label>
 

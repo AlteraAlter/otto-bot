@@ -76,8 +76,20 @@ const ProductRow = memo(function ProductRow({
           {product.name}
         </span>
         <span title={product.sku}>{product.sku}</span>
+        <span title={product.brandId}>{product.brandId}</span>
         <span title={product.category}>{product.category}</span>
+        <span>
+          <span
+            className={`status ${
+              product.status === "active" ? "status-active" : "status-paused"
+            }`}
+          >
+            {product.status === "active" ? "Активен" : "Неактивен"}
+          </span>
+        </span>
+        <span>{product.stock}</span>
         <span>{formatCurrency(product.price)}</span>
+        <span>{product.updatedAt}</span>
       </button>
     </div>
   );
@@ -119,6 +131,21 @@ export function CatalogPanel({
 }: CatalogPanelProps) {
   return (
     <div className="catalog-panel">
+      <div className="panel-header">
+        <div>
+          <h2>Каталог товаров</h2>
+          <p>
+            Рабочая таблица для поиска, фильтрации, просмотра карточки и массового
+            изменения цен.
+          </p>
+        </div>
+        <div className="panel-meta">
+          <span>{`Показано ${visibleProducts.length}`}</span>
+          <span>{`В базе ${dbTotal}`}</span>
+          <span>{`Выбрано ${multiSelectedIds.length}`}</span>
+        </div>
+      </div>
+
       <div className="toolbar">
         <input
           type="search"
@@ -214,8 +241,12 @@ export function CatalogPanel({
               <div className="row-open-head">
                 <span>Товар</span>
                 <span>SKU</span>
+                <span>Бренд</span>
                 <span>Категория</span>
+                <span>Статус</span>
+                <span>Остаток</span>
                 <span>Цена</span>
+                <span>Обновлён</span>
               </div>
             </div>
             {pagedVisibleProducts.map((product) => (
