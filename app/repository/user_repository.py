@@ -1,6 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.user_roles import UserRoles
 from app.models.users import User
 
 
@@ -36,3 +37,15 @@ class UserRepository:
         stmt = select(User).where(User.id == user_id)
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def select_user_with_role_by_id(self, user_id: int) -> tuple[User, object | None] | None:
+        stmt = (
+            select(User, UserRoles.role)
+            .outerjoin(UserRoles, UserRoles.user == User.id)
+            .where(User.id == user_id)
+        )
+        result = await self.db.execute(stmt)
+        row = result.first()
+        if row is None:
+            return None
+        return row[0], row[1]

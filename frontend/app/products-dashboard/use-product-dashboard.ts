@@ -32,6 +32,12 @@ function emptyBaselines(): Record<string, ProductBaseline> {
   return {};
 }
 
+function redirectToLoginIfUnauthorized(status: number) {
+  if (status === 401 && typeof window !== "undefined") {
+    window.location.assign("/login?expired=1");
+  }
+}
+
 export function useProductDashboard() {
   const [products, setProducts] = useState<Product[]>([]);
   const [query, setQuery] = useState("");
@@ -169,6 +175,7 @@ export function useProductDashboard() {
         const productsRes = await fetch(`/api/products?${params.toString()}`, {
           cache: "no-store"
         });
+        redirectToLoginIfUnauthorized(productsRes.status);
 
         if (!productsRes.ok) {
           throw new Error(`Не удалось получить товары (${productsRes.status})`);
@@ -288,6 +295,7 @@ export function useProductDashboard() {
     const response = await fetch(`/api/products/${encodeURIComponent(sku)}`, {
       cache: "no-store"
     });
+    redirectToLoginIfUnauthorized(response.status);
     if (!response.ok) return null;
 
     const payload: unknown = await response.json();
@@ -464,6 +472,7 @@ export function useProductDashboard() {
               },
               body: JSON.stringify(payload)
             });
+            redirectToLoginIfUnauthorized(response.status);
 
             if (!response.ok) {
               const text = await response.text();
@@ -500,6 +509,7 @@ export function useProductDashboard() {
                 ]
               })
             });
+            redirectToLoginIfUnauthorized(response.status);
 
             if (!response.ok) {
               const text = await response.text();
@@ -656,6 +666,7 @@ export function useProductDashboard() {
           },
           body: JSON.stringify(payload)
         });
+        redirectToLoginIfUnauthorized(response.status);
 
         if (!response.ok) {
           const text = await response.text();
@@ -717,6 +728,7 @@ export function useProductDashboard() {
         method: "POST",
         cache: "no-store"
       });
+      redirectToLoginIfUnauthorized(response.status);
       const payload: unknown = await response.json();
       if (!response.ok) {
         throw new Error(

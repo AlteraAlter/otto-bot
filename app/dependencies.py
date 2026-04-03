@@ -6,18 +6,19 @@ instead of being recreated for each injection.
 
 from functools import lru_cache
 
-from fastapi import Depends
+from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.otto_client import OttoClient
-from app.database import get_db
 from app.core.configs import settings
 from app.core.otto_auth import OttoAuth
 from app.core.user_auth import UserAuth
+from app.database import get_db
 from app.repository.user_repository import UserRepository
 from app.services.product_creation_service import ProductCreationService
 from app.services.product_service import ProductService
+from app.schemas.enums import RoleEnum
 from app.schemas.userDTO import UserDTO
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/v1/auth/login")
@@ -77,15 +78,23 @@ def get_user_auth(
 async def get_current_user(
     token: str = Depends(oauth2_scheme),
     user_auth: UserAuth = Depends(get_user_auth),
-):
+) -> UserDTO:
     """Resolve the current authenticated user from the bearer token."""
     return await user_auth.get_current_user(token)
 
 
-def require_role(allowed_roles: list[str]):
-    
-    async def role_checker(
-        current_user: UserDTO = Depends(get_current_user)
-        
-    ):
-        user_role = getattr(current_user, "role", None)
+def require_role(allowed_roles: list[str] | list[RoleEnum]):
+    allowed_role_values = {
+        role.value if isinstance(role, RoleEnum) else role for role in allowed_roles
+    }
+
+    async def role_checker(current_user: UserDTO = Depends(get_current_user)) -> UserDTO:
+        user_role = current_user.role.value if current_user.role else None
+        if user_role not in allowed_role_values:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to access this resource",
+            )
+        return current_user
+
+    return role_checker

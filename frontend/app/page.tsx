@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 
 import { CatalogPanel } from "./products-dashboard/catalog-panel";
 import { EditorPanel } from "./products-dashboard/editor-panel";
@@ -9,6 +10,13 @@ import { formatCurrency } from "./products-dashboard/utils";
 
 export default function Home() {
   const dashboard = useProductDashboard();
+  const router = useRouter();
+
+  async function handleLogout() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    router.replace("/login");
+    router.refresh();
+  }
 
   return (
     <main className="otto-page">
@@ -41,13 +49,22 @@ export default function Home() {
             <div>
               <h1>Управление товарами</h1>
             </div>
-            <button
-              className="primary-btn"
-              onClick={dashboard.syncProductsToDatabase}
-              disabled={dashboard.isSyncingDb || dashboard.isLoading}
-            >
-              {dashboard.isSyncingDb ? "Загрузка..." : "Синк DB"}
-            </button>
+            <div className="topbar-actions">
+              <button
+                className="secondary-btn"
+                onClick={handleLogout}
+                type="button"
+              >
+                Выйти
+              </button>
+              <button
+                className="primary-btn"
+                onClick={dashboard.syncProductsToDatabase}
+                disabled={dashboard.isSyncingDb || dashboard.isLoading}
+              >
+                {dashboard.isSyncingDb ? "Загрузка..." : "Синк DB"}
+              </button>
+            </div>
           </header>
 
           {dashboard.notice ? <p className="helper-banner">{dashboard.notice}</p> : null}

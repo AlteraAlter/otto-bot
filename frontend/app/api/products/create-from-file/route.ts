@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 
-const BACKEND_BASE_URL = process.env.BACKEND_BASE_URL ?? "http://127.0.0.1:8000";
-
-function withPath(path: string) {
-  return `${BACKEND_BASE_URL}${path}`;
-}
+import {
+  getAuthorizedHeaders,
+  toClientResponse,
+  withBackendPath,
+} from "../../../../lib/auth";
 
 export async function POST(request: Request) {
   const incoming = await request.formData();
@@ -22,17 +22,12 @@ export async function POST(request: Request) {
     formData.append("max_chars", maxChars);
   }
 
-  const response = await fetch(withPath("/v1/products/create-from-file"), {
+  const response = await fetch(withBackendPath("/v1/products/create-from-file"), {
     method: "POST",
+    headers: await getAuthorizedHeaders(),
     body: formData,
-    cache: "no-store"
+    cache: "no-store",
   });
 
-  const text = await response.text();
-  return new NextResponse(text, {
-    status: response.status,
-    headers: {
-      "content-type": response.headers.get("content-type") ?? "application/json"
-    }
-  });
+  return toClientResponse(response);
 }

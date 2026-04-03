@@ -1,5 +1,8 @@
-from pydantic import BaseModel, ConfigDict, field_validator, EmailStr
 import re
+
+from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
+
+from app.schemas.enums import RoleEnum
 
 
 class UserDTO(BaseModel):
@@ -9,6 +12,7 @@ class UserDTO(BaseModel):
     name: str
     email: EmailStr
     last_name: str
+    role: RoleEnum | None = None
 
 
 class UserRegisterDTO(BaseModel):

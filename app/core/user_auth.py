@@ -187,11 +187,22 @@ class UserAuth:
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        user = await self.user_repository.select_user_by_id(int(subject))
-        if not user:
+        user_with_role = await self.user_repository.select_user_with_role_by_id(
+            int(subject)
+        )
+        if not user_with_role:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User not found",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        return UserDTO.model_validate(user)
+        user, role = user_with_role
+        return UserDTO.model_validate(
+            {
+                "id": user.id,
+                "name": user.name,
+                "email": user.email,
+                "last_name": user.last_name,
+                "role": role,
+            }
+        )

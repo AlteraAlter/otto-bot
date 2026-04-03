@@ -21,6 +21,7 @@ from app.dependencies import (
     get_current_user,
     get_product_creation_service,
     get_product_service,
+    require_role,
 )
 from app.database import get_db
 from app.models.product_attributes import ProductAttributes
@@ -39,6 +40,7 @@ from app.schemas.product_query import (
     CategoryQuery,
 )
 from app.schemas.enums import SortOrderEnum
+from app.schemas.enums import RoleEnum
 from app.services.product_creation_service import ProductCreationService
 from app.services.product_service import ProductService
 from app.services.product_sync_service import ProductSyncService
@@ -46,7 +48,10 @@ from app.services.product_sync_service import ProductSyncService
 router = APIRouter(
     prefix="/v1/products",
     tags=["Products"],
-    dependencies=[Depends(get_current_user)],
+    dependencies=[
+        Depends(get_current_user),
+        Depends(require_role([RoleEnum.EMPLOYEE])),
+    ],
 )
 
 
