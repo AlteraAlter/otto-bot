@@ -7,18 +7,26 @@ import { useCurrentUser } from "./hooks/use-current-user";
 import { CatalogPanel } from "./products-dashboard/catalog-panel";
 import { EditorPanel } from "./products-dashboard/editor-panel";
 import { useProductDashboard } from "./products-dashboard/use-product-dashboard";
-import { formatCurrency } from "./products-dashboard/utils";
 
 export default function Home() {
   const dashboard = useProductDashboard();
   const router = useRouter();
   const { currentUser, error } = useCurrentUser();
+  const heroStats = [
+    { label: "Всего", value: dashboard.kpi.total },
+    { label: "Активные", value: dashboard.kpi.active },
+    { label: "С ошибками", value: dashboard.kpi.withErrors },
+    { label: "На распродаже", value: dashboard.kpi.onSale },
+  ];
 
   const navItems = [
     { href: "/", label: "Каталог", active: true },
     { href: "/creator", label: "Создание товара", active: false },
     ...(currentUser?.role === "SEO"
-      ? [{ href: "/invitations", label: "Приглашения", active: false }]
+      ? [
+          { href: "/imports", label: "Data Operations", active: false },
+          { href: "/invitations", label: "Приглашения", active: false },
+        ]
       : []),
   ];
 
@@ -35,7 +43,7 @@ export default function Home() {
           <div>
             <p className="brand">OTTO Контроль</p>
             <p className="brand-subtitle">
-              {currentUser?.email ? currentUser.email : "Product workspace"}
+              {currentUser?.email ? currentUser.email : "Catalog workspace"}
             </p>
           </div>
 
@@ -53,25 +61,29 @@ export default function Home() {
             )}
           </nav>
 
-          <div className="side-card">
-            <p className="side-card-title">Рабочий контур</p>
-            <p className="side-card-text">
-              Каталог читает данные из базы, а массовые изменения остаются в одном
-              месте без лишних переходов.
-            </p>
+          <div className="side-note">
             <span className="sync-pill">{currentUser?.role ?? "USER"}</span>
+            <p>Спокойная рабочая зона для просмотра импортированных XLSX-товаров из базы.</p>
           </div>
         </aside>
 
         <section className="workspace">
           <header className="topbar">
-            <div>
+            <div className="topbar-copy">
               <p className="page-section-label">Каталог</p>
               <h1>Управление товарами</h1>
               <p>
-                Чистый обзор каталога, быстрый поиск и редактирование карточки без
-                перегруженного интерфейса.
+                Минималистичный обзор базы товаров с правильными полями из
+                импортированной таблицы.
               </p>
+              <div className="hero-stats" aria-label="Ключевые показатели каталога">
+                {heroStats.map((item) => (
+                  <div className="hero-stat" key={item.label}>
+                    <span>{item.label}</span>
+                    <strong>{item.value}</strong>
+                  </div>
+                ))}
+              </div>
             </div>
             <div className="topbar-actions">
               <div className="user-context-mini">
@@ -87,94 +99,37 @@ export default function Home() {
               >
                 Выйти
               </button>
-              <button
-                className="primary-btn"
-                onClick={dashboard.syncProductsToDatabase}
-                disabled={dashboard.isSyncingDb || dashboard.isLoading}
-              >
-                {dashboard.isSyncingDb ? "Загрузка..." : "Синк DB"}
-              </button>
             </div>
           </header>
 
           {error ? <p className="helper-banner">{error}</p> : null}
           {dashboard.notice ? <p className="helper-banner">{dashboard.notice}</p> : null}
 
-          <section className="kpi-grid">
-            <article className="kpi-card">
-              <p>Всего в каталоге</p>
-              <strong>{dashboard.kpi.total}</strong>
-            </article>
-            <article className="kpi-card">
-              <p>Активные</p>
-              <strong>{dashboard.kpi.active}</strong>
-            </article>
-            <article className="kpi-card">
-              <p>Низкий остаток</p>
-              <strong>{dashboard.kpi.lowStock}</strong>
-            </article>
-            <article className="kpi-card">
-              <p>Общая стоимость</p>
-              <strong>{formatCurrency(dashboard.kpi.totalValue)}</strong>
-            </article>
-          </section>
-
           <section className="content-grid">
             <CatalogPanel
-              allPagedSelected={dashboard.allPagedSelected}
-              bulkPriceExpression={dashboard.bulkPriceExpression}
               categories={dashboard.categories}
               categoryFilter={dashboard.categoryFilter}
               dbTotal={dashboard.dbTotal}
-              isBulkSaving={dashboard.isBulkSaving}
               isLoading={dashboard.isLoading}
-              multiSelectedIds={dashboard.multiSelectedIds}
-              pagedVisibleProducts={dashboard.pagedVisibleProducts}
               products={dashboard.products}
               query={dashboard.query}
               selectedId={dashboard.selectedId}
-              selectedIdSet={dashboard.selectedIdSet}
               sortBy={dashboard.sortBy}
               sortOrder={dashboard.sortOrder}
-              statusFilter={dashboard.statusFilter}
               tablePage={dashboard.tablePage}
               totalTablePages={dashboard.totalTablePages}
-              visibleProducts={dashboard.visibleProducts}
-              onApplyAndSaveBulkPriceChanges={dashboard.applyAndSaveBulkPriceChanges}
-              onApplyBulkPriceChanges={dashboard.applyBulkPriceChanges}
-              onBulkPriceExpressionChange={dashboard.setBulkPriceExpression}
               onCategoryFilterChange={dashboard.setCategoryFilter}
-              onClearSelection={() => dashboard.setMultiSelectedIds([])}
               onOpenProduct={dashboard.openProduct}
               onPageChange={dashboard.setTablePage}
               onQueryChange={dashboard.setQuery}
               onSortByChange={dashboard.setSortBy}
               onSortOrderChange={dashboard.setSortOrder}
-              onStatusFilterChange={dashboard.setStatusFilter}
-              onTogglePageSelection={dashboard.togglePageSelection}
-              onToggleProductSelection={dashboard.toggleProductSelection}
             />
 
             <EditorPanel
-              hasProductChanges={dashboard.hasProductChanges}
-              hasStatusChanges={dashboard.hasStatusChanges}
-              isApplying={dashboard.isApplying}
-              isBulkSaving={dashboard.isBulkSaving}
               isDetailOpen={dashboard.isDetailOpen}
-              multiSelectedIds={dashboard.multiSelectedIds}
               selectedProduct={dashboard.selectedProduct}
-              onAddAttribute={dashboard.addAttribute}
-              onAddBulletPoint={dashboard.addBulletPoint}
               onClose={() => dashboard.setIsDetailOpen(false)}
-              onDeleteProduct={dashboard.deleteProduct}
-              onRemoveAttribute={dashboard.removeAttribute}
-              onRemoveBulletPoint={dashboard.removeBulletPoint}
-              onSaveChanges={dashboard.saveChanges}
-              onUpdateAttributeAdditional={dashboard.updateAttributeAdditional}
-              onUpdateAttributeName={dashboard.updateAttributeName}
-              onUpdateAttributeValues={dashboard.updateAttributeValues}
-              onUpdateBulletPoint={dashboard.updateBulletPoint}
-              onUpdateSelected={dashboard.updateSelected}
             />
           </section>
         </section>

@@ -1,37 +1,45 @@
-"""HTTP endpoints for product read/write and file-based creation workflows.
+"""HTTP endpoints for local product DB access and OTTO-facing workflows.
 
-This router combines three responsibilities:
-1. Direct read/write operations against local product tables.
-2. Proxy-style calls to OTTO APIs through service objects.
-3. Batch creation flows that normalize uploaded JSON before sending it upstream.
+Read APIs are intentionally split:
+- `/v1/products/db...` serves the local database-backed catalog
+- `/v1/products/otto...` proxies OTTO marketplace product retrieval
 
-Keeping those concerns in one place allows the frontend to work with a single
-resource surface (`/v1/products`) while the backend decides whether data should
-be served from the local database or from OTTO-facing services.
+Write/import workflows remain under `/v1/products/...`.
 """
 
-from typing import List, Optional
+from asyncio import sleep
+from datetime import date, datetime
+from io import BytesIO
+from typing import Any, List, Optional
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, UploadFile, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import asc, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from openpyxl import load_workbook
 
+from app.database import SessionLocal
+from app.core.afterbuy_auth import AfterbuyAuth
 from app.dependencies import (
     get_current_user,
     get_product_creation_service,
     get_product_service,
     require_role,
+    get_afterbuy_login
 )
 from app.database import get_db
-from app.models.product_attributes import ProductAttributes
+from app.models.product_import_tasks import ProductImportTask
 from app.models.products import Product
 from app.schemas.marketplaceStatus import MarketPlaceStatus
 from app.schemas.product_creation import (
     ProductCreationErrorResponse,
     ProductCreationFileResponse,
+    ProductImportTaskDTO,
+    ProductImportTaskListResponse,
     ProductCreationPreparedRequest,
     ProductCreationPrepareResponse,
+    ProductSpreadsheetImportResponse,
 )
 from app.schemas.product import ProductCreate, Status
 from app.schemas.product_query import (
@@ -41,9 +49,10 @@ from app.schemas.product_query import (
 )
 from app.schemas.enums import SortOrderEnum
 from app.schemas.enums import RoleEnum
+from app.tasks import sync_afterbuy_jv_lister_task
+from app.services.afterbuy_sync_service import sync_afterbuy_to_jv_lister
 from app.services.product_creation_service import ProductCreationService
 from app.services.product_service import ProductService
-from app.services.product_sync_service import ProductSyncService
 
 router = APIRouter(
     prefix="/v1/products",
@@ -54,79 +63,342 @@ router = APIRouter(
     ],
 )
 
-
-def _group_attributes_by_sku(rows: list[ProductAttributes]) -> dict[str, list[dict]]:
-    """Transform flat attribute rows into OTTO-like grouped attributes per SKU.
-
-    The DB stores one row per `(sku, attribute_name, value)`. API payloads expect
-    one attribute object per name with all values collected under `values`.
-    This helper performs that grouping and de-duplicates repeated values.
-    """
-    grouped: dict[str, dict[str, list[str]]] = {}
-    for row in rows:
-        sku = row.product_sku
-        name = row.name
-        value = row.value
-        if not sku or not name or not value:
-            continue
-
-        sku_bucket = grouped.setdefault(sku, {})
-        values = sku_bucket.setdefault(name, [])
-        if value not in values:
-            values.append(value)
-
-    return {
-        sku: [
-            {
-                "name": name,
-                "values": values,
-                "additional": False,
-            }
-            for name, values in attrs.items()
-        ]
-        for sku, attrs in grouped.items()
-    }
+XLSX_COLUMN_MAP = {
+    "Produktreferenz": "product_reference",
+    "SKU": "sku",
+    "EAN": "ean",
+    "MOIN": "moin",
+    "Produktkategorie": "product_category",
+    "Lieferzeit": "delivery_time",
+    "Preis": "price",
+    "UVP": "recommended_retail_price",
+    "Sale-Preis": "sale_price",
+    "Sale-Start": "sale_start",
+    "Sale-Ende": "sale_end",
+    "Marktplatz-Status": "marketplace_status",
+    "Fehler": "error_message",
+    "Aktiv-Status": "active_status",
+    "Link zu otto.de": "otto_url",
+    "Datum der letzten Änderung": "last_changed_at",
+}
+REQUIRED_XLSX_COLUMNS = list(XLSX_COLUMN_MAP.keys())
 
 
-def _product_to_dict(product: Product, attributes: list[dict] | None = None) -> dict:
-    """Serialize a `Product` ORM object into the response contract used by routes.
-
-    Some route responses mirror OTTO payload shapes while still including local
-    convenience fields such as `id`, `price`, and flattened `vat`.
-    """
-    attrs = attributes or []
-    vat_value = product.vat.value if hasattr(product.vat, "value") else str(product.vat)
+def _product_to_dict(product: Product) -> dict[str, Any]:
+    """Serialize the local spreadsheet-backed product row."""
     return {
         "id": product.id,
+        "productReference": product.product_reference,
         "sku": product.sku,
-        "accountSource": product.account_source,
         "ean": product.ean,
-        "pricing": {
-            "standardPrice": {
-                "amount": product.pricing,
-                "currency": "EUR",
-            },
-            "vat": vat_value,
-        },
-        "price": product.pricing,
-        "vat": vat_value,
-        "productReference": product.productReference,
-        "brandId": product.brand_id,
-        "category": product.category,
-        "productLine": product.productLine,
-        "description": product.description,
-        "bulletPoints": product.bullet_points,
-        "productDescription": {
-            "brandId": product.brand_id,
-            "category": product.category,
-            "productLine": product.productLine,
-            "description": product.description,
-            "bulletPoints": product.bullet_points,
-            "attributes": attrs,
-        },
-        "mediaAssets": [],
-        "attributes": attrs,
+        "moin": product.moin,
+        "productCategory": product.product_category,
+        "deliveryTime": product.delivery_time,
+        "price": product.price,
+        "recommendedRetailPrice": product.recommended_retail_price,
+        "salePrice": product.sale_price,
+        "saleStart": product.sale_start.isoformat() if product.sale_start else None,
+        "saleEnd": product.sale_end.isoformat() if product.sale_end else None,
+        "marketplaceStatus": product.marketplace_status,
+        "errorMessage": product.error_message,
+        "activeStatus": product.active_status,
+        "ottoUrl": product.otto_url,
+        "mediaAssetLinks": product.media_asset_links or [],
+        "lastChangedAt": (
+            product.last_changed_at.isoformat() if product.last_changed_at else None
+        ),
     }
+
+
+def _task_to_dto(task: ProductImportTask) -> ProductImportTaskDTO:
+    return ProductImportTaskDTO(
+        id=task.id,
+        file_name=task.file_name,
+        status=task.status,
+        total_rows=task.total_rows,
+        processed_rows=task.processed_rows,
+        upserted_rows=task.upserted_rows,
+        skipped_rows=task.skipped_rows,
+        error_message=task.error_message,
+        created_at=task.created_at.isoformat(),
+        updated_at=task.updated_at.isoformat(),
+        started_at=task.started_at.isoformat() if task.started_at else None,
+        finished_at=task.finished_at.isoformat() if task.finished_at else None,
+    )
+
+
+def _empty_to_none(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+    return value
+
+
+def _as_text(value: Any) -> str | None:
+    value = _empty_to_none(value)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _parse_float(value: Any) -> float | None:
+    value = _empty_to_none(value)
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        normalized = value.strip()
+        if "," in normalized and "." in normalized:
+            normalized = normalized.replace(".", "").replace(",", ".")
+        elif "," in normalized:
+            normalized = normalized.replace(",", ".")
+        try:
+            return float(normalized)
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    value = _empty_to_none(value)
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    if isinstance(value, str):
+        for fmt in ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d.%m.%Y"):
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+    return None
+
+
+def _normalize_xlsx_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = {
+        "product_reference": _as_text(row.get("Produktreferenz")),
+        "sku": _as_text(row.get("SKU")),
+        "ean": _as_text(row.get("EAN")),
+        "moin": _as_text(row.get("MOIN")),
+        "product_category": _as_text(row.get("Produktkategorie")),
+        "delivery_time": _as_text(row.get("Lieferzeit")),
+        "price": _parse_float(row.get("Preis")),
+        "recommended_retail_price": _parse_float(row.get("UVP")),
+        "sale_price": _parse_float(row.get("Sale-Preis")),
+        "sale_start": _parse_datetime(row.get("Sale-Start")),
+        "sale_end": _parse_datetime(row.get("Sale-Ende")),
+        "marketplace_status": _as_text(row.get("Marktplatz-Status")),
+        "error_message": _as_text(row.get("Fehler")),
+        "active_status": _as_text(row.get("Aktiv-Status")),
+        "otto_url": _as_text(row.get("Link zu otto.de")),
+        "last_changed_at": _parse_datetime(row.get("Datum der letzten Änderung")),
+    }
+    return normalized
+
+
+def _read_xlsx_rows(raw: bytes) -> list[dict[str, Any]]:
+    workbook = load_workbook(filename=BytesIO(raw), read_only=True, data_only=True)
+    worksheet = workbook.active
+
+    header_row_index: int | None = None
+    headers: list[Any] = []
+    for index, row in enumerate(
+        worksheet.iter_rows(min_row=1, max_row=5, values_only=True),
+        start=1,
+    ):
+        row_values = list(row)
+        if all(column in row_values for column in REQUIRED_XLSX_COLUMNS):
+            header_row_index = index
+            headers = row_values
+            break
+
+    if header_row_index is None:
+        raise ValueError("Could not find the expected XLSX header row")
+
+    rows: list[dict[str, Any]] = []
+    for row in worksheet.iter_rows(min_row=header_row_index + 1, values_only=True):
+        row_dict = {
+            str(header): value
+            for header, value in zip(headers, row)
+            if header is not None
+        }
+        if not any(_empty_to_none(value) is not None for value in row_dict.values()):
+            continue
+        rows.append(_normalize_xlsx_row(row_dict))
+
+    return rows
+
+
+def _deduplicate_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    rows_without_identity: list[dict[str, Any]] = []
+    rows_by_identity: dict[tuple[str, str | None], dict[str, Any]] = {}
+
+    for row in rows:
+        sku = _as_text(row.get("sku"))
+        ean = _as_text(row.get("ean"))
+        product_reference = _as_text(row.get("product_reference"))
+
+        identity: tuple[str, str | None] | None = None
+        if sku:
+            identity = ("sku", sku)
+        elif ean:
+            identity = ("ean", ean)
+        elif product_reference:
+            identity = ("product_reference", product_reference)
+
+        if identity is None:
+            rows_without_identity.append(row)
+            continue
+
+        rows_by_identity[identity] = row
+
+    deduplicated_rows = list(rows_by_identity.values()) + rows_without_identity
+    skipped_rows = len(rows) - len(deduplicated_rows)
+    return deduplicated_rows, skipped_rows
+
+
+async def _upsert_products_in_batches(
+    db: AsyncSession,
+    rows: list[dict[str, Any]],
+    batch_size: int = 100,
+    progress_callback: Any | None = None,
+) -> int:
+    upserted_rows = 0
+    for start in range(0, len(rows), batch_size):
+        chunk = rows[start : start + batch_size]
+        sku_values = {_as_text(row.get("sku")) for row in chunk if _as_text(row.get("sku"))}
+        ean_values = {_as_text(row.get("ean")) for row in chunk if _as_text(row.get("ean"))}
+        reference_values = {
+            _as_text(row.get("product_reference"))
+            for row in chunk
+            if _as_text(row.get("product_reference"))
+        }
+
+        conditions = []
+        if sku_values:
+            conditions.append(Product.sku.in_(sku_values))
+        if ean_values:
+            conditions.append(Product.ean.in_(ean_values))
+        if reference_values:
+            conditions.append(Product.product_reference.in_(reference_values))
+
+        existing_by_sku: dict[str, Product] = {}
+        existing_by_ean: dict[str, Product] = {}
+        existing_by_reference: dict[str, Product] = {}
+
+        if conditions:
+            existing_result = await db.execute(select(Product).where(or_(*conditions)))
+            existing_products = existing_result.scalars().all()
+            for product in existing_products:
+                if product.sku:
+                    existing_by_sku[product.sku] = product
+                if product.ean:
+                    existing_by_ean[product.ean] = product
+                if product.product_reference:
+                    existing_by_reference[product.product_reference] = product
+
+        for row in chunk:
+            sku = _as_text(row.get("sku"))
+            ean = _as_text(row.get("ean"))
+            product_reference = _as_text(row.get("product_reference"))
+
+            matched_product: Product | None = None
+            for candidate in (
+                existing_by_sku.get(sku) if sku else None,
+                existing_by_ean.get(ean) if ean else None,
+                existing_by_reference.get(product_reference) if product_reference else None,
+            ):
+                if candidate is not None:
+                    matched_product = candidate
+                    break
+
+            if matched_product is None:
+                matched_product = Product(**row)
+                db.add(matched_product)
+            else:
+                for column in XLSX_COLUMN_MAP.values():
+                    setattr(matched_product, column, row.get(column))
+
+            await db.flush()
+
+            if matched_product.sku:
+                existing_by_sku[matched_product.sku] = matched_product
+            if matched_product.ean:
+                existing_by_ean[matched_product.ean] = matched_product
+            if matched_product.product_reference:
+                existing_by_reference[matched_product.product_reference] = matched_product
+
+        upserted_rows += len(chunk)
+        if progress_callback is not None:
+            await progress_callback(upserted_rows)
+
+    await db.commit()
+    return upserted_rows
+
+
+async def _run_product_import_task(
+    *,
+    task_id: str,
+    file_name: str,
+    raw: bytes,
+) -> None:
+    async with SessionLocal() as session:
+        task = await session.get(ProductImportTask, task_id)
+        if task is None:
+            return
+
+        task.status = "running"
+        task.started_at = datetime.utcnow()
+        task.error_message = None
+        await session.commit()
+
+        try:
+            parsed_rows = _read_xlsx_rows(raw)
+            rows, skipped_rows = _deduplicate_rows(parsed_rows)
+            task.total_rows = len(parsed_rows)
+            task.skipped_rows = skipped_rows
+            task.file_name = file_name
+            await session.commit()
+
+            async def update_progress(processed_rows: int) -> None:
+                task.processed_rows = processed_rows
+                task.upserted_rows = processed_rows
+                await session.commit()
+                await sleep(0)
+
+            if rows:
+                upserted_rows = await _upsert_products_in_batches(
+                    session,
+                    rows,
+                    progress_callback=update_progress,
+                )
+            else:
+                upserted_rows = 0
+
+            task.status = "completed"
+            task.processed_rows = len(parsed_rows)
+            task.upserted_rows = upserted_rows
+            task.finished_at = datetime.utcnow()
+            task.error_message = None
+            await session.commit()
+        except Exception as exc:
+            await session.rollback()
+            task = await session.get(ProductImportTask, task_id)
+            if task is None:
+                return
+            task.status = "failed"
+            task.error_message = str(exc)
+            task.finished_at = datetime.utcnow()
+            await session.commit()
 
 
 def _product_list_payload(
@@ -149,63 +421,61 @@ def _product_list_payload(
     ).to_payload()
 
 
-@router.get("")
-async def get_products(
+def _is_all_categories_value(value: str | None) -> bool:
+    if value is None:
+        return True
+    normalized = value.strip().lower()
+    return normalized in {"", "all", "all categories", "all category", "allcategories"}
+
+
+@router.get("/db")
+@router.get("", include_in_schema=False)
+async def get_db_products(
     db: AsyncSession = Depends(get_db),
     product_reference: Optional[str] = Query(None, alias="productReference"),
     page: int = Query(0, ge=0),
     sku: Optional[str] = Query(None),
-    limit: int = Query(30, ge=10, le=1000),
+    limit: int = Query(30, ge=1, le=1000),
     category: Optional[str] = Query(None),
-    brand_id: Optional[str] = Query(None, alias="brandId"),
-    account_source: Optional[str] = Query(None, alias="accountSource"),
     search: Optional[str] = Query(None),
     sort_by: str = Query("id", alias="sortBy"),
     sort_order: SortOrderEnum = Query(default=SortOrderEnum.DESC, alias="sortOrder"),
 ):
-    """Return paginated products from the local DB with optional filtering/search.
-
-    This endpoint is intended for internal UI usage, so it supports richer local
-    filtering and free-text search than OTTO list endpoints usually provide.
-    """
-    print(product_reference, page, sku, category, search, sort_by, sort_order)
+    """Return paginated spreadsheet-imported rows from the local DB."""
     sort_columns = {
         "id": Product.id,
         "sku": Product.sku,
-        "productReference": Product.productReference,
-        "productLine": Product.productLine,
-        "category": Product.category,
-        "brandId": Product.brand_id,
+        "productReference": Product.product_reference,
+        "category": Product.product_category,
         "ean": Product.ean,
-        "price": Product.pricing,
+        "moin": Product.moin,
+        "price": Product.price,
+        "marketplaceStatus": Product.marketplace_status,
+        "lastChangedAt": Product.last_changed_at,
     }
     sort_column = sort_columns.get(sort_by, Product.id)
-    print(f"The sort column is: {sort_column}")
     sorter = asc if sort_order == SortOrderEnum.ASC else desc
 
     filters = []
     if sku:
         filters.append(Product.sku == sku)
     if product_reference:
-        filters.append(Product.productReference == product_reference)
-    if category:
-        filters.append(Product.category == category)
-    if brand_id:
-        filters.append(Product.brand_id == brand_id)
-    if account_source:
-        filters.append(func.upper(Product.account_source) == account_source.upper())
+        filters.append(Product.product_reference == product_reference)
+    if category and not _is_all_categories_value(category):
+        filters.append(Product.product_category == category)
     if search:
         if term := search.strip():
             pattern = f"%{term}%"
             filters.append(
                 or_(
                     Product.sku.ilike(pattern),
-                    Product.productReference.ilike(pattern),
-                    Product.productLine.ilike(pattern),
+                    Product.product_reference.ilike(pattern),
                     Product.ean.ilike(pattern),
-                    Product.category.ilike(pattern),
-                    Product.brand_id.ilike(pattern),
-                    Product.description.ilike(pattern),
+                    Product.moin.ilike(pattern),
+                    Product.product_category.ilike(pattern),
+                    Product.marketplace_status.ilike(pattern),
+                    Product.error_message.ilike(pattern),
+                    Product.active_status.ilike(pattern),
                 )
             )
 
@@ -226,25 +496,38 @@ async def get_products(
     result = await db.execute(stmt)
     items = result.scalars().all()
 
-    attrs_by_sku: dict[str, list[dict]] = {}
-    skus = [item.sku for item in items if item.sku]
-    if skus:
-        attrs_result = await db.execute(
-            select(ProductAttributes).where(ProductAttributes.product_sku.in_(skus))
-        )
-        attrs_by_sku = _group_attributes_by_sku(list(attrs_result.scalars().all()))
-
     return {
-        "items": [
-            _product_to_dict(item, attrs_by_sku.get(item.sku, [])) for item in items
-        ],
+        "items": [_product_to_dict(item) for item in items],
         "page": page,
         "limit": limit,
         "total": total or 0,
     }
 
 
-@router.get("/active")
+@router.get("/otto")
+async def get_otto_products(
+    product_service: ProductService = Depends(get_product_service),
+    product_reference: Optional[str] = Query(None, alias="productReference"),
+    page: int = Query(0, ge=0),
+    sku: Optional[str] = Query(None),
+    limit: int = Query(30, ge=1, le=1000),
+    category: Optional[str] = Query(None),
+    brand_id: Optional[str] = Query(None, alias="brandId"),
+):
+    """Proxy paginated product retrieval from OTTO marketplace."""
+    payload = _product_list_payload(
+        product_reference=product_reference,
+        page=page,
+        sku=sku,
+        limit=limit,
+        category=category,
+        brand_id=brand_id,
+    )
+    return await product_service.get_products(payload)
+
+
+@router.get("/otto/active")
+@router.get("/active", include_in_schema=False)
 async def get_active_products(
     product_service: ProductService = Depends(get_product_service),
     product_reference: Optional[str] = Query(None, alias="productReference"),
@@ -266,7 +549,8 @@ async def get_active_products(
     return await product_service.get_active_products(payload)
 
 
-@router.get("/update-tasks/{pid}")
+@router.get("/otto/update-tasks/{pid}")
+@router.get("/update-tasks/{pid}", include_in_schema=False)
 async def update_tasks(
     pid: str,
     product_service: ProductService = Depends(get_product_service),
@@ -275,7 +559,8 @@ async def update_tasks(
     return await product_service.update_tasks(pid)
 
 
-@router.get("/marketplace-status")
+@router.get("/otto/marketplace-status")
+@router.get("/marketplace-status", include_in_schema=False)
 async def get_product_status(
     product_service: ProductService = Depends(get_product_service),
     sku: Optional[str] = Query(None),
@@ -306,7 +591,8 @@ async def get_product_status(
     return await product_service.get_marketplace_status(payload)
 
 
-@router.get("/categories")
+@router.get("/otto/categories")
+@router.get("/categories", include_in_schema=False)
 async def get_categories(
     product_service: ProductService = Depends(get_product_service),
     page: int = Query(default=0, ge=0),
@@ -318,20 +604,14 @@ async def get_categories(
     return await product_service.get_categories(payload)
 
 
-@router.get("/status/{sku}")
+@router.get("/db/status/{sku}")
+@router.get("/status/{sku}", include_in_schema=False)
 async def get_product_by_status_path(
     sku: str,
     db: AsyncSession = Depends(get_db),
-    account_source: Optional[str] = Query(None, alias="accountSource"),
 ):
-    """Fetch one product from the local DB by SKU and return API-shaped payload.
-
-    Historical entries may exist per SKU and account source, so records are
-    ordered by latest `id` and only the newest one is returned.
-    """
+    """Fetch one imported product row from the local DB by SKU."""
     stmt = select(Product).where(Product.sku == sku)
-    if account_source:
-        stmt = stmt.where(func.upper(Product.account_source) == account_source.upper())
     stmt = stmt.order_by(Product.id.desc())
 
     result = await db.execute(stmt)
@@ -341,57 +621,22 @@ async def get_product_by_status_path(
             status_code=status.HTTP_404_NOT_FOUND,
             content={"message": f"Product with sku '{sku}' not found in DB"},
         )
-
-    attrs_result = await db.execute(
-        select(ProductAttributes).where(ProductAttributes.product_sku == product.sku)
-    )
-    attrs_by_sku = _group_attributes_by_sku(list(attrs_result.scalars().all()))
-    return _product_to_dict(product, attrs_by_sku.get(product.sku, []))
-
-
-@router.get("/{sku}")
-async def get_product(
-    sku: str,
-    db: AsyncSession = Depends(get_db),
-    account_source: Optional[str] = Query(None, alias="accountSource"),
-):
-    """Fetch one product from the local DB by SKU (generic product lookup path)."""
-    stmt = select(Product).where(Product.sku == sku)
-    if account_source:
-        stmt = stmt.where(func.upper(Product.account_source) == account_source.upper())
-    stmt = stmt.order_by(Product.id.desc())
-
-    result = await db.execute(stmt)
-    product = result.scalars().first()
-    if not product:
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={"message": f"Product with sku '{sku}' not found in DB"},
-        )
-
-    attrs_result = await db.execute(
-        select(ProductAttributes).where(ProductAttributes.product_sku == product.sku)
-    )
-    attrs_by_sku = _group_attributes_by_sku(list(attrs_result.scalars().all()))
-    return _product_to_dict(product, attrs_by_sku.get(product.sku, []))
+    return _product_to_dict(product)
 
 
 @router.post("/sync-to-db")
 async def sync_products_to_db(
-    product_service: ProductService = Depends(get_product_service),
-    db: AsyncSession = Depends(get_db),
-    account_source: str = Query(
-        default="JV", alias="accountSource", min_length=2, max_length=20
-    ),
-    limit: int = Query(default=100, ge=10, le=100),
-    max_pages: Optional[int] = Query(default=None, alias="maxPages", ge=1, le=10000),
+    account_source: str = Query(default="JV", alias="accountSource"),
 ):
-    """Pull OTTO products page-by-page and upsert them into local DB tables."""
-    sync_service = ProductSyncService(product_service=product_service, db=db)
-    return await sync_service.sync_products(
-        account_source=account_source.upper(),
-        limit=limit,
-        max_pages=max_pages,
+    """Legacy sync endpoint left in place for compatibility."""
+    return JSONResponse(
+        status_code=status.HTTP_410_GONE,
+        content={
+            "message": (
+                "Local products table now stores spreadsheet import data. "
+                f"OTTO sync is disabled for accountSource={account_source}."
+            )
+        },
     )
 
 
@@ -654,3 +899,276 @@ async def create_products_from_file(
         skipped_items=result.skipped_items,
         issues=result.issues,
     )
+    
+    
+@router.post(
+    "/upload-xlsx",
+    response_model=ProductSpreadsheetImportResponse,
+    responses={
+        400: {"model": ProductCreationErrorResponse, "description": "Invalid request"},
+        415: {
+            "model": ProductCreationErrorResponse,
+            "description": "Unsupported media type",
+        },
+    },
+)
+async def upload_products(
+    db: AsyncSession = Depends(get_db),
+    file: UploadFile = File(..., description="XLSX file exported from OTTO market"),
+):
+    """Import selected XLSX columns into the local products table."""
+    if not file.filename or not file.filename.lower().endswith(".xlsx"):
+        return JSONResponse(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            content=ProductCreationErrorResponse(
+                message="Only .xlsx files are supported"
+            ).model_dump(),
+        )
+
+    raw = await file.read()
+    if not raw:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=ProductCreationErrorResponse(
+                message="Uploaded file is empty"
+            ).model_dump(),
+        )
+
+    try:
+        parsed_rows = _read_xlsx_rows(raw)
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=ProductCreationErrorResponse(message=str(exc)).model_dump(),
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=ProductCreationErrorResponse(
+                message=f"Could not parse XLSX file: {exc}"
+            ).model_dump(),
+        )
+
+    rows, skipped_rows = _deduplicate_rows(parsed_rows)
+
+    if not rows:
+        return ProductSpreadsheetImportResponse(
+            success=True,
+            file_name=file.filename,
+            imported_rows=0,
+            upserted_rows=0,
+            skipped_rows=skipped_rows,
+            columns=list(XLSX_COLUMN_MAP.values()),
+        )
+
+    upserted_rows = await _upsert_products_in_batches(db, rows)
+
+    return ProductSpreadsheetImportResponse(
+        success=True,
+        file_name=file.filename,
+        imported_rows=len(parsed_rows),
+        upserted_rows=upserted_rows,
+        skipped_rows=skipped_rows,
+        columns=list(XLSX_COLUMN_MAP.values()),
+    )
+
+
+@router.post(
+    "/upload-xlsx-task",
+    response_model=ProductImportTaskDTO,
+    responses={
+        400: {"model": ProductCreationErrorResponse, "description": "Invalid request"},
+        415: {
+            "model": ProductCreationErrorResponse,
+            "description": "Unsupported media type",
+        },
+    },
+)
+async def create_xlsx_import_task(
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user = Depends(require_role([RoleEnum.SEO])),
+    file: UploadFile = File(..., description="XLSX file exported from OTTO market"),
+):
+    """Create a background XLSX import task and return its initial status."""
+    if not file.filename or not file.filename.lower().endswith(".xlsx"):
+        return JSONResponse(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            content=ProductCreationErrorResponse(
+                message="Only .xlsx files are supported"
+            ).model_dump(),
+        )
+
+    raw = await file.read()
+    if not raw:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=ProductCreationErrorResponse(
+                message="Uploaded file is empty"
+            ).model_dump(),
+        )
+
+    task = ProductImportTask(
+        id=str(uuid4()),
+        file_name=file.filename,
+        status="queued",
+        created_by_user_id=current_user.id,
+        total_rows=None,
+        processed_rows=0,
+        upserted_rows=0,
+        skipped_rows=0,
+        error_message=None,
+    )
+    db.add(task)
+    await db.commit()
+    await db.refresh(task)
+
+    background_tasks.add_task(
+        _run_product_import_task,
+        task_id=task.id,
+        file_name=file.filename,
+        raw=raw,
+    )
+    return _task_to_dto(task)
+
+
+@router.get(
+    "/import-tasks",
+    response_model=ProductImportTaskListResponse,
+)
+async def list_product_import_tasks(
+    db: AsyncSession = Depends(get_db),
+    _current_user = Depends(require_role([RoleEnum.SEO])),
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    stmt = (
+        select(ProductImportTask)
+        .order_by(ProductImportTask.created_at.desc())
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    tasks = result.scalars().all()
+    return ProductImportTaskListResponse(
+        items=[_task_to_dto(task) for task in tasks]
+    )
+
+
+@router.get(
+    "/import-tasks/{task_id}",
+    response_model=ProductImportTaskDTO,
+)
+async def get_product_import_task(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+    _current_user = Depends(require_role([RoleEnum.SEO])),
+):
+    task = await db.get(ProductImportTask, task_id)
+    if task is None:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content=ProductCreationErrorResponse(
+                message=f"Import task '{task_id}' not found"
+            ).model_dump(),
+        )
+    return _task_to_dto(task)
+
+
+@router.post(
+    "/fetch-afterbuy-task",
+    response_model=ProductImportTaskDTO,
+)
+async def create_afterbuy_fetch_task(
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_role([RoleEnum.SEO])),
+    account: str = Query(default="JV"),
+    dataset: str = Query(default="lister"),
+    limit: int = Query(default=100000, ge=1, le=100000),
+):
+    """Create a background Afterbuy fetch task for the JV lister table."""
+    task = ProductImportTask(
+        id=str(uuid4()),
+        file_name=f"Afterbuy {account} {dataset}",
+        status="queued",
+        created_by_user_id=current_user.id,
+        total_rows=None,
+        processed_rows=0,
+        upserted_rows=0,
+        skipped_rows=0,
+        error_message=None,
+    )
+    db.add(task)
+    await db.commit()
+    await db.refresh(task)
+
+    try:
+        sync_afterbuy_jv_lister_task.delay(
+            task_id=task.id,
+            account=account,
+            dataset=dataset,
+            limit=limit,
+        )
+    except Exception as exc:
+        task.status = "failed"
+        task.error_message = f"Could not enqueue Celery task: {exc}"
+        task.finished_at = datetime.utcnow()
+        await db.commit()
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=ProductCreationErrorResponse(
+                message="Could not enqueue Afterbuy fetch task",
+            ).model_dump(),
+        )
+    return _task_to_dto(task)
+
+
+@router.api_route("/fetch-afterbuy", methods=["GET", "POST"])
+@router.api_route("/fetch_afterbuy", methods=["GET", "POST"], include_in_schema=False)
+async def fetch_from_afterbuy(
+    db: AsyncSession = Depends(get_db),
+    afterbuy: AfterbuyAuth = Depends(get_afterbuy_login),
+    _current_user=Depends(require_role([RoleEnum.SEO])),
+    account: str = Query(default="JV"),
+    dataset: str = Query(default="lister"),
+    limit: int = Query(default=100000, ge=1, le=100000),
+    start_page: int = Query(default=0, ge=0, alias="startPage"),
+):
+    """Fetch Afterbuy pages until empty and upsert rows into the local JV lister table."""
+    result = await sync_afterbuy_to_jv_lister(
+        db=db,
+        afterbuy=afterbuy,
+        account=account,
+        dataset=dataset,
+        limit=limit,
+        start_page=start_page,
+    )
+    return {
+        **result,
+        "table": "jv_lister",
+    }
+
+
+@router.get("/db/{sku}")
+@router.get("/{sku}", include_in_schema=False)
+async def get_db_product(
+    sku: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Fetch one product from the local DB by SKU (generic product lookup path)."""
+    stmt = select(Product).where(Product.sku == sku)
+    stmt = stmt.order_by(Product.id.desc())
+
+    result = await db.execute(stmt)
+    product = result.scalars().first()
+    if not product:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"message": f"Product with sku '{sku}' not found in DB"},
+        )
+    return _product_to_dict(product)
+@router.get("/otto/{sku}")
+async def get_otto_product(
+    sku: str,
+    product_service: ProductService = Depends(get_product_service),
+):
+    """Fetch one product directly from OTTO by SKU."""
+    return await product_service.get_product(sku)

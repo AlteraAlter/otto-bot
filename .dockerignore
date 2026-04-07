@@ -1,0 +1,12 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+frontend/node_modules
+frontend/.next
+frontend/tsconfig.tsbuildinfo
+otto-market-products-2026-03-28-13-25-08-2_1.xlsx

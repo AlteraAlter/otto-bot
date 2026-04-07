@@ -61,7 +61,7 @@ class UserAuth:
 
     def _build_invitation_link(self, *, email: str, token: str) -> str:
         base = settings.frontend_app_url.rstrip("/")
-        return f"{base}/register?{urlencode({'email': email, 'invite': token})}"
+        return f"{base}/employee-register?{urlencode({'email': email, 'invite': token})}"
 
     def _send_employee_invitation_email(
         self,
@@ -202,6 +202,7 @@ class UserAuth:
 
     async def login_for_access_token(self, credentials: UserLoginDTO) -> TokenDTO:
         user = await self.validate_user(credentials.email, credentials.password)
+        print(f"{credentials.email} not found")
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -231,6 +232,7 @@ class UserAuth:
     ) -> UserDTO:
         normalized_email = email.lower().strip()
         existing_user = await self.user_repository.select_user_by_email(normalized_email)
+        print(existing_user)
         if existing_user:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,

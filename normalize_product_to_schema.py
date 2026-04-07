@@ -21,13 +21,22 @@ from typing import Any
 import ijson
 
 from app.mapper import get_default_category_mapper
-from generate_seo_descriptions import (
-    build_seo_description,
-    decode_with_fallback,
-    is_meaningful,
-    normalize_key,
-    sanitize_value,
-)
+try:
+    from app.generate_seo_descriptions import (
+        build_seo_description,
+        decode_with_fallback,
+        is_meaningful,
+        normalize_key,
+        sanitize_value,
+    )
+except ModuleNotFoundError:
+    from generate_seo_descriptions import (
+        build_seo_description,
+        decode_with_fallback,
+        is_meaningful,
+        normalize_key,
+        sanitize_value,
+    )
 
 PART_COUNT_ALIASES = [
     "Anzahl der Teile",

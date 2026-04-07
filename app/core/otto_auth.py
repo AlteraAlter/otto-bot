@@ -25,7 +25,7 @@ class OttoAuth:
         self._token: Optional[str] = None
         self._expires_at: float = 0
 
-    async def _request_token(self) -> str:
+    async def _request_token(self) -> str | None:
         """Request a new access token and update cache expiry metadata."""
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(
@@ -48,7 +48,7 @@ class OttoAuth:
 
         return self._token
 
-    async def get_token(self) -> str:
+    async def get_token(self) -> str | None:
         """Return cached token when valid, otherwise fetch a fresh token."""
         if self._token and time.time() < self._expires_at:
             return self._token

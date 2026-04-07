@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     smtp_password: str | None = None
     smtp_sender_email: str | None = None
     smtp_use_tls: bool = True
+    
+    #Afterbuy
+    afterbuy_base_url: str = "https://aftercool.de"
+    afterbuy_timeout_seconds: float = 30.0
+    afterbuy_username: str
+    afterbuy_password: str
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    celery_broker_url: str = "redis://127.0.0.1:6379/0"
+    celery_result_backend: str = "redis://127.0.0.1:6379/1"
 
 
 settings = Settings()
