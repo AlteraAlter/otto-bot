@@ -9,7 +9,12 @@ from alembic import context
 
 from app.database import Base, DATABASE_URL
 import app.models.products
-import app.models.product_attriutes
+import app.models.product_attributes
+import app.models.product_import_tasks
+import app.models.jv_lister
+import app.models.user_invitations
+import app.models.users
+import app.models.user_roles
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

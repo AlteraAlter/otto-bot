@@ -36,6 +36,42 @@ export OTTO_CATEGORIES_FILE="/absolute/path/to/available_cats.json"
 uvicorn app.main:app --reload
 ```
 
+## Run Redis + Celery Worker
+
+```bash
+docker compose up -d redis worker
+```
+
+Default Redis URL:
+- `redis://127.0.0.1:6379/0`
+
+Inside Docker Compose the worker connects to Redis using the service hostname:
+- `redis://redis:6379/0`
+
+## Run Celery Worker Manually
+
+```bash
+celery -A app.celery_app.celery_app worker --loglevel=info
+```
+
+The Afterbuy JV lister fetch is now queued through Celery and processed by this worker.
+
+## Sync OTTO Product Images And Descriptions Into Local DB
+
+After running the latest migration, you can enrich local products with OTTO media asset URLs and save the upstream product description into `product_descriptions`:
+
+```bash
+alembic upgrade head
+python scripts/sync_product_media_assets.py --only-missing
+```
+
+Useful options:
+- `--sku YOUR-SKU`
+- `--limit 100`
+
+Note:
+- If your PostgreSQL database is running on the host machine rather than in Docker, the worker container may need `DB_HOST=host.docker.internal` instead of `localhost`.
+
 Backend URLs:
 - `http://127.0.0.1:8000/health`
 - `http://127.0.0.1:8000/docs`

@@ -47,3 +47,34 @@ class ProductCreationPreparedRequest(BaseModel):
     """Request schema for the second phase of the two-step creation flow."""
 
     request_bodies: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ProductSpreadsheetImportResponse(BaseModel):
+    """Success response for XLSX-to-database imports."""
+
+    success: bool = Field(default=True)
+    file_name: str
+    imported_rows: int
+    upserted_rows: int
+    skipped_rows: int
+    columns: list[str] = Field(default_factory=list)
+
+
+class ProductImportTaskDTO(BaseModel):
+    id: str
+    file_name: str
+    status: str
+    total_rows: int | None = None
+    processed_rows: int = 0
+    upserted_rows: int = 0
+    skipped_rows: int = 0
+    error_message: str | None = None
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+class ProductImportTaskListResponse(BaseModel):
+    success: bool = Field(default=True)
+    items: list[ProductImportTaskDTO] = Field(default_factory=list)

@@ -13,7 +13,7 @@ from sqlalchemy import delete, insert as sa_insert
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.product_attriutes import ProductAttributes
+from app.models.product_attributes import ProductAttributes
 from app.models.products import Product
 from app.schemas.enums import VatEnum
 from app.services.product_service import ProductService
@@ -94,7 +94,9 @@ class ProductSyncService:
         return VatEnum.FULL
 
     @classmethod
-    def _to_db_record(cls, item: dict[str, Any], account_source: str) -> dict[str, Any] | None:
+    def _to_db_record(
+        cls, item: dict[str, Any], account_source: str
+    ) -> dict[str, Any] | None:
         """Map one upstream product payload to `products` table-compatible record."""
         sku = cls._get_string(item, [["sku"], ["productSku"]])
         if not sku:
@@ -111,13 +113,34 @@ class ProductSyncService:
             "sku": sku,
             "account_source": account_source,
             "ean": cls._get_string(item, [["ean"]]),
-            "pricing": cls._get_float(item, [["pricing", "standardPrice", "amount"], ["price", "amount"], ["price"]]) or 0.0,
-            "vat": cls._normalize_vat(cls._get_string(item, [["pricing", "vat"], ["vat"]])),
-            "productReference": cls._get_string(item, [["productReference"], ["reference"]]),
-            "brand_id": cls._get_string(item, [["productDescription", "brandId"], ["productDescription", "brand"]]),
-            "category": cls._get_string(item, [["productDescription", "category"], ["category"]]),
-            "productLine": cls._get_string(item, [["productDescription", "productLine"], ["name"]]),
-            "description": cls._get_string(item, [["productDescription", "description"]]),
+            "pricing": cls._get_float(
+                item,
+                [
+                    ["pricing", "standardPrice", "amount"],
+                    ["price", "amount"],
+                    ["price"],
+                ],
+            )
+            or 0.0,
+            "vat": cls._normalize_vat(
+                cls._get_string(item, [["pricing", "vat"], ["vat"]])
+            ),
+            "productReference": cls._get_string(
+                item, [["productReference"], ["reference"]]
+            ),
+            "brand_id": cls._get_string(
+                item,
+                [["productDescription", "brandId"], ["productDescription", "brand"]],
+            ),
+            "category": cls._get_string(
+                item, [["productDescription", "category"], ["category"]]
+            ),
+            "productLine": cls._get_string(
+                item, [["productDescription", "productLine"], ["name"]]
+            ),
+            "description": cls._get_string(
+                item, [["productDescription", "description"]]
+            ),
             "bullet_points": bullet_points,
         }
 
@@ -180,7 +203,9 @@ class ProductSyncService:
                 delete(ProductAttributes).where(ProductAttributes.product_sku == sku)
             )
             if description_rows:
-                await self.db.execute(sa_insert(ProductAttributes).values(description_rows))
+                await self.db.execute(
+                    sa_insert(ProductAttributes).values(description_rows)
+                )
 
             await self.db.commit()
             return True, len(description_rows)

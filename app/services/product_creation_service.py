@@ -88,7 +88,9 @@ class ProductCreationService:
         product_line = product_description.get("productLine")
         if isinstance(product_line, str):
             cleaned = product_line.strip()
-            product_description["productLine"] = cleaned[:max_len] if len(cleaned) > max_len else cleaned
+            product_description["productLine"] = (
+                cleaned[:max_len] if len(cleaned) > max_len else cleaned
+            )
 
     @staticmethod
     def _category_aliases() -> dict[str, str]:
@@ -121,8 +123,12 @@ class ProductCreationService:
         """Infer OTTO category from raw source text fields using `CategoryMapper`."""
         mapper = get_default_category_mapper()
         return mapper.map_category(
-            product_type=cls._extract_source_field(item, "Produktart", "Category", "Type", "type"),
-            title=cls._extract_source_field(item, "Artikelbeschreibung", "Title", "Titel", "TranslatedDescription"),
+            product_type=cls._extract_source_field(
+                item, "Produktart", "Category", "Type", "type"
+            ),
+            title=cls._extract_source_field(
+                item, "Artikelbeschreibung", "Title", "Titel", "TranslatedDescription"
+            ),
             brand=cls._extract_source_field(item, "Marke", "Brand"),
             room=cls._extract_source_field(item, "Zimmer", "Room"),
             style=cls._extract_source_field(item, "Stil", "Style"),
@@ -145,7 +151,9 @@ class ProductCreationService:
             return "Herren"
         if "unisex" in value:
             return "Unisex"
-        if any(token in value for token in ("kinder", "kind", "baby", "maedchen", "jungen")):
+        if any(
+            token in value for token in ("kinder", "kind", "baby", "maedchen", "jungen")
+        ):
             return "Kinder"
         return None
 
@@ -209,7 +217,9 @@ class ProductCreationService:
             if not isinstance(values, list):
                 continue
 
-            normalized_values = [v.strip() for v in values if isinstance(v, str) and v.strip()]
+            normalized_values = [
+                v.strip() for v in values if isinstance(v, str) and v.strip()
+            ]
             if not normalized_values:
                 continue
 
@@ -252,10 +262,14 @@ class ProductCreationService:
 
         extracted = self._extract_categories(categories)
         if not extracted:
-            local_file = Path(__file__).resolve().parents[1] / "mapper" / "available_cats.json"
+            local_file = (
+                Path(__file__).resolve().parents[1] / "mapper" / "available_cats.json"
+            )
             if local_file.exists():
                 try:
-                    extracted = self._extract_categories(json.loads(local_file.read_text(encoding="utf-8")))
+                    extracted = self._extract_categories(
+                        json.loads(local_file.read_text(encoding="utf-8"))
+                    )
                 except Exception:
                     extracted = set()
 
@@ -330,7 +344,9 @@ class ProductCreationService:
                 seo_html = build_seo_description(item, max_chars=max_chars)
                 normalized = build_normalized_product(item=item, seo_html=seo_html)
                 mapped_category = self._mapped_category_from_source(item)
-                if mapped_category and isinstance(normalized.get("productDescription"), dict):
+                if mapped_category and isinstance(
+                    normalized.get("productDescription"), dict
+                ):
                     normalized["productDescription"]["category"] = mapped_category
                 self._sanitize_product_attributes(normalized)
                 normalized = self._sanitize_optional_fields(normalized)
@@ -346,11 +362,15 @@ class ProductCreationService:
 
             try:
                 model = ProductCreate.model_validate(normalized)
-                validated.append((index, model.model_dump(mode="json", exclude_none=True)))
+                validated.append(
+                    (index, model.model_dump(mode="json", exclude_none=True))
+                )
             except ValidationError as exc:
                 errors = exc.errors()
                 first = errors[0] if errors else None
-                loc = " -> ".join(str(part) for part in (first.get("loc") if first else []))
+                loc = " -> ".join(
+                    str(part) for part in (first.get("loc") if first else [])
+                )
                 msg = first.get("msg") if first else str(exc)
                 issues.append(
                     ProductCreationIssue(
@@ -419,11 +439,15 @@ class ProductCreationService:
             try:
                 self._sanitize_product_attributes(payload)
                 model = ProductCreate.model_validate(payload)
-                validated.append((index, model.model_dump(mode="json", exclude_none=True)))
+                validated.append(
+                    (index, model.model_dump(mode="json", exclude_none=True))
+                )
             except ValidationError as exc:
                 errors = exc.errors()
                 first = errors[0] if errors else None
-                loc = " -> ".join(str(part) for part in (first.get("loc") if first else []))
+                loc = " -> ".join(
+                    str(part) for part in (first.get("loc") if first else [])
+                )
                 msg = first.get("msg") if first else str(exc)
                 issues.append(
                     ProductCreationIssue(
@@ -446,7 +470,9 @@ class ProductCreationService:
         )
         return len(source_items), validated_payloads, issues
 
-    async def process_upload(self, raw: bytes, *, max_chars: int) -> ProductCreationResult:
+    async def process_upload(
+        self, raw: bytes, *, max_chars: int
+    ) -> ProductCreationResult:
         """Run the full upload pipeline, including product creation in OTTO."""
         source_count, validated_payloads, prepare_issues = await self.prepare_upload(
             raw,

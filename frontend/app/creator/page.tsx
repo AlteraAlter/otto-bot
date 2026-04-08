@@ -1,7 +1,8 @@
 "use client";
 
-import Link from "next/link";
 import { ChangeEvent, DragEvent, FormEvent, ReactNode, useMemo, useState } from "react";
+import { useCurrentUser } from "../hooks/use-current-user";
+import { AppWorkspaceShell } from "../ui/app-workspace-shell";
 
 type UploadState = "idle" | "loading" | "success" | "error";
 type CreatorMode = "file" | "single";
@@ -224,6 +225,7 @@ function rowToPreparedPayload(row: SingleRow): { payload: Record<string, unknown
 }
 
 export default function CreatorPage() {
+  const { currentUser, isLoading, error } = useCurrentUser();
   const [mode, setMode] = useState<CreatorMode>("file");
   const [file, setFile] = useState<File | null>(null);
   const [state, setState] = useState<UploadState>("idle");
@@ -243,6 +245,8 @@ export default function CreatorPage() {
 
   const currentJsonPreview = useMemo(() => {
     try {
+      // We keep the preview derived from the same in-memory source the user edits,
+      // so the JSON preview always matches what will actually be sent to the backend.
       const source =
         mode === "file"
           ? editorData
@@ -583,19 +587,33 @@ export default function CreatorPage() {
     }
   }
 
+  if (isLoading) {
+    return (
+      <main className="otto-page">
+        <section className="app-shell">
+          <section className="workspace">
+            <p className="helper-banner info">Пожалуйста, подождите...</p>
+          </section>
+        </section>
+      </main>
+    );
+  }
+
   return (
-    <main className="creator-page">
-      <section className="creator-card">
+    <AppWorkspaceShell
+      activeHref="/creator"
+      currentUser={currentUser}
+      sectionLabel="Создание"
+      title="Создание товаров"
+      description="Два понятных сценария: подготовка из JSON-файла и ручное добавление товаров по одному."
+    >
+      <div className="creator-workspace">
+        {error ? <p className="helper-banner">{error}</p> : null}
         <div className="creator-head">
-          <div>
-            <h1>Создание товаров</h1>
-            <p>
-              Режимы разделены: из JSON-файла и добавление товаров по одному.
-            </p>
+          <div className="creator-head-copy">
+            <h2>Рабочий поток создания</h2>
+            <p>Подготовьте payload из файла или создавайте позиции вручную в табличном режиме.</p>
           </div>
-          <Link className="ghost-btn" href="/">
-            Назад к каталогу
-          </Link>
         </div>
 
         <div className="creator-mode-switch">
@@ -632,7 +650,7 @@ export default function CreatorPage() {
                   onChange={onInputChange}
                 />
                 <strong>Перетащите JSON-файл сюда</strong>
-                <span>или нажмите, чтобы выбрать файл</span>
+                <span>или нажмите, чтобы выбрать файл с компьютера</span>
                 <em>{fileLabel}</em>
               </label>
 
@@ -785,7 +803,7 @@ export default function CreatorPage() {
           </div>
         ) : null}
 
-      </section>
-    </main>
+      </div>
+    </AppWorkspaceShell>
   );
 }

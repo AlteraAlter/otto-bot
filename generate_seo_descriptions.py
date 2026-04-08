@@ -17,7 +17,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-
 PLACEHOLDER_DESCRIPTIONS = {
     "",
     "<-stammbeschreibung->",
@@ -197,7 +196,15 @@ PRODUCT_TYPE_PATTERNS = {
     "Sofa": ["sofa", "couch", "chester", "sessel", "divan", "koltuk"],
     "Tisch": ["tisch", "table", "esstisch", "couchtisch"],
     "Stuhl": ["stuhl", "chair", "hocker", "sandalye"],
-    "Schrank": ["schrank", "vitrine", "kommode", "sideboard", "regal", "anrichte", "cabinet"],
+    "Schrank": [
+        "schrank",
+        "vitrine",
+        "kommode",
+        "sideboard",
+        "regal",
+        "anrichte",
+        "cabinet",
+    ],
     "Leuchte": ["lampe", "leuchte", "light", "luster", "chandelier"],
     "Outdoor-Moebel": ["garten", "outdoor", "terrasse", "balkon"],
 }
@@ -354,7 +361,9 @@ def collect_feature_bullets(item: dict[str, Any], max_items: int) -> list[str]:
             continue
         value = sanitize_value(raw_value)
         if value:
-            bullets.append(f"<li><strong>{escape_html(label)}:</strong> {escape_html(value)}</li>")
+            bullets.append(
+                f"<li><strong>{escape_html(label)}:</strong> {escape_html(value)}</li>"
+            )
             used_keys.add(source_key)
         if len(bullets) >= max_items:
             return bullets
@@ -381,14 +390,18 @@ def collect_feature_bullets(item: dict[str, Any], max_items: int) -> list[str]:
         if not is_meaningful(value):
             continue
         nk = normalize_key(key)
-        if nk in SYSTEM_KEYS or any(nk.startswith(prefix) for prefix in SYSTEM_KEY_PREFIXES):
+        if nk in SYSTEM_KEYS or any(
+            nk.startswith(prefix) for prefix in SYSTEM_KEY_PREFIXES
+        ):
             continue
         if key in used_keys:
             continue
         if not any(pattern in nk for pattern in extra_patterns):
             continue
         cleaned = sanitize_value(value)
-        bullets.append(f"<li><strong>{escape_html(key)}:</strong> {escape_html(cleaned)}</li>")
+        bullets.append(
+            f"<li><strong>{escape_html(key)}:</strong> {escape_html(cleaned)}</li>"
+        )
         used_keys.add(key)
 
     return bullets[:max_items]
@@ -457,11 +470,31 @@ def build_seo_description(
         if find_alias_field(norm_map, FIELD_ALIASES["Produktart"])[1] is not None
         else ""
     )
-    brand = sanitize_value(find_alias_field(norm_map, FIELD_ALIASES["Marke"])[1]) if find_alias_field(norm_map, FIELD_ALIASES["Marke"])[1] is not None else ""
-    material = sanitize_value(find_alias_field(norm_map, FIELD_ALIASES["Material"])[1]) if find_alias_field(norm_map, FIELD_ALIASES["Material"])[1] is not None else ""
-    color = sanitize_value(find_alias_field(norm_map, FIELD_ALIASES["Farbe"])[1]) if find_alias_field(norm_map, FIELD_ALIASES["Farbe"])[1] is not None else ""
-    room = sanitize_value(find_alias_field(norm_map, FIELD_ALIASES["Zimmer"])[1]) if find_alias_field(norm_map, FIELD_ALIASES["Zimmer"])[1] is not None else ""
-    style = sanitize_value(find_alias_field(norm_map, FIELD_ALIASES["Stil"])[1]) if find_alias_field(norm_map, FIELD_ALIASES["Stil"])[1] is not None else ""
+    brand = (
+        sanitize_value(find_alias_field(norm_map, FIELD_ALIASES["Marke"])[1])
+        if find_alias_field(norm_map, FIELD_ALIASES["Marke"])[1] is not None
+        else ""
+    )
+    material = (
+        sanitize_value(find_alias_field(norm_map, FIELD_ALIASES["Material"])[1])
+        if find_alias_field(norm_map, FIELD_ALIASES["Material"])[1] is not None
+        else ""
+    )
+    color = (
+        sanitize_value(find_alias_field(norm_map, FIELD_ALIASES["Farbe"])[1])
+        if find_alias_field(norm_map, FIELD_ALIASES["Farbe"])[1] is not None
+        else ""
+    )
+    room = (
+        sanitize_value(find_alias_field(norm_map, FIELD_ALIASES["Zimmer"])[1])
+        if find_alias_field(norm_map, FIELD_ALIASES["Zimmer"])[1] is not None
+        else ""
+    )
+    style = (
+        sanitize_value(find_alias_field(norm_map, FIELD_ALIASES["Stil"])[1])
+        if find_alias_field(norm_map, FIELD_ALIASES["Stil"])[1] is not None
+        else ""
+    )
 
     product_label = detect_product_label(title, product_type)
 

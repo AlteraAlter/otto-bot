@@ -54,6 +54,24 @@ class OttoClient:
             "body": response.text,
         }
 
+    async def _send(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json: Any = None,
+    ) -> httpx.Response:
+        """Execute an authenticated HTTP request and return the raw response."""
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            return await client.request(
+                method,
+                f"{self.base_url}{path}",
+                headers=await self._header(),
+                params=params,
+                json=json,
+            )
+
     async def _request(
         self,
         method: str,
@@ -63,16 +81,21 @@ class OttoClient:
         json: Any = None,
     ):
         """Execute an authenticated HTTP request and raise on non-2xx responses."""
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.request(
-                method,
-                f"{self.base_url}{path}",
-                headers=await self._header(),
-                params=params,
-                json=json,
-            )
-            response.raise_for_status()
-            return self._parse_response(response)
+        response = await self._send(method, path, params=params, json=json)
+        response.raise_for_status()
+        return self._parse_response(response)
+
+    async def _request_with_status(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json: Any = None,
+    ) -> tuple[int, Any]:
+        """Execute an authenticated request and return both status and parsed body."""
+        response = await self._send(method, path, params=params, json=json)
+        return response.status_code, self._parse_response(response)
 
     async def update_status(self, payload: dict):
         """POST active status changes for products."""
@@ -85,6 +108,10 @@ class OttoClient:
     async def get_product(self, sku: str):
         """GET a single product by SKU."""
         return await self._request("GET", f"/v5/products/{sku}")
+
+    async def get_product_with_status(self, sku: str) -> tuple[int, Any]:
+        """GET a single product by SKU without raising, returning status and body."""
+        return await self._request_with_status("GET", f"/v5/products/{sku}")
 
     async def get_products(self, payload: dict | None = None):
         """GET paginated products list."""

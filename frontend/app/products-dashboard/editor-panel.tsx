@@ -1,262 +1,160 @@
 "use client";
 
-import { BRAND_OPTIONS, Product, ProductBrand, ProductStatus } from "./types";
+import { Product } from "./types";
+import { formatCurrency, formatDateTime, formatText } from "./utils";
 
 type EditorPanelProps = {
-  hasProductChanges: boolean;
-  hasStatusChanges: boolean;
-  isApplying: boolean;
-  isBulkSaving: boolean;
+  isClosing?: boolean;
   isDetailOpen: boolean;
-  multiSelectedIds: string[];
   selectedProduct: Product | null;
-  onAddAttribute: () => void;
-  onAddBulletPoint: () => void;
   onClose: () => void;
-  onDeleteProduct: () => void;
-  onRemoveAttribute: (index: number) => void;
-  onRemoveBulletPoint: (index: number) => void;
-  onSaveChanges: () => void;
-  onUpdateAttributeAdditional: (index: number, value: boolean) => void;
-  onUpdateAttributeName: (index: number, value: string) => void;
-  onUpdateAttributeValues: (index: number, value: string) => void;
-  onUpdateBulletPoint: (index: number, value: string) => void;
-  onUpdateSelected: <K extends keyof Product>(field: K, value: Product[K]) => void;
 };
 
-export function EditorPanel({
-  hasProductChanges,
-  hasStatusChanges,
-  isApplying,
-  isBulkSaving,
-  isDetailOpen,
-  multiSelectedIds,
-  selectedProduct,
-  onAddAttribute,
-  onAddBulletPoint,
-  onClose,
-  onDeleteProduct,
-  onRemoveAttribute,
-  onRemoveBulletPoint,
-  onSaveChanges,
-  onUpdateAttributeAdditional,
-  onUpdateAttributeName,
-  onUpdateAttributeValues,
-  onUpdateBulletPoint,
-  onUpdateSelected
-}: EditorPanelProps) {
+type FieldProps = {
+  label: string;
+  value: string;
+};
+
+function Field({ label, value }: FieldProps) {
   return (
-    <aside className="editor-panel">
-      {selectedProduct && isDetailOpen && multiSelectedIds.length <= 1 ? (
-        <>
-          <div className="editor-head">
-            <div>
-              <h2>Карточка товара</h2>
-              <p>{selectedProduct.updatedAt}</p>
-            </div>
-            <button className="ghost-btn" onClick={onClose}>
-              Закрыть
-            </button>
-          </div>
+    <div className="product-detail-card">
+      <p className="detail-title">{label}</p>
+      <p className="detail-description">{value}</p>
+    </div>
+  );
+}
 
-          <div className="editor-grid">
-            <label>
-              Название
-              <input
-                value={selectedProduct.name}
-                onChange={(event) => onUpdateSelected("name", event.target.value)}
-              />
-            </label>
-            <label>
-              SKU
-              <input
-                value={selectedProduct.sku}
-                onChange={(event) => onUpdateSelected("sku", event.target.value)}
-              />
-            </label>
-            <label>
-              Бренд
-              <select
-                value={selectedProduct.brand}
-                onChange={(event) => onUpdateSelected("brand", event.target.value as ProductBrand)}
+export function EditorPanel({
+  isClosing = false,
+  isDetailOpen,
+  selectedProduct,
+  onClose,
+}: EditorPanelProps) {
+  if (!selectedProduct || !isDetailOpen) {
+    return null;
+  }
+
+  return (
+    <aside className={`editor-panel ${isClosing ? "is-closing" : ""}`.trim()}>
+      <div className="editor-head">
+        <div>
+          <h2>Детали товара</h2>
+          <p>{formatDateTime(selectedProduct.lastChangedAt)}</p>
+        </div>
+        <button className="ghost-btn" onClick={onClose} type="button">
+          Закрыть
+        </button>
+      </div>
+
+      <div className="editor-summary-strip">
+        <div className="editor-summary-chip">
+          <span>Статус</span>
+          <strong>{formatText(selectedProduct.activeStatus)}</strong>
+        </div>
+        <div className="editor-summary-chip">
+          <span>Маркетплейс</span>
+          <strong>{formatText(selectedProduct.marketplaceStatus)}</strong>
+        </div>
+        <div className="editor-summary-chip">
+          <span>Цена</span>
+          <strong>{formatCurrency(selectedProduct.price)}</strong>
+        </div>
+      </div>
+
+      <div className="editor-grid">
+        <label>
+          Product reference
+          <input value={formatText(selectedProduct.productReference)} readOnly />
+        </label>
+        <label>
+          SKU
+          <input value={formatText(selectedProduct.sku)} readOnly />
+        </label>
+        <label>
+          EAN
+          <input value={formatText(selectedProduct.ean)} readOnly />
+        </label>
+        <label>
+          MOIN
+          <input value={formatText(selectedProduct.moin)} readOnly />
+        </label>
+        <label>
+          Category
+          <input value={formatText(selectedProduct.productCategory)} readOnly />
+        </label>
+        <label>
+          Delivery time
+          <input value={formatText(selectedProduct.deliveryTime)} readOnly />
+        </label>
+        <label>
+          Price
+          <input value={formatCurrency(selectedProduct.price)} readOnly />
+        </label>
+        <label>
+          Recommended retail price
+          <input value={formatCurrency(selectedProduct.recommendedRetailPrice)} readOnly />
+        </label>
+        <label>
+          Sale price
+          <input value={formatCurrency(selectedProduct.salePrice)} readOnly />
+        </label>
+        <label>
+          Sale start
+          <input value={formatDateTime(selectedProduct.saleStart)} readOnly />
+        </label>
+        <label>
+          Sale end
+          <input value={formatDateTime(selectedProduct.saleEnd)} readOnly />
+        </label>
+        <label>
+          Last changed
+          <input value={formatDateTime(selectedProduct.lastChangedAt)} readOnly />
+        </label>
+      </div>
+
+      <Field
+        label="Marketplace status"
+        value={formatText(selectedProduct.marketplaceStatus)}
+      />
+      <Field label="Active status" value={formatText(selectedProduct.activeStatus)} />
+      <Field label="Error message" value={formatText(selectedProduct.errorMessage)} />
+
+      <div className="product-detail-card">
+        <p className="detail-title">OTTO URL</p>
+        {selectedProduct.ottoUrl ? (
+          <a
+            href={selectedProduct.ottoUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="ghost-btn"
+          >
+            Открыть ссылку
+          </a>
+        ) : (
+          <p className="detail-description">-</p>
+        )}
+      </div>
+
+      <div className="product-detail-card">
+        <p className="detail-title">Media assets</p>
+        {selectedProduct.mediaAssetLinks.length > 0 ? (
+          <div className="product-media-grid">
+            {selectedProduct.mediaAssetLinks.map((link, index) => (
+              <a
+                key={`${selectedProduct.id}-${index}`}
+                href={link}
+                target="_blank"
+                rel="noreferrer"
+                className="product-media-item"
               >
-                {BRAND_OPTIONS.map((brand) => (
-                  <option key={brand} value={brand}>
-                    {brand}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              ID бренда
-              <input
-                value={selectedProduct.brandId}
-                onChange={(event) => onUpdateSelected("brandId", event.target.value)}
-              />
-            </label>
-            <label>
-              Категория
-              <input
-                value={selectedProduct.category}
-                onChange={(event) => onUpdateSelected("category", event.target.value)}
-              />
-            </label>
-            <label>
-              Статус
-              <select
-                value={selectedProduct.status}
-                onChange={(event) => onUpdateSelected("status", event.target.value as ProductStatus)}
-              >
-                <option value="active">Активен</option>
-                <option value="non_active">Неактивен</option>
-              </select>
-            </label>
-            <label>
-              EAN
-              <input
-                value={selectedProduct.ean}
-                onChange={(event) => onUpdateSelected("ean", event.target.value)}
-              />
-            </label>
-            <label>
-              MOIN
-              <input
-                value={selectedProduct.moin}
-                onChange={(event) => onUpdateSelected("moin", event.target.value)}
-              />
-            </label>
-            <label>
-              Цена (EUR)
-              <input
-                type="number"
-                min="0"
-                step="0.1"
-                value={selectedProduct.price}
-                onChange={(event) => onUpdateSelected("price", Number(event.target.value))}
-              />
-            </label>
-            <label>
-              Остаток
-              <input
-                type="number"
-                min="0"
-                value={selectedProduct.stock}
-                onChange={(event) => onUpdateSelected("stock", Number(event.target.value))}
-              />
-            </label>
-            <label>
-              Product Reference
-              <input
-                value={selectedProduct.productReference}
-                onChange={(event) => onUpdateSelected("productReference", event.target.value)}
-              />
-            </label>
+                <img src={link} alt={`Product image ${index + 1}`} loading="lazy" />
+              </a>
+            ))}
           </div>
-
-          <div className="product-actions">
-            <button className="danger" onClick={onDeleteProduct}>
-              Удалить
-            </button>
-          </div>
-
-          <div className="product-detail-card">
-            <p className="detail-title">Описание товара</p>
-            <p className="detail-description">
-              {selectedProduct.description.length > 0
-                ? selectedProduct.description.slice(0, 420)
-                : "Описание отсутствует"}
-            </p>
-            <div className="detail-bullets">
-              {selectedProduct.bulletPoints.slice(0, 3).map((point, index) => (
-                <span key={`${point}-${index}`}>{point}</span>
-              ))}
-            </div>
-          </div>
-
-          <div className="product-detail-card">
-            <p className="detail-title">Bullet points</p>
-            <div className="dynamic-editor">
-              {selectedProduct.bulletPoints.map((point, index) => (
-                <div className="dynamic-editor-row" key={`bullet-${index}`}>
-                  <input
-                    value={point}
-                    onChange={(event) => onUpdateBulletPoint(index, event.target.value)}
-                    placeholder={`Bullet point ${index + 1}`}
-                  />
-                  <button type="button" className="ghost-btn" onClick={() => onRemoveBulletPoint(index)}>
-                    Удалить
-                  </button>
-                </div>
-              ))}
-              <button type="button" className="ghost-btn" onClick={onAddBulletPoint}>
-                Добавить bullet point
-              </button>
-            </div>
-          </div>
-
-          <div className="product-detail-card">
-            <p className="detail-title">Attributes</p>
-            <div className="dynamic-editor">
-              {selectedProduct.attributes.map((attribute, index) => (
-                <div className="dynamic-editor-row attribute-row" key={`attribute-${index}`}>
-                  <input
-                    value={attribute.name}
-                    onChange={(event) => onUpdateAttributeName(index, event.target.value)}
-                    placeholder="Название атрибута"
-                  />
-                  <input
-                    value={attribute.values.join(", ")}
-                    onChange={(event) => onUpdateAttributeValues(index, event.target.value)}
-                    placeholder="Значения через запятую"
-                  />
-                  <select
-                    value={attribute.additional ? "true" : "false"}
-                    onChange={(event) => onUpdateAttributeAdditional(index, event.target.value === "true")}
-                  >
-                    <option value="false">Основной</option>
-                    <option value="true">Дополнительный</option>
-                  </select>
-                  <button type="button" className="ghost-btn" onClick={() => onRemoveAttribute(index)}>
-                    Удалить
-                  </button>
-                </div>
-              ))}
-              <button type="button" className="ghost-btn" onClick={onAddAttribute}>
-                Добавить атрибут
-              </button>
-            </div>
-          </div>
-
-          <div className="editor-analytics">
-            <article>
-              <p>Рейтинг</p>
-              <strong>{selectedProduct.rating.toFixed(1)}</strong>
-            </article>
-            <article>
-              <p>Конверсия</p>
-              <strong>
-                {selectedProduct.views === 0
-                  ? "0%"
-                  : `${((selectedProduct.sales / selectedProduct.views) * 100).toFixed(1)}%`}
-              </strong>
-            </article>
-            <article>
-              <p>Просмотры</p>
-              <strong>{selectedProduct.views}</strong>
-            </article>
-          </div>
-
-          <div className="sync-summary">
-            <p>Карточка: {hasProductChanges ? "есть" : "нет"} | Статус: {hasStatusChanges ? "есть" : "нет"}</p>
-          </div>
-
-          <button className="primary-btn full" onClick={onSaveChanges} disabled={isApplying || isBulkSaving}>
-            {isApplying ? "Сохраняем..." : "Сохранить"}
-          </button>
-        </>
-      ) : (
-        <div className="empty-state">Выберите мини-карточку слева, чтобы открыть все данные товара</div>
-      )}
+        ) : (
+          <p className="detail-description">Нет сохранённых изображений.</p>
+        )}
+      </div>
     </aside>
   );
 }

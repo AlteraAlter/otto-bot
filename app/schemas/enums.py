@@ -17,3 +17,8 @@ class VatEnum(str, Enum):
     REDUCED = "REDUCED"
     FREE = "FREE"
     NONE = "NONE"
+
+
+class RoleEnum(str, Enum):
+    SEO = "SEO"
+    EMPLOYEE = "EMPLOYEE"
