@@ -6,7 +6,13 @@ __pycache__
 *.pyo
 *.pyd
 .pytest_cache
+.mypy_cache
+.ruff_cache
+.idea
+.vscode
+node_modules
 frontend/node_modules
 frontend/.next
-frontend/tsconfig.tsbuildinfo
-otto-market-products-2026-03-28-13-25-08-2_1.xlsx
+dist
+build
+alembic/versions/__pycache__

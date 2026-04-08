@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ReactNode } from "react";
+import { ReactNode, useState } from "react";
 
 import { CurrentUser } from "../hooks/use-current-user";
 
@@ -24,14 +24,15 @@ export function AppWorkspaceShell({
   children,
 }: AppWorkspaceShellProps) {
   const router = useRouter();
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
   const navItems = [
-    { href: "/", label: "Каталог" },
-    { href: "/creator", label: "Создание товара" },
+    { href: "/", label: "Каталог", shortLabel: "К" },
+    { href: "/creator", label: "Создание товара", shortLabel: "+" },
     ...(currentUser?.role === "SEO"
       ? [
-          { href: "/imports", label: "Data Operations" },
-          { href: "/invitations", label: "Приглашения" },
+          { href: "/imports", label: "Data Operations", shortLabel: "D" },
+          { href: "/invitations", label: "Приглашения", shortLabel: "П" },
         ]
       : []),
   ];
@@ -44,24 +45,45 @@ export function AppWorkspaceShell({
 
   return (
     <main className="otto-page">
-      <section className="app-shell">
-        <aside className="sidebar">
-          <div>
-            <p className="brand">OTTO Контроль</p>
-            <p className="brand-subtitle">
-              {currentUser?.email ? currentUser.email : "Workspace"}
-            </p>
+      <section className={`app-shell ${isSidebarCollapsed ? "sidebar-collapsed" : ""}`.trim()}>
+        <aside className={`sidebar ${isSidebarCollapsed ? "collapsed" : ""}`.trim()}>
+          <div className="sidebar-header">
+            <div className="sidebar-brand-block">
+              <div className="brand-mark" aria-hidden="true">
+                O
+              </div>
+              <div className="sidebar-brand-copy">
+                <p className="brand">OTTO Контроль</p>
+                <p className="brand-subtitle">
+                  {currentUser?.email ? currentUser.email : "Workspace"}
+                </p>
+              </div>
+            </div>
+            <button
+              aria-label={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              className="sidebar-toggle"
+              onClick={() => setIsSidebarCollapsed((current) => !current)}
+              type="button"
+            >
+              {isSidebarCollapsed ? "›" : "‹"}
+            </button>
           </div>
 
           <nav className="side-nav">
             {navItems.map((item) =>
               item.href === activeHref ? (
-                <button key={item.href} className="nav-item active" type="button">
-                  {item.label}
+                <button key={item.href} className="nav-item active" title={item.label} type="button">
+                  <span className="nav-item-short" aria-hidden="true">
+                    {item.shortLabel}
+                  </span>
+                  <span className="nav-item-label">{item.label}</span>
                 </button>
               ) : (
-                <Link key={item.href} className="nav-item" href={item.href}>
-                  {item.label}
+                <Link key={item.href} className="nav-item" href={item.href} title={item.label}>
+                  <span className="nav-item-short" aria-hidden="true">
+                    {item.shortLabel}
+                  </span>
+                  <span className="nav-item-label">{item.label}</span>
                 </Link>
               ),
             )}

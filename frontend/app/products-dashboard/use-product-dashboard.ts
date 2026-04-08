@@ -115,8 +115,15 @@ export function useProductDashboard() {
       );
 
       setSelectedId((currentSelectedId) => {
-        if (items.some((item) => item.id === currentSelectedId)) return currentSelectedId;
-        return items[0]?.id ?? "";
+        const nextSelectedId = items.some((item) => item.id === currentSelectedId)
+          ? currentSelectedId
+          : "";
+
+        if (!nextSelectedId) {
+          setIsDetailOpen(false);
+        }
+
+        return nextSelectedId;
       });
 
       if (items.length === 0) {
@@ -139,13 +146,18 @@ export function useProductDashboard() {
     setIsDetailOpen(true);
   }, []);
 
+  const closeProduct = useCallback(() => {
+    setIsDetailOpen(false);
+    setSelectedId("");
+  }, []);
+
   useEffect(() => {
     let active = true;
 
     async function loadCategories() {
       try {
         const response = await fetch("/api/products/available-categories", {
-          cache: "force-cache",
+          cache: "no-store",
         });
 
         if (!response.ok) {
@@ -208,6 +220,7 @@ export function useProductDashboard() {
     isLoading,
     kpi,
     notice,
+    closeProduct,
     openProduct,
     products,
     query,

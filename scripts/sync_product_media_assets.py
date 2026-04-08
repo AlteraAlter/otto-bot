@@ -1,4 +1,4 @@
-"""CLI script to enrich local products with OTTO media asset URLs."""
+"""CLI script to enrich local products with OTTO media URLs and descriptions."""
 
 from __future__ import annotations
 
@@ -18,7 +18,10 @@ from app.services.product_media_sync_service import sync_product_media_assets
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Fetch OTTO product media asset URLs by SKU and save them into the local products table.",
+        description=(
+            "Fetch OTTO product media asset URLs by SKU, append product descriptions, "
+            "and save each response to the local database immediately."
+        ),
     )
     parser.add_argument("--sku", help="Only sync one SKU.")
     parser.add_argument("--limit", type=int, help="Maximum number of local products to scan.")
@@ -40,6 +43,7 @@ async def run() -> None:
             sku=args.sku,
             limit=args.limit,
             only_missing=args.only_missing,
+            print_status_codes=True,
         )
 
     print(

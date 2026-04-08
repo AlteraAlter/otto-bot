@@ -20,6 +20,9 @@ from app.schemas.userDTO import (
     AdminUserCreateResponseDTO,
     EmployeeInviteRequestDTO,
     EmployeeInviteResponseDTO,
+    UserInvitationDTO,
+    UserInvitationListResponseDTO,
+    UserInvitationDeleteResponseDTO,
     UserDTO,
     UserLoginDTO,
     UserRegisterDTO,
@@ -269,6 +272,14 @@ class UserAuth:
             expires_in=int(access_token_expires.total_seconds()),
         )
 
+    def _map_invitation_status(self, *, accepted_at: datetime | None, expires_at: datetime) -> str:
+        now = datetime.now(timezone.utc)
+        if accepted_at is not None:
+            return "accepted"
+        if expires_at <= now:
+            return "expired"
+        return "pending"
+
     async def register_user(self, payload: UserRegisterDTO) -> TokenDTO:
         invitation = await self.user_repository.select_active_invitation_by_token_hash(
             self._hash_invitation_token(payload.invite_token)
@@ -309,7 +320,7 @@ class UserAuth:
 
         await self.user_repository.delete_pending_invitations_for_email(
             email=payload.email,
-            role=RoleEnum.EMPLOYEE,
+            role=payload.role,
         )
 
         raw_token = secrets.token_urlsafe(32)
@@ -318,7 +329,7 @@ class UserAuth:
         )
         invitation = await self.user_repository.create_invitation(
             email=payload.email,
-            role=RoleEnum.EMPLOYEE,
+            role=payload.role,
             token_hash=self._hash_invitation_token(raw_token),
             invited_by=invited_by_user_id,
             expires_at=expires_at,
@@ -336,10 +347,59 @@ class UserAuth:
 
         return EmployeeInviteResponseDTO(
             success=True,
+            id=invitation.id,
             email=invitation.email,
             role=invitation.role,
             expires_at=invitation.expires_at,
         )
+
+    async def list_invitations(self, *, invited_by_user_id: int) -> UserInvitationListResponseDTO:
+        invitations = await self.user_repository.list_invitations(invited_by=invited_by_user_id)
+        return UserInvitationListResponseDTO(
+            success=True,
+            items=[
+                UserInvitationDTO(
+                    id=invitation.id,
+                    email=invitation.email,
+                    role=invitation.role,
+                    status=self._map_invitation_status(
+                        accepted_at=invitation.accepted_at,
+                        expires_at=invitation.expires_at,
+                    ),
+                    created_at=invitation.created_at,
+                    expires_at=invitation.expires_at,
+                    accepted_at=invitation.accepted_at,
+                )
+                for invitation in invitations
+            ],
+        )
+
+    async def delete_invitation(
+        self,
+        *,
+        invitation_id: int,
+        invited_by_user_id: int,
+    ) -> UserInvitationDeleteResponseDTO:
+        deleted = await self.user_repository.delete_invitation_by_id(
+            invitation_id=invitation_id,
+            invited_by=invited_by_user_id,
+        )
+        if not deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Invitation not found",
+            )
+        return UserInvitationDeleteResponseDTO(success=True, deleted_count=1)
+
+    async def delete_pending_invitations(
+        self,
+        *,
+        invited_by_user_id: int,
+    ) -> UserInvitationDeleteResponseDTO:
+        deleted_count = await self.user_repository.delete_pending_invitations_for_inviter(
+            invited_by=invited_by_user_id,
+        )
+        return UserInvitationDeleteResponseDTO(success=True, deleted_count=deleted_count)
 
     async def admin_create_user(
         self, payload: AdminUserCreateDTO

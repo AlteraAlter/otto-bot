@@ -9,6 +9,8 @@ from app.schemas.userDTO import (
     AdminUserCreateResponseDTO,
     EmployeeInviteRequestDTO,
     EmployeeInviteResponseDTO,
+    UserInvitationDeleteResponseDTO,
+    UserInvitationListResponseDTO,
     UserDTO,
     UserLoginDTO,
     UserRegisterDTO,
@@ -67,6 +69,36 @@ async def invite_employee(
     """Send a Gmail invitation link for employee-only registration."""
     return await auth_service.invite_employee(
         payload,
+        invited_by_user_id=current_user.id,
+    )
+
+
+@router.get("/invitations", response_model=UserInvitationListResponseDTO)
+async def list_invitations(
+    current_user: UserDTO = Depends(require_role([RoleEnum.SEO])),
+    auth_service: UserAuth = Depends(get_user_auth),
+) -> UserInvitationListResponseDTO:
+    return await auth_service.list_invitations(invited_by_user_id=current_user.id)
+
+
+@router.delete("/invitations/{invitation_id}", response_model=UserInvitationDeleteResponseDTO)
+async def delete_invitation(
+    invitation_id: int,
+    current_user: UserDTO = Depends(require_role([RoleEnum.SEO])),
+    auth_service: UserAuth = Depends(get_user_auth),
+) -> UserInvitationDeleteResponseDTO:
+    return await auth_service.delete_invitation(
+        invitation_id=invitation_id,
+        invited_by_user_id=current_user.id,
+    )
+
+
+@router.delete("/invitations", response_model=UserInvitationDeleteResponseDTO)
+async def delete_pending_invitations(
+    current_user: UserDTO = Depends(require_role([RoleEnum.SEO])),
+    auth_service: UserAuth = Depends(get_user_auth),
+) -> UserInvitationDeleteResponseDTO:
+    return await auth_service.delete_pending_invitations(
         invited_by_user_id=current_user.id,
     )
 

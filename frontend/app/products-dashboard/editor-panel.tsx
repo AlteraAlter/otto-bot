@@ -4,6 +4,7 @@ import { Product } from "./types";
 import { formatCurrency, formatDateTime, formatText } from "./utils";
 
 type EditorPanelProps = {
+  isClosing?: boolean;
   isDetailOpen: boolean;
   selectedProduct: Product | null;
   onClose: () => void;
@@ -24,22 +25,17 @@ function Field({ label, value }: FieldProps) {
 }
 
 export function EditorPanel({
+  isClosing = false,
   isDetailOpen,
   selectedProduct,
   onClose,
 }: EditorPanelProps) {
   if (!selectedProduct || !isDetailOpen) {
-    return (
-      <aside className="editor-panel">
-        <div className="empty-state">
-          Выберите строку слева, чтобы посмотреть все поля товара из базы.
-        </div>
-      </aside>
-    );
+    return null;
   }
 
   return (
-    <aside className="editor-panel">
+    <aside className={`editor-panel ${isClosing ? "is-closing" : ""}`.trim()}>
       <div className="editor-head">
         <div>
           <h2>Детали товара</h2>
@@ -48,6 +44,21 @@ export function EditorPanel({
         <button className="ghost-btn" onClick={onClose} type="button">
           Закрыть
         </button>
+      </div>
+
+      <div className="editor-summary-strip">
+        <div className="editor-summary-chip">
+          <span>Статус</span>
+          <strong>{formatText(selectedProduct.activeStatus)}</strong>
+        </div>
+        <div className="editor-summary-chip">
+          <span>Маркетплейс</span>
+          <strong>{formatText(selectedProduct.marketplaceStatus)}</strong>
+        </div>
+        <div className="editor-summary-chip">
+          <span>Цена</span>
+          <strong>{formatCurrency(selectedProduct.price)}</strong>
+        </div>
       </div>
 
       <div className="editor-grid">

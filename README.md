@@ -56,9 +56,9 @@ celery -A app.celery_app.celery_app worker --loglevel=info
 
 The Afterbuy JV lister fetch is now queued through Celery and processed by this worker.
 
-## Sync OTTO Product Images Into Local DB
+## Sync OTTO Product Images And Descriptions Into Local DB
 
-After running the latest migration, you can enrich local products with OTTO media asset URLs:
+After running the latest migration, you can enrich local products with OTTO media asset URLs and save the upstream product description into `product_descriptions`:
 
 ```bash
 alembic upgrade head

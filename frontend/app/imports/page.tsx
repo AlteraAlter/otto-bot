@@ -1,11 +1,10 @@
 "use client";
 
-import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 
 import { useCurrentUser } from "../hooks/use-current-user";
 import { readApiErrorMessage, readJsonResponse } from "../lib/api";
+import { AppWorkspaceShell } from "../ui/app-workspace-shell";
 
 type TaskStatus = "queued" | "running" | "completed" | "failed";
 type JobType = "afterbuy" | "xlsx";
@@ -88,8 +87,13 @@ function showIndeterminateProgress(task: ProductImportTask) {
   return detectJobType(task) === "afterbuy" && task.status !== "completed" && task.status !== "failed";
 }
 
+function formatTaskError(errorMessage: string) {
+  const compact = errorMessage.replace(/\s+/g, " ").trim();
+  if (compact.length <= 220) return compact;
+  return `${compact.slice(0, 219).trimEnd()}…`;
+}
+
 export default function ProductImportsPage() {
-  const router = useRouter();
   const { currentUser, isLoading, error } = useCurrentUser();
   const [file, setFile] = useState<File | null>(null);
   const [tasks, setTasks] = useState<ProductImportTask[]>([]);
@@ -155,8 +159,9 @@ export default function ProductImportsPage() {
     if (!activeTask) return;
 
     const interval = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
       void loadTasks();
-    }, 5000);
+    }, 10000);
 
     return () => window.clearInterval(interval);
   }, [activeTask]);
@@ -247,12 +252,6 @@ export default function ProductImportsPage() {
     setFile(nextFile);
   }
 
-  async function handleLogout() {
-    await fetch("/api/auth/logout", { method: "POST" });
-    router.replace("/login");
-    router.refresh();
-  }
-
   if (isLoading) {
     return (
       <main className="otto-page">
@@ -268,72 +267,15 @@ export default function ProductImportsPage() {
   const accessMessage =
     error ?? (!isSeoUser ? "Only SEO users can launch and monitor background jobs." : null);
 
-  const navItems = [
-    { href: "/", label: "Каталог", active: false },
-    { href: "/creator", label: "Создание товара", active: false },
-    ...(currentUser?.role === "SEO"
-      ? [
-          { href: "/imports", label: "Data Operations", active: true },
-          { href: "/invitations", label: "Приглашения", active: false },
-        ]
-      : []),
-  ];
-
   return (
-    <main className="otto-page">
-      <section className="app-shell">
-        <aside className="sidebar">
-          <div>
-            <p className="brand">OTTO Контроль</p>
-            <p className="brand-subtitle">
-              {currentUser?.email ? currentUser.email : "Operations workspace"}
-            </p>
-          </div>
-
-          <nav className="side-nav">
-            {navItems.map((item) =>
-              item.active ? (
-                <button key={item.label} className="nav-item active" type="button">
-                  {item.label}
-                </button>
-              ) : (
-                <Link key={item.href} className="nav-item" href={item.href}>
-                  {item.label}
-                </Link>
-              ),
-            )}
-          </nav>
-
-          <div className="side-note">
-            <span className="sync-pill">{currentUser?.role ?? "USER"}</span>
-            <p>Job launches, import tracking, and background sync visibility in one workspace.</p>
-          </div>
-        </aside>
-
-        <section className="workspace">
-          <header className="topbar">
-            <div className="topbar-copy">
-              <p className="page-section-label">Operations</p>
-              <h1>Data Operations</h1>
-              <p>
-                Launch XLSX imports and Afterbuy sync jobs in the background, then monitor
-                progress from one full-page operational view.
-              </p>
-            </div>
-            <div className="topbar-actions">
-              <div className="user-context-mini">
-                <div className="user-context-mini-head">
-                  <strong>{currentUser?.email ?? "Profile"}</strong>
-                  <span className="sync-pill">{currentUser?.role ?? "USER"}</span>
-                </div>
-              </div>
-              <button className="secondary-btn" onClick={handleLogout} type="button">
-                Выйти
-              </button>
-            </div>
-          </header>
-
-          <div className="imports-page-stack">
+    <AppWorkspaceShell
+      activeHref="/imports"
+      currentUser={currentUser}
+      description="Launch XLSX imports and Afterbuy sync jobs in the background, then monitor progress from one full-page operational view."
+      sectionLabel="Operations"
+      title="Data Operations"
+    >
+      <div className="imports-page-stack">
         <section className="imports-summary-grid" aria-label="Operations overview">
           <article className="imports-summary-card">
             <span>Active jobs</span>
@@ -545,7 +487,9 @@ export default function ProductImportsPage() {
                     </div>
 
                     {task.error_message ? (
-                      <p className="helper-banner">{task.error_message}</p>
+                      <p className="helper-banner imports-task-error" title={task.error_message}>
+                        {formatTaskError(task.error_message)}
+                      </p>
                     ) : null}
                   </article>
                 );
@@ -553,9 +497,7 @@ export default function ProductImportsPage() {
             )}
           </div>
         </section>
-          </div>
-        </section>
-      </section>
-    </main>
+      </div>
+    </AppWorkspaceShell>
   );
 }

@@ -21,6 +21,10 @@ class ProductService:
         """Fetch one product from OTTO by SKU."""
         return await self.client.get_product(sku)
 
+    async def get_product_with_status(self, sku: str):
+        """Fetch one product from OTTO by SKU and include the upstream status code."""
+        return await self.client.get_product_with_status(sku)
+
     async def get_products(self, payload: dict):
         """Fetch paginated products from OTTO using query payload filters."""
         return await self.client.get_products(payload)

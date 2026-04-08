@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import { Product, SortByField, SortOrder } from "./types";
@@ -9,6 +10,7 @@ type CatalogPanelProps = {
   categories: string[];
   categoryFilter: string;
   dbTotal: number;
+  isCompact: boolean;
   isLoading: boolean;
   products: Product[];
   query: string;
@@ -26,37 +28,86 @@ type CatalogPanelProps = {
 };
 
 type ProductRowProps = {
+  isCompact: boolean;
   isActiveRow: boolean;
   product: Product;
   onOpen: (productId: string) => void;
 };
 
 const ProductRow = memo(function ProductRow({
+  isCompact,
   isActiveRow,
   product,
   onOpen,
 }: ProductRowProps) {
+  const previewImage = product.mediaAssetLinks[0] ?? null;
+  const isInactive = formatText(product.activeStatus).toLowerCase().includes("inaktiv");
+  const isError = Boolean(product.errorMessage);
+
   return (
     <div className={`product-row ${isActiveRow ? "selected" : ""}`}>
       <button type="button" className="row-open-btn" onClick={() => onOpen(product.id)}>
-        <span title={formatText(product.productReference)}>
-          {formatText(product.productReference)}
-        </span>
-        <span title={formatText(product.sku)}>{formatText(product.sku)}</span>
-        <span title={formatText(product.productCategory)}>
-          {formatText(product.productCategory)}
-        </span>
-        <span title={formatText(product.marketplaceStatus)}>
-          {formatText(product.marketplaceStatus)}
-        </span>
-        <span title={formatText(product.activeStatus)}>
-          {formatText(product.activeStatus)}
-        </span>
-        <span title={formatText(product.deliveryTime)}>
-          {formatText(product.deliveryTime)}
-        </span>
-        <span>{formatCurrency(product.price)}</span>
-        <span>{formatDateTime(product.lastChangedAt)}</span>
+        {isCompact ? (
+          <span className="row-primary-cell row-primary-cell-compact">
+            <span className="row-thumbnail" aria-hidden="true">
+              {previewImage ? (
+                <img alt="" loading="lazy" src={previewImage} />
+              ) : (
+                <span>{formatText(product.sku).slice(0, 1) || "S"}</span>
+              )}
+            </span>
+            <span className="row-primary-copy">
+              <strong title={formatText(product.sku)}>{formatText(product.sku)}</strong>
+            </span>
+          </span>
+        ) : (
+          <>
+            <span className="row-primary-cell">
+              <span className="row-thumbnail" aria-hidden="true">
+                {previewImage ? (
+                  <img alt="" loading="lazy" src={previewImage} />
+                ) : (
+                  <span>{formatText(product.productReference).slice(0, 1) || "P"}</span>
+                )}
+              </span>
+              <span className="row-primary-copy">
+                <strong title={formatText(product.productReference)}>
+                  {formatText(product.productReference)}
+                </strong>
+                <small title={formatText(product.ean)}>
+                  {product.ean ? `EAN ${formatText(product.ean)}` : "Без EAN"}
+                </small>
+              </span>
+            </span>
+            <span className="row-stack-cell" title={formatText(product.sku)}>
+              <strong>{formatText(product.sku)}</strong>
+              <small>{product.moin ? `MOIN ${formatText(product.moin)}` : "Без MOIN"}</small>
+            </span>
+            <span>
+              <span className="table-pill" title={formatText(product.productCategory)}>
+                {formatText(product.productCategory)}
+              </span>
+            </span>
+            <span className="row-stack-cell" title={formatText(product.marketplaceStatus)}>
+              <strong>{formatText(product.marketplaceStatus)}</strong>
+              <small>{formatText(product.deliveryTime)}</small>
+            </span>
+            <span>
+              <span
+                className={`table-status-pill ${
+                  isError ? "danger" : isInactive ? "muted" : "success"
+                }`}
+                title={formatText(product.activeStatus)}
+              >
+                {formatText(product.activeStatus)}
+              </span>
+            </span>
+            <span className="row-stack-cell row-price-cell">
+              <strong>{formatCurrency(product.price)}</strong>
+              <small>{formatDateTime(product.lastChangedAt)}</small>
+            </span>
+          </>
+        )}
       </button>
     </div>
   );
@@ -66,6 +117,7 @@ export function CatalogPanel({
   categories,
   categoryFilter,
   dbTotal,
+  isCompact,
   isLoading,
   products,
   query,
@@ -114,7 +166,7 @@ export function CatalogPanel({
   }, [isCategoryMenuOpen]);
 
   return (
-    <div className="catalog-panel">
+    <div className={`catalog-panel ${isCompact ? "catalog-panel-compact" : ""}`.trim()}>
       <div className="panel-header">
         <div>
           <h2>Товары из базы</h2>
@@ -132,7 +184,7 @@ export function CatalogPanel({
       <div className="toolbar">
         <input
           type="search"
-          placeholder="Поиск: SKU, reference, EAN, MOIN, категория, статус..."
+          placeholder="Поиск по SKU, reference, EAN, MOIN или категории"
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
         />
@@ -213,6 +265,9 @@ export function CatalogPanel({
             </div>
           ) : null}
         </div>
+        <Link className="primary-btn toolbar-create-btn" href="/creator">
+          Добавить товар
+        </Link>
       </div>
 
       <div className="product-list">
@@ -225,19 +280,24 @@ export function CatalogPanel({
           <div className="product-table">
             <div className="product-row product-row-head">
               <div className="row-open-head">
-                <span>Reference</span>
-                <span>SKU</span>
-                <span>Категория</span>
-                <span>Маркетплейс</span>
-                <span>Активность</span>
-                <span>Доставка</span>
-                <span>Цена</span>
-                <span>Изменён</span>
+                {isCompact ? (
+                  <span>SKU</span>
+                ) : (
+                  <>
+                    <span>Reference</span>
+                    <span>SKU</span>
+                    <span>Категория</span>
+                    <span>Маркетплейс</span>
+                    <span>Активность</span>
+                    <span>Цена</span>
+                  </>
+                )}
               </div>
             </div>
             {products.map((product) => (
               <ProductRow
                 key={product.id}
+                isCompact={isCompact}
                 isActiveRow={selectedId === product.id}
                 product={product}
                 onOpen={onOpenProduct}

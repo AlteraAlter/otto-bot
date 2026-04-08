@@ -1,13 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useState } from "react";
+import { Suspense, FormEvent, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { readApiErrorMessage } from "../lib/api";
 import { AuthShell } from "../ui/auth-shell";
 
-export default function LoginPage() {
+function LoginPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
@@ -108,5 +108,22 @@ export default function LoginPage() {
         </p>
       </form>
     </AuthShell>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <AuthShell
+          title="Вход в рабочее пространство OTTO"
+          description="Подготавливаем форму входа."
+        >
+          <p className="helper-banner info">Пожалуйста, подождите...</p>
+        </AuthShell>
+      }
+    >
+      <LoginPageContent />
+    </Suspense>
   );
 }

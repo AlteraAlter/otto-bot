@@ -81,6 +81,7 @@ class UserLoginDTO(BaseModel):
 
 class EmployeeInviteRequestDTO(BaseModel):
     email: EmailStr
+    role: RoleEnum = RoleEnum.EMPLOYEE
 
     @field_validator("email")
     @classmethod
@@ -93,6 +94,31 @@ class EmployeeInviteRequestDTO(BaseModel):
 
 class EmployeeInviteResponseDTO(BaseModel):
     success: bool
+    id: int
     email: EmailStr
     role: RoleEnum
     expires_at: datetime
+
+
+class InvitationStatusDTO(str):
+    pass
+
+
+class UserInvitationDTO(BaseModel):
+    id: int
+    email: EmailStr
+    role: RoleEnum
+    status: str
+    created_at: datetime
+    expires_at: datetime
+    accepted_at: datetime | None = None
+
+
+class UserInvitationListResponseDTO(BaseModel):
+    success: bool
+    items: list[UserInvitationDTO]
+
+
+class UserInvitationDeleteResponseDTO(BaseModel):
+    success: bool
+    deleted_count: int

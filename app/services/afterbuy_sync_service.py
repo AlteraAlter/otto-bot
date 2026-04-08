@@ -16,6 +16,21 @@ from app.database import SessionLocal
 from app.models.jv_lister import JVLister
 from app.models.product_import_tasks import ProductImportTask
 
+POSTGRES_MAX_BIND_PARAMS = 32767
+JV_LISTER_UPSERT_COLUMN_COUNT = 4
+DEFAULT_JV_LISTER_BATCH_SIZE = 1000
+MAX_TASK_ERROR_LENGTH = 280
+
+
+def summarize_task_error(exc: Exception) -> str:
+    """Store a short task error message instead of huge SQL traces."""
+    message = str(exc).strip() or exc.__class__.__name__
+    first_line = message.splitlines()[0].strip()
+    compact = " ".join(first_line.split())
+    if len(compact) <= MAX_TASK_ERROR_LENGTH:
+        return compact
+    return f"{compact[: MAX_TASK_ERROR_LENGTH - 1].rstrip()}…"
+
 
 def extract_afterbuy_items(payload: Any) -> list[dict[str, Any]]:
     """Extract list-like collections from the Afterbuy products response."""
@@ -86,18 +101,31 @@ async def upsert_jv_lister_batch(
     if not rows:
         return 0
 
-    insert_stmt = insert(JVLister).values(rows)
-    upsert_stmt = insert_stmt.on_conflict_do_update(
-        index_elements=["account", "remote_product_id"],
-        set_={
-            "dataset": insert_stmt.excluded.dataset,
-            "payload": insert_stmt.excluded.payload,
-            "fetched_at": func.now(),
-        },
+    max_rows_per_statement = max(
+        1,
+        min(
+            DEFAULT_JV_LISTER_BATCH_SIZE,
+            POSTGRES_MAX_BIND_PARAMS // JV_LISTER_UPSERT_COLUMN_COUNT,
+        ),
     )
-    await db.execute(upsert_stmt)
+
+    saved_rows = 0
+    for start in range(0, len(rows), max_rows_per_statement):
+        chunk = rows[start : start + max_rows_per_statement]
+        insert_stmt = insert(JVLister).values(chunk)
+        upsert_stmt = insert_stmt.on_conflict_do_update(
+            index_elements=["account", "remote_product_id"],
+            set_={
+                "dataset": insert_stmt.excluded.dataset,
+                "payload": insert_stmt.excluded.payload,
+                "fetched_at": func.now(),
+            },
+        )
+        await db.execute(upsert_stmt)
+        saved_rows += len(chunk)
+
     await db.commit()
-    return len(rows)
+    return saved_rows
 
 
 async def sync_afterbuy_to_jv_lister(
@@ -226,7 +254,7 @@ async def run_afterbuy_import_task(
             if task is None:
                 return
             task.status = "failed"
-            task.error_message = str(exc)
+            task.error_message = summarize_task_error(exc)
             task.finished_at = datetime.utcnow()
             await session.commit()
 

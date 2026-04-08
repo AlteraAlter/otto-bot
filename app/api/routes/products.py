@@ -82,6 +82,7 @@ XLSX_COLUMN_MAP = {
     "Datum der letzten Änderung": "last_changed_at",
 }
 REQUIRED_XLSX_COLUMNS = list(XLSX_COLUMN_MAP.keys())
+MAX_TASK_ERROR_LENGTH = 280
 
 
 def _product_to_dict(product: Product) -> dict[str, Any]:
@@ -108,6 +109,16 @@ def _product_to_dict(product: Product) -> dict[str, Any]:
             product.last_changed_at.isoformat() if product.last_changed_at else None
         ),
     }
+
+
+def _summarize_task_error(exc: Exception) -> str:
+    """Store a short task error message instead of a full traceback/SQL dump."""
+    message = str(exc).strip() or exc.__class__.__name__
+    first_line = message.splitlines()[0].strip()
+    compact = " ".join(first_line.split())
+    if len(compact) <= MAX_TASK_ERROR_LENGTH:
+        return compact
+    return f"{compact[: MAX_TASK_ERROR_LENGTH - 1].rstrip()}…"
 
 
 def _task_to_dto(task: ProductImportTask) -> ProductImportTaskDTO:
@@ -396,7 +407,7 @@ async def _run_product_import_task(
             if task is None:
                 return
             task.status = "failed"
-            task.error_message = str(exc)
+            task.error_message = _summarize_task_error(exc)
             task.finished_at = datetime.utcnow()
             await session.commit()
 
@@ -426,6 +437,10 @@ def _is_all_categories_value(value: str | None) -> bool:
         return True
     normalized = value.strip().lower()
     return normalized in {"", "all", "all categories", "all category", "allcategories"}
+
+
+def _normalized_product_category_expression():
+    return func.lower(func.trim(Product.product_category))
 
 
 @router.get("/db")
@@ -462,7 +477,11 @@ async def get_db_products(
     if product_reference:
         filters.append(Product.product_reference == product_reference)
     if category and not _is_all_categories_value(category):
-        filters.append(Product.product_category == category)
+        normalized_category = category.strip().casefold()
+        if normalized_category:
+            filters.append(
+                _normalized_product_category_expression() == normalized_category
+            )
     if search:
         if term := search.strip():
             pattern = f"%{term}%"
@@ -501,6 +520,41 @@ async def get_db_products(
         "page": page,
         "limit": limit,
         "total": total or 0,
+    }
+
+
+@router.get("/db/categories")
+async def get_db_product_categories(
+    db: AsyncSession = Depends(get_db),
+):
+    """Return distinct non-empty product categories from the local DB."""
+    stmt = (
+        select(func.trim(Product.product_category))
+        .where(Product.product_category.is_not(None))
+        .distinct()
+        .order_by(func.trim(Product.product_category).asc())
+    )
+    result = await db.execute(stmt)
+    raw_items = result.scalars().all()
+
+    unique_items: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        if item is None:
+            continue
+        normalized = item.strip()
+        if not normalized:
+            continue
+        key = normalized.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_items.append(normalized)
+
+    unique_items.sort(key=str.casefold)
+    return {
+        "items": unique_items,
+        "total": len(unique_items),
     }
 
 

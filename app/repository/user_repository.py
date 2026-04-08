@@ -112,3 +112,34 @@ class UserRepository:
         await self.db.commit()
         await self.db.refresh(invitation)
         return invitation
+
+    async def list_invitations(self, *, invited_by: int | None) -> list[UserInvitation]:
+        stmt = select(UserInvitation).order_by(UserInvitation.created_at.desc(), UserInvitation.id.desc())
+        if invited_by is not None:
+            stmt = stmt.where(UserInvitation.invited_by == invited_by)
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
+
+    async def delete_invitation_by_id(
+        self,
+        *,
+        invitation_id: int,
+        invited_by: int | None,
+    ) -> bool:
+        stmt = delete(UserInvitation).where(UserInvitation.id == invitation_id)
+        if invited_by is not None:
+            stmt = stmt.where(UserInvitation.invited_by == invited_by)
+        result = await self.db.execute(stmt)
+        await self.db.commit()
+        return (result.rowcount or 0) > 0
+
+    async def delete_pending_invitations_for_inviter(self, *, invited_by: int | None) -> int:
+        stmt = delete(UserInvitation).where(
+            UserInvitation.accepted_at.is_(None),
+            UserInvitation.expires_at > datetime.now(timezone.utc),
+        )
+        if invited_by is not None:
+            stmt = stmt.where(UserInvitation.invited_by == invited_by)
+        result = await self.db.execute(stmt)
+        await self.db.commit()
+        return int(result.rowcount or 0)
