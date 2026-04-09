@@ -18,6 +18,12 @@ export type Product = {
   activeStatus: string | null;
   ottoUrl: string | null;
   mediaAssetLinks: string[];
+  description: string | null;
+  bulletPoints: string[];
+  attributes: Array<{
+    name: string;
+    values: string[];
+  }>;
   lastChangedAt: string | null;
 };
 

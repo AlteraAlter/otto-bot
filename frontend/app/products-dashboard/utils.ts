@@ -56,6 +56,33 @@ export function getStringArray(source: JsonObject, paths: string[][]): string[] 
   return [];
 }
 
+export function getAttributeGroups(
+  source: JsonObject,
+  paths: string[][],
+): Array<{ name: string; values: string[] }> {
+  for (const path of paths) {
+    const value = readPath(source, path);
+    if (!Array.isArray(value)) {
+      continue;
+    }
+
+    return value
+      .filter((item): item is JsonObject => isObject(item))
+      .map((item) => {
+        const name = getString(item, [["name"]]);
+        const values = getStringArray(item, [["values"]]);
+        if (!name || values.length === 0) {
+          return null;
+        }
+
+        return { name, values };
+      })
+      .filter((item): item is { name: string; values: string[] } => item !== null);
+  }
+
+  return [];
+}
+
 export function extractCollection(payload: unknown): unknown[] {
   if (Array.isArray(payload)) return payload;
   if (!isObject(payload)) return [];
@@ -96,6 +123,9 @@ export function mapProduct(raw: unknown, index: number): Product | null {
     activeStatus: getString(raw, [["activeStatus"]]),
     ottoUrl: getString(raw, [["ottoUrl"]]),
     mediaAssetLinks: getStringArray(raw, [["mediaAssetLinks"]]),
+    description: getString(raw, [["description"]]),
+    bulletPoints: getStringArray(raw, [["bulletPoints"]]),
+    attributes: getAttributeGroups(raw, [["attributes"]]),
     lastChangedAt: getString(raw, [["lastChangedAt"]]),
   };
 }

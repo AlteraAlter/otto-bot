@@ -89,6 +89,30 @@ function showIndeterminateProgress(task: ProductImportTask) {
 
 function formatTaskError(errorMessage: string) {
   const compact = errorMessage.replace(/\s+/g, " ").trim();
+  const lowered = compact.toLowerCase();
+
+  if (
+    [
+      "sqlalchemy",
+      "asyncpg",
+      "psycopg",
+      "postgres",
+      "duplicate key",
+      "constraint",
+      "select ",
+      "insert ",
+      "update ",
+      "delete ",
+      " from ",
+      " where ",
+    ].some((token) => lowered.includes(token))
+  ) {
+    return "Database operation failed. Please retry in a few minutes.";
+  }
+  if (["timeout", "timed out", "read timeout", "connect timeout"].some((token) => lowered.includes(token))) {
+    return "Fetching took too long and timed out. Please retry in a few minutes.";
+  }
+
   if (compact.length <= 220) return compact;
   return `${compact.slice(0, 219).trimEnd()}…`;
 }

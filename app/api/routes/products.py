@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, UploadFile, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import asc, desc, func, or_, select
+from sqlalchemy import ColumnElement, asc, desc, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from openpyxl import load_workbook
 
@@ -30,6 +30,7 @@ from app.dependencies import (
 )
 from app.database import get_db
 from app.models.product_import_tasks import ProductImportTask
+from app.models.product_attributes import ProductAttributes
 from app.models.products import Product
 from app.schemas.marketplaceStatus import MarketPlaceStatus
 from app.schemas.product_creation import (
@@ -83,10 +84,85 @@ XLSX_COLUMN_MAP = {
 }
 REQUIRED_XLSX_COLUMNS = list(XLSX_COLUMN_MAP.keys())
 MAX_TASK_ERROR_LENGTH = 280
+DESCRIPTION_ATTRIBUTE_NAME = "description"
+BULLET_POINT_ATTRIBUTE_NAME = "bullet_point"
 
 
-def _product_to_dict(product: Product) -> dict[str, Any]:
+def _normalize_description_value(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _serialize_description_rows(rows: list[ProductAttributes]) -> dict[str, Any]:
+    description: str | None = None
+    bullet_points: list[str] = []
+    attribute_values: dict[str, list[str]] = {}
+
+    for row in rows:
+        name = _normalize_description_value(row.name)
+        value = _normalize_description_value(row.value)
+        if not name or not value:
+            continue
+
+        if name == DESCRIPTION_ATTRIBUTE_NAME:
+            if description is None:
+                description = value
+            continue
+
+        if name == BULLET_POINT_ATTRIBUTE_NAME:
+            bullet_points.append(value)
+            continue
+
+        attribute_values.setdefault(name, []).append(value)
+
+    attributes = [
+        {"name": name, "values": values}
+        for name, values in attribute_values.items()
+    ]
+
+    return {
+        "description": description,
+        "bulletPoints": bullet_points,
+        "attributes": attributes,
+    }
+
+
+async def _load_product_description_payloads(
+    db: AsyncSession,
+    skus: list[str],
+) -> dict[str, dict[str, Any]]:
+    unique_skus = list(dict.fromkeys(sku for sku in skus if sku))
+    if not unique_skus:
+        return {}
+
+    result = await db.execute(
+        select(ProductAttributes)
+        .where(ProductAttributes.product_sku.in_(unique_skus))
+        .order_by(
+            ProductAttributes.product_sku.asc(),
+            ProductAttributes.id.asc(),
+        )
+    )
+    rows = result.scalars().all()
+
+    rows_by_sku: dict[str, list[ProductAttributes]] = {}
+    for row in rows:
+        rows_by_sku.setdefault(row.product_sku, []).append(row)
+
+    return {
+        sku: _serialize_description_rows(product_rows)
+        for sku, product_rows in rows_by_sku.items()
+    }
+
+
+def _product_to_dict(
+    product: Product,
+    description_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Serialize the local spreadsheet-backed product row."""
+    description_payload = description_payload or {}
     return {
         "id": product.id,
         "productReference": product.product_reference,
@@ -105,6 +181,9 @@ def _product_to_dict(product: Product) -> dict[str, Any]:
         "activeStatus": product.active_status,
         "ottoUrl": product.otto_url,
         "mediaAssetLinks": product.media_asset_links or [],
+        "description": description_payload.get("description"),
+        "bulletPoints": description_payload.get("bulletPoints") or [],
+        "attributes": description_payload.get("attributes") or [],
         "lastChangedAt": (
             product.last_changed_at.isoformat() if product.last_changed_at else None
         ),
@@ -114,6 +193,39 @@ def _product_to_dict(product: Product) -> dict[str, Any]:
 def _summarize_task_error(exc: Exception) -> str:
     """Store a short task error message instead of a full traceback/SQL dump."""
     message = str(exc).strip() or exc.__class__.__name__
+    lowered = message.lower()
+
+    if any(
+        token in lowered
+        for token in (
+            "sqlalchemy",
+            "asyncpg",
+            "psycopg",
+            "postgres",
+            "database",
+            "duplicate key",
+            "violates",
+            "constraint",
+            "select ",
+            "insert ",
+            "update ",
+            "delete ",
+            " from ",
+            " where ",
+        )
+    ):
+        return "Database operation failed while processing this job. Please retry in a few minutes."
+    if any(
+        token in lowered
+        for token in ("timeout", "timed out", "read timeout", "connect timeout")
+    ):
+        return "The operation timed out while fetching data. Please retry in a few minutes."
+    if any(
+        token in lowered
+        for token in ("connection refused", "could not connect", "network", "temporarily unavailable")
+    ):
+        return "A temporary connection problem occurred. Please retry in a few minutes."
+
     first_line = message.splitlines()[0].strip()
     compact = " ".join(first_line.split())
     if len(compact) <= MAX_TASK_ERROR_LENGTH:
@@ -443,6 +555,16 @@ def _normalized_product_category_expression():
     return func.lower(func.trim(Product.product_category))
 
 
+def _has_non_empty_description_expression():
+    return exists(
+        select(ProductAttributes.id).where(
+            ProductAttributes.product_sku == Product.sku,
+            ProductAttributes.name == DESCRIPTION_ATTRIBUTE_NAME,
+            func.length(func.trim(ProductAttributes.value)) > 0,
+        )
+    )
+
+
 @router.get("/db")
 @router.get("", include_in_schema=False)
 async def get_db_products(
@@ -455,8 +577,9 @@ async def get_db_products(
     search: Optional[str] = Query(None),
     sort_by: str = Query("id", alias="sortBy"),
     sort_order: SortOrderEnum = Query(default=SortOrderEnum.DESC, alias="sortOrder"),
+    include_total: bool = Query(default=False, alias="includeTotal"),
 ):
-    """Return paginated spreadsheet-imported rows from the local DB."""
+    """Return paginated spreadsheet-imported rows that have descriptions."""
     sort_columns = {
         "id": Product.id,
         "sku": Product.sku,
@@ -471,7 +594,7 @@ async def get_db_products(
     sort_column = sort_columns.get(sort_by, Product.id)
     sorter = asc if sort_order == SortOrderEnum.ASC else desc
 
-    filters = []
+    filters: list[ColumnElement[bool]] = [_has_non_empty_description_expression()]
     if sku:
         filters.append(Product.sku == sku)
     if product_reference:
@@ -498,27 +621,42 @@ async def get_db_products(
                 )
             )
 
-    count_stmt = select(func.count()).select_from(Product)
-    if filters:
-        count_stmt = count_stmt.where(*filters)
-    total = await db.scalar(count_stmt)
-
     stmt = (
         select(Product)
         .order_by(sorter(sort_column), sorter(Product.id))
         .offset(page * limit)
-        .limit(limit)
+        .limit(limit + 1)
     )
     if filters:
         stmt = stmt.where(*filters)
 
     result = await db.execute(stmt)
-    items = result.scalars().all()
+    rows = result.scalars().all()
+    has_next = len(rows) > limit
+    items = rows[:limit]
+    description_payloads = await _load_product_description_payloads(
+        db,
+        [item.sku for item in items if item.sku],
+    )
+
+    total: int | None = None
+    if include_total:
+        count_stmt = select(func.count()).select_from(Product)
+        if filters:
+            count_stmt = count_stmt.where(*filters)
+        total = await db.scalar(count_stmt)
+    else:
+        # Return a lower-bound total to keep pagination usable without expensive count(*).
+        total = (page * limit) + len(items) + (1 if has_next else 0)
 
     return {
-        "items": [_product_to_dict(item) for item in items],
+        "items": [
+            _product_to_dict(item, description_payloads.get(item.sku or ""))
+            for item in items
+        ],
         "page": page,
         "limit": limit,
+        "hasNext": has_next,
         "total": total or 0,
     }
 
@@ -675,7 +813,11 @@ async def get_product_by_status_path(
             status_code=status.HTTP_404_NOT_FOUND,
             content={"message": f"Product with sku '{sku}' not found in DB"},
         )
-    return _product_to_dict(product)
+    description_payloads = await _load_product_description_payloads(
+        db,
+        [product.sku] if product.sku else [],
+    )
+    return _product_to_dict(product, description_payloads.get(product.sku or ""))
 
 
 @router.post("/sync-to-db")
@@ -1161,9 +1303,9 @@ async def create_afterbuy_fetch_task(
             dataset=dataset,
             limit=limit,
         )
-    except Exception as exc:
+    except Exception:
         task.status = "failed"
-        task.error_message = f"Could not enqueue Celery task: {exc}"
+        task.error_message = "Could not enqueue the background worker task. Please retry in a minute."
         task.finished_at = datetime.utcnow()
         await db.commit()
         return JSONResponse(
@@ -1218,7 +1360,11 @@ async def get_db_product(
             status_code=status.HTTP_404_NOT_FOUND,
             content={"message": f"Product with sku '{sku}' not found in DB"},
         )
-    return _product_to_dict(product)
+    description_payloads = await _load_product_description_payloads(
+        db,
+        [product.sku] if product.sku else [],
+    )
+    return _product_to_dict(product, description_payloads.get(product.sku or ""))
 @router.get("/otto/{sku}")
 async def get_otto_product(
     sku: str,

@@ -20,6 +20,11 @@ type CategoryListResponse = {
   items?: string[];
 };
 
+type ProductListResponse = {
+  total?: number;
+  hasNext?: boolean;
+};
+
 function isAllCategoriesValue(value: string) {
   const normalized = value.trim().toLowerCase();
   return normalized === "" || normalized === "all" || normalized === "all categories";
@@ -45,6 +50,7 @@ export function useProductDashboard() {
   const [notice, setNotice] = useState<string | null>(null);
   const [tablePage, setTablePage] = useState(1);
   const [dbTotal, setDbTotal] = useState(0);
+  const [hasNextPage, setHasNextPage] = useState(false);
 
   const selectedProduct = useMemo(
     () => products.find((product) => product.id === selectedId) ?? null,
@@ -55,6 +61,12 @@ export function useProductDashboard() {
     () => Math.max(1, Math.ceil(dbTotal / TABLE_PAGE_SIZE)),
     [dbTotal]
   );
+  const effectiveTotalTablePages = useMemo(() => {
+    if (hasNextPage && tablePage >= totalTablePages) {
+      return tablePage + 1;
+    }
+    return totalTablePages;
+  }, [hasNextPage, tablePage, totalTablePages]);
 
   const kpi = useMemo<KpiSummary>(() => {
     let active = 0;
@@ -86,6 +98,7 @@ export function useProductDashboard() {
         sortBy,
         sortOrder,
       });
+      params.set("includeTotal", tablePage === 1 ? "true" : "false");
 
       if (!isAllCategoriesValue(categoryFilter)) {
         params.set("category", categoryFilter);
@@ -105,14 +118,25 @@ export function useProductDashboard() {
       }
 
       const payload: unknown = await response.json();
+      const listPayload = isObject(payload) ? (payload as ProductListResponse) : null;
       const items = extractCollection(payload)
         .map((item, index) => mapProduct(item, index))
         .filter((item): item is Product => item !== null);
 
       setProducts(items);
-      setDbTotal(
-        isObject(payload) && typeof payload.total === "number" ? payload.total : items.length
-      );
+      const hasNext = Boolean(listPayload?.hasNext);
+      setHasNextPage(hasNext);
+      setDbTotal((currentTotal) => {
+        if (typeof listPayload?.total === "number") {
+          return listPayload.total;
+        }
+
+        const lowerBoundTotal =
+          (Math.max(0, tablePage - 1) * TABLE_PAGE_SIZE) +
+          items.length +
+          (hasNext ? 1 : 0);
+        return Math.max(currentTotal, lowerBoundTotal);
+      });
 
       setSelectedId((currentSelectedId) => {
         const nextSelectedId = items.some((item) => item.id === currentSelectedId)
@@ -133,6 +157,7 @@ export function useProductDashboard() {
       const message = error instanceof Error ? error.message : "Ошибка загрузки товаров";
       setProducts([]);
       setDbTotal(0);
+      setHasNextPage(false);
       setSelectedId("");
       setIsDetailOpen(false);
       setNotice(message);
@@ -200,13 +225,14 @@ export function useProductDashboard() {
 
   useEffect(() => {
     setTablePage(1);
+    setHasNextPage(false);
   }, [query, categoryFilter, sortBy, sortOrder]);
 
   useEffect(() => {
-    if (tablePage > totalTablePages) {
-      setTablePage(totalTablePages);
+    if (tablePage > effectiveTotalTablePages) {
+      setTablePage(effectiveTotalTablePages);
     }
-  }, [tablePage, totalTablePages]);
+  }, [effectiveTotalTablePages, tablePage]);
 
   useEffect(() => {
     void fetchProducts();
@@ -236,6 +262,6 @@ export function useProductDashboard() {
     sortBy,
     sortOrder,
     tablePage,
-    totalTablePages,
+    totalTablePages: effectiveTotalTablePages,
   };
 }

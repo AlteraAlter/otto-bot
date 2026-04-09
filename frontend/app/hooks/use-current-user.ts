@@ -13,9 +13,56 @@ export type CurrentUser = {
   role: CurrentUserRole;
 };
 
+type CurrentUserRequestResult = {
+  ok: boolean;
+  status: number;
+  user: CurrentUser | null;
+};
+
 type UseCurrentUserOptions = {
   redirectToLogin?: boolean;
 };
+
+let cachedCurrentUserResult: CurrentUserRequestResult | null = null;
+let currentUserRequestInFlight: Promise<CurrentUserRequestResult> | null = null;
+
+async function requestCurrentUser(): Promise<CurrentUserRequestResult> {
+  const response = await fetch("/api/auth/me", { cache: "no-store" });
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      user: null,
+    };
+  }
+
+  const payload = (await response.json()) as CurrentUser;
+  return {
+    ok: true,
+    status: response.status,
+    user: payload,
+  };
+}
+
+async function getCurrentUserOnce(): Promise<CurrentUserRequestResult> {
+  if (cachedCurrentUserResult) {
+    return cachedCurrentUserResult;
+  }
+  if (currentUserRequestInFlight) {
+    return currentUserRequestInFlight;
+  }
+
+  currentUserRequestInFlight = requestCurrentUser()
+    .then((result) => {
+      cachedCurrentUserResult = result;
+      return result;
+    })
+    .finally(() => {
+      currentUserRequestInFlight = null;
+    });
+
+  return currentUserRequestInFlight;
+}
 
 export function useCurrentUser(options: UseCurrentUserOptions = {}) {
   const { redirectToLogin = true } = options;
@@ -29,24 +76,22 @@ export function useCurrentUser(options: UseCurrentUserOptions = {}) {
 
     async function loadCurrentUser() {
       try {
-        const response = await fetch("/api/auth/me", { cache: "no-store" });
+        const result = await getCurrentUserOnce();
 
-        if (!response.ok) {
-          if (response.status === 401 && redirectToLogin) {
+        if (!result.ok) {
+          if (result.status === 401 && redirectToLogin) {
             router.replace("/login?expired=1");
             router.refresh();
             return;
           }
 
-          throw new Error(`Не удалось загрузить профиль (${response.status})`);
+          throw new Error(`Не удалось загрузить профиль (${result.status})`);
         }
-
-        const payload = (await response.json()) as CurrentUser;
         if (!active) {
           return;
         }
 
-        setCurrentUser(payload);
+        setCurrentUser(result.user);
       } catch (caughtError) {
         if (!active) {
           return;

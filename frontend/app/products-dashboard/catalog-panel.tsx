@@ -43,6 +43,10 @@ const ProductRow = memo(function ProductRow({
   const previewImage = product.mediaAssetLinks[0] ?? null;
   const isInactive = formatText(product.activeStatus).toLowerCase().includes("inaktiv");
   const isError = Boolean(product.errorMessage);
+  const descriptionPreview =
+    product.description && product.description.length > 0
+      ? product.description.slice(0, 88)
+      : null;
 
   return (
     <div className={`product-row ${isActiveRow ? "selected" : ""}`}>
@@ -77,6 +81,17 @@ const ProductRow = memo(function ProductRow({
                 <small title={formatText(product.ean)}>
                   {product.ean ? `EAN ${formatText(product.ean)}` : "Без EAN"}
                 </small>
+                {descriptionPreview ? (
+                  <small
+                    className="row-description-preview"
+                    title={product.description ?? undefined}
+                  >
+                    {descriptionPreview}
+                    {product.description && product.description.length > descriptionPreview.length
+                      ? "…"
+                      : ""}
+                  </small>
+                ) : null}
               </span>
             </span>
             <span className="row-stack-cell" title={formatText(product.sku)}>

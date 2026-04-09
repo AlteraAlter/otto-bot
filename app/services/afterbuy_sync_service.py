@@ -25,6 +25,39 @@ MAX_TASK_ERROR_LENGTH = 280
 def summarize_task_error(exc: Exception) -> str:
     """Store a short task error message instead of huge SQL traces."""
     message = str(exc).strip() or exc.__class__.__name__
+    lowered = message.lower()
+
+    if any(
+        token in lowered
+        for token in (
+            "sqlalchemy",
+            "asyncpg",
+            "psycopg",
+            "postgres",
+            "database",
+            "duplicate key",
+            "violates",
+            "constraint",
+            "select ",
+            "insert ",
+            "update ",
+            "delete ",
+            " from ",
+            " where ",
+        )
+    ):
+        return "Database operation failed while processing this job. Please retry in a few minutes."
+    if any(
+        token in lowered
+        for token in ("timeout", "timed out", "read timeout", "connect timeout")
+    ):
+        return "The operation timed out while fetching data. Please retry in a few minutes."
+    if any(
+        token in lowered
+        for token in ("connection refused", "could not connect", "network", "temporarily unavailable")
+    ):
+        return "A temporary connection problem occurred. Please retry in a few minutes."
+
     first_line = message.splitlines()[0].strip()
     compact = " ".join(first_line.split())
     if len(compact) <= MAX_TASK_ERROR_LENGTH:

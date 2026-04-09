@@ -1,5 +1,7 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
+
 import { Product } from "./types";
 import { formatCurrency, formatDateTime, formatText } from "./utils";
 
@@ -30,6 +32,20 @@ export function EditorPanel({
   selectedProduct,
   onClose,
 }: EditorPanelProps) {
+  const mediaLinks = useMemo(
+    () =>
+      (selectedProduct?.mediaAssetLinks ?? [])
+        .map((link) => link.trim())
+        .filter((link) => link.length > 0),
+    [selectedProduct?.mediaAssetLinks],
+  );
+  const [mediaIndex, setMediaIndex] = useState(0);
+  const activeMedia = mediaLinks.length > 0 ? mediaLinks[mediaIndex % mediaLinks.length] : null;
+
+  useEffect(() => {
+    setMediaIndex(0);
+  }, [selectedProduct?.id, mediaLinks.length]);
+
   if (!selectedProduct || !isDetailOpen) {
     return null;
   }
@@ -44,6 +60,59 @@ export function EditorPanel({
         <button className="ghost-btn" onClick={onClose} type="button">
           Закрыть
         </button>
+      </div>
+
+      <div className="product-media-hero">
+        {mediaLinks.length > 0 ? (
+          <div className="product-media-viewer">
+            <a href={activeMedia ?? "#"} target="_blank" rel="noreferrer" className="product-media-main">
+              <img
+                key={activeMedia ?? `media-${mediaIndex}`}
+                className="product-media-image"
+                src={activeMedia ?? ""}
+                alt={`Product image ${mediaIndex + 1}`}
+                loading="lazy"
+              />
+            </a>
+            {mediaLinks.length > 1 ? (
+              <>
+                <div className="product-media-controls">
+                  <button
+                    className="product-media-arrow product-media-arrow-left"
+                    type="button"
+                    aria-label="Previous image"
+                    onClick={() =>
+                      setMediaIndex((prev) => (prev === 0 ? mediaLinks.length - 1 : prev - 1))
+                    }
+                  >
+                    ‹
+                  </button>
+                  <button
+                    className="product-media-arrow product-media-arrow-right"
+                    type="button"
+                    aria-label="Next image"
+                    onClick={() => setMediaIndex((prev) => (prev + 1) % mediaLinks.length)}
+                  >
+                    ›
+                  </button>
+                </div>
+                <div className="product-media-dots" aria-label="Image position">
+                  {mediaLinks.map((_, index) => (
+                    <button
+                      key={`${selectedProduct.id}-media-dot-${index}`}
+                      type="button"
+                      className={`product-media-dot ${index === mediaIndex ? "active" : ""}`}
+                      onClick={() => setMediaIndex(index)}
+                      aria-label={`Open image ${index + 1}`}
+                    />
+                  ))}
+                </div>
+              </>
+            ) : null}
+          </div>
+        ) : (
+          <p className="detail-description">Нет сохранённых изображений.</p>
+        )}
       </div>
 
       <div className="editor-summary-strip">
@@ -116,8 +185,41 @@ export function EditorPanel({
         label="Marketplace status"
         value={formatText(selectedProduct.marketplaceStatus)}
       />
+      <Field label="Description" value={formatText(selectedProduct.description)} />
       <Field label="Active status" value={formatText(selectedProduct.activeStatus)} />
       <Field label="Error message" value={formatText(selectedProduct.errorMessage)} />
+
+      <div className="product-detail-card">
+        <p className="detail-title">Bullet points</p>
+        {selectedProduct.bulletPoints.length > 0 ? (
+          <div className="detail-bullets">
+            {selectedProduct.bulletPoints.map((bulletPoint, index) => (
+              <span key={`${selectedProduct.id}-bullet-${index}`}>{bulletPoint}</span>
+            ))}
+          </div>
+        ) : (
+          <p className="detail-description">Нет сохранённых bullet points.</p>
+        )}
+      </div>
+
+      <div className="product-detail-card">
+        <p className="detail-title">Attributes</p>
+        {selectedProduct.attributes.length > 0 ? (
+          <div className="detail-attributes">
+            {selectedProduct.attributes.map((attribute) => (
+              <div
+                className="detail-attribute-row"
+                key={`${selectedProduct.id}-${attribute.name}`}
+              >
+                <strong>{attribute.name}</strong>
+                <span>{attribute.values.join(", ")}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="detail-description">Нет сохранённых attributes.</p>
+        )}
+      </div>
 
       <div className="product-detail-card">
         <p className="detail-title">OTTO URL</p>
@@ -132,27 +234,6 @@ export function EditorPanel({
           </a>
         ) : (
           <p className="detail-description">-</p>
-        )}
-      </div>
-
-      <div className="product-detail-card">
-        <p className="detail-title">Media assets</p>
-        {selectedProduct.mediaAssetLinks.length > 0 ? (
-          <div className="product-media-grid">
-            {selectedProduct.mediaAssetLinks.map((link, index) => (
-              <a
-                key={`${selectedProduct.id}-${index}`}
-                href={link}
-                target="_blank"
-                rel="noreferrer"
-                className="product-media-item"
-              >
-                <img src={link} alt={`Product image ${index + 1}`} loading="lazy" />
-              </a>
-            ))}
-          </div>
-        ) : (
-          <p className="detail-description">Нет сохранённых изображений.</p>
         )}
       </div>
     </aside>
