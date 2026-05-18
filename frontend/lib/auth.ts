@@ -4,6 +4,12 @@ import { NextResponse } from "next/server";
 export const BACKEND_BASE_URL =
   process.env.BACKEND_BASE_URL ?? "http://127.0.0.1:8000";
 export const SESSION_COOKIE_NAME = "otto_access_token";
+const COOKIE_SECURE =
+  (process.env.COOKIE_SECURE ?? "").toLowerCase() === "true"
+    ? true
+    : (process.env.COOKIE_SECURE ?? "").toLowerCase() === "false"
+      ? false
+      : process.env.NODE_ENV === "production";
 
 export function withBackendPath(path: string) {
   return `${BACKEND_BASE_URL}${path}`;
@@ -48,7 +54,7 @@ export function setSessionCookie(
     value: payload.access_token,
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: COOKIE_SECURE,
     maxAge: payload.expires_in,
     path: "/",
   });

@@ -51,6 +51,7 @@ from app.schemas.enums import SortOrderEnum
 from app.schemas.enums import RoleEnum
 from app.tasks import sync_afterbuy_jv_lister_task
 from app.services.afterbuy_sync_service import sync_afterbuy_to_jv_lister
+from app.services.local_product_sync_service import upsert_local_products_from_payloads
 from app.services.product_creation_service import ProductCreationService
 from app.services.product_service import ProductService
 
@@ -702,7 +703,9 @@ async def create_or_update_products(
 ):
     """Create or update products in OTTO from already validated request payloads."""
     payload_list = [item.model_dump(mode="json", exclude_none=True) for item in payload]
-    return await product_service.create_or_update_products(payload_list)
+    response = await product_service.create_or_update_products(payload_list)
+    await upsert_local_products_from_payloads(payload_list)
+    return response
 
 
 @router.post("/update-status")
