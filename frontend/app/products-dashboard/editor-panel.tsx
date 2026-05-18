@@ -1,5 +1,7 @@
 "use client";
 
+import { useEffect, useState } from "react";
+
 import { Product } from "./types";
 import { formatCurrency, formatDateTime, formatText } from "./utils";
 
@@ -30,9 +32,35 @@ export function EditorPanel({
   selectedProduct,
   onClose,
 }: EditorPanelProps) {
+  const [activeMediaIndex, setActiveMediaIndex] = useState(0);
+
   if (!selectedProduct || !isDetailOpen) {
     return null;
   }
+
+  const mediaItems = selectedProduct.mediaAssetLinks;
+  const hasMedia = mediaItems.length > 0;
+  const activeMediaLink = hasMedia
+    ? mediaItems[Math.min(activeMediaIndex, mediaItems.length - 1)]
+    : null;
+
+  useEffect(() => {
+    setActiveMediaIndex(0);
+  }, [selectedProduct.id]);
+
+  const goPrev = () => {
+    if (!hasMedia) return;
+    setActiveMediaIndex((prev) =>
+      prev === 0 ? mediaItems.length - 1 : prev - 1
+    );
+  };
+
+  const goNext = () => {
+    if (!hasMedia) return;
+    setActiveMediaIndex((prev) =>
+      prev === mediaItems.length - 1 ? 0 : prev + 1
+    );
+  };
 
   return (
     <aside className={`editor-panel ${isClosing ? "is-closing" : ""}`.trim()}>
@@ -44,6 +72,51 @@ export function EditorPanel({
         <button className="ghost-btn" onClick={onClose} type="button">
           Закрыть
         </button>
+      </div>
+
+      <div className="product-media-hero">
+        {hasMedia && activeMediaLink ? (
+          <>
+            <a
+              href={activeMediaLink}
+              target="_blank"
+              rel="noreferrer"
+              className="product-media-hero-link"
+            >
+              <img
+                src={activeMediaLink}
+                alt={`Product image ${activeMediaIndex + 1}`}
+                loading="lazy"
+              />
+            </a>
+
+            {mediaItems.length > 1 ? (
+              <div className="product-media-carousel-controls">
+                <button type="button" className="ghost-btn" onClick={goPrev}>
+                  Назад
+                </button>
+                <div className="product-media-dots">
+                  {mediaItems.map((_, index) => (
+                    <button
+                      key={`${selectedProduct.id}-dot-${index}`}
+                      type="button"
+                      className={`product-media-dot ${
+                        index === activeMediaIndex ? "active" : ""
+                      }`}
+                      onClick={() => setActiveMediaIndex(index)}
+                      aria-label={`Go to image ${index + 1}`}
+                    />
+                  ))}
+                </div>
+                <button type="button" className="ghost-btn" onClick={goNext}>
+                  Вперёд
+                </button>
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <div className="product-media-empty">Нет сохранённых изображений.</div>
+        )}
       </div>
 
       <div className="editor-summary-strip">
@@ -137,9 +210,9 @@ export function EditorPanel({
 
       <div className="product-detail-card">
         <p className="detail-title">Media assets</p>
-        {selectedProduct.mediaAssetLinks.length > 0 ? (
+        {hasMedia ? (
           <div className="product-media-grid">
-            {selectedProduct.mediaAssetLinks.map((link, index) => (
+            {mediaItems.map((link, index) => (
               <a
                 key={`${selectedProduct.id}-${index}`}
                 href={link}

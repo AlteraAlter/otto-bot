@@ -79,6 +79,7 @@ services:
     container_name: otto-bot-frontend
     environment:
       BACKEND_BASE_URL: http://backend:8000
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
     depends_on:
       - backend
     restart: unless-stopped
@@ -87,7 +88,7 @@ services:
     image: nginx:1.27-alpine
     container_name: otto-bot-nginx
     ports:
-      - "80:80"
+      - "100:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:

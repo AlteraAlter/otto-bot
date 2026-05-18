@@ -174,7 +174,13 @@ function rowToPreparedPayload(row: SingleRow): { payload: Record<string, unknown
   }
 
   const imageUrl = row.imageUrl.trim();
-  if (!/^https?:\/\//i.test(imageUrl)) {
+  let parsedImageUrl: URL | null = null;
+  try {
+    parsedImageUrl = new URL(imageUrl);
+  } catch {
+    parsedImageUrl = null;
+  }
+  if (!parsedImageUrl || !/^https?:$/i.test(parsedImageUrl.protocol)) {
     return { payload: null, error: "Image URL должен начинаться с http:// или https://" };
   }
 

@@ -59,6 +59,7 @@ from app.schemas.enums import SortOrderEnum
 from app.schemas.enums import RoleEnum
 from app.tasks import sync_afterbuy_jv_lister_task
 from app.services.afterbuy_sync_service import sync_afterbuy_to_jv_lister
+from app.services.local_product_sync_service import upsert_local_products_from_payloads
 from app.services.product_creation_service import ProductCreationService
 from app.services.product_service import ProductService
 

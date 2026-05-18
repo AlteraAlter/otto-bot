@@ -7,25 +7,20 @@ import {
 } from "../../../../lib/auth";
 
 export async function POST(request: Request) {
-  const incoming = await request.formData();
-  const file = incoming.get("file");
-
-  if (!(file instanceof File)) {
-    return NextResponse.json(
-      { success: false, message: "file is required", issues: [] },
-      { status: 400 },
-    );
+  const headers = await getAuthorizedHeaders();
+  const contentType = request.headers.get("content-type");
+  if (contentType) {
+    headers.set("content-type", contentType);
   }
-
-  const formData = new FormData();
-  formData.append("file", file, file.name);
 
   const response = await fetch(withBackendPath("/v1/products/upload-xlsx-task"), {
     method: "POST",
-    headers: await getAuthorizedHeaders(),
-    body: formData,
+    headers,
+    body: request.body,
+    // Node.js fetch requires duplex mode for streamed request bodies.
+    duplex: "half",
     cache: "no-store",
-  });
+  } as RequestInit & { duplex: "half" });
 
   return toClientResponse(response);
 }

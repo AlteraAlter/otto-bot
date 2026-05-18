@@ -24,6 +24,7 @@ from app.mapper.normalizer import build_normalized_product
 from app.mapper.seo import build_seo_description, decode_with_fallback
 from app.schemas.product import CreateProductRequest
 from app.schemas.product_creation import ProductCreationIssue
+from app.services.local_product_sync_service import upsert_local_products_from_payloads
 from app.services.product_service import ProductService
 
 
@@ -416,6 +417,7 @@ class ProductCreationService:
 
         try:
             await self.product_service.create_or_update_products(payload_list)
+            await upsert_local_products_from_payloads(payload_list)
             return len(payloads), issues
         except Exception as exc:
             for source_index, _payload in payloads:
