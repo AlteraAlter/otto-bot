@@ -4,7 +4,7 @@ This service converts raw source JSON into OTTO-compatible product payloads.
 Pipeline stages:
 1. Decode + parse uploaded bytes.
 2. Normalize each source item (SEO text, attributes, category mapping).
-3. Validate against `ProductCreate` schema.
+3. Validate against `CreateProductRequest` schema.
 4. Send valid payloads to OTTO create/upsert endpoint.
 
 Issues from each stage are collected with source item indices so callers can
@@ -22,7 +22,7 @@ from pydantic import ValidationError
 from app.mapper import get_default_category_mapper
 from app.mapper.normalizer import build_normalized_product
 from app.mapper.seo import build_seo_description, decode_with_fallback
-from app.schemas.product import ProductCreate
+from app.schemas.product import CreateProductRequest
 from app.schemas.product_creation import ProductCreationIssue
 from app.services.product_service import ProductService
 
@@ -330,7 +330,7 @@ class ProductCreationService:
         *,
         max_chars: int,
     ) -> tuple[list[tuple[int, dict[str, Any]]], list[ProductCreationIssue]]:
-        """Normalize each source item and validate it against `ProductCreate`.
+        """Normalize each source item and validate it against `CreateProductRequest`.
 
         Returns:
             A list of `(source_index, validated_payload)` tuples and collected
@@ -361,7 +361,7 @@ class ProductCreationService:
                 continue
 
             try:
-                model = ProductCreate.model_validate(normalized)
+                model = CreateProductRequest.model_validate(normalized)
                 validated.append(
                     (index, model.model_dump(mode="json", exclude_none=True))
                 )
@@ -438,7 +438,7 @@ class ProductCreationService:
         for index, payload in enumerate(payloads):
             try:
                 self._sanitize_product_attributes(payload)
-                model = ProductCreate.model_validate(payload)
+                model = CreateProductRequest.model_validate(payload)
                 validated.append(
                     (index, model.model_dump(mode="json", exclude_none=True))
                 )

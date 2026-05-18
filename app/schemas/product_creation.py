@@ -1,7 +1,6 @@
 """Schemas for file-based product preparation/creation API responses."""
 
 from typing import Any
-
 from pydantic import BaseModel, Field
 
 

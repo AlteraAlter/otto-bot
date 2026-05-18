@@ -1,0 +1,27 @@
+Anzahl Akkus
+Anzahl Batterien
+Anzahl Rollen
+Anzahl Teile
+Art Leuchtmittel
+Art Matratze
+Ausführung
+Belastbarkeit maximal
+Bezug
+Breite
+Breite Liegefläche
+Farbe
+Farbe Korpus
+Farbe Sitzfläche
+Holzart
+Härtegrad Matratze
+Höhe
+Höhe maximal
+Höhe minimal
+Kabellänge: десятичные числа, и только одно значение
+Länge Liegefläche
+Oberflächenbearbeitung
+Oberflächenbehandlung
+Oberflächenbeschichtung
+Oberflächenoptik
+Stellvariante
+Tiefe

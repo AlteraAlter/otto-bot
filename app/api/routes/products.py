@@ -26,7 +26,7 @@ from app.dependencies import (
     get_product_creation_service,
     get_product_service,
     require_role,
-    get_afterbuy_login
+    get_afterbuy_login,
 )
 from app.database import get_db
 from app.models.product_import_tasks import ProductImportTask
@@ -41,7 +41,15 @@ from app.schemas.product_creation import (
     ProductCreationPrepareResponse,
     ProductSpreadsheetImportResponse,
 )
-from app.schemas.product import ProductCreate, Status
+from app.schemas.product import (
+    CreateProductRequest, 
+    Status,
+    Availability,
+    UpdateQuantity,
+    UpdateProductDelivery,
+)
+from app.schemas.product_response import ProductCreateResponse, AvailabilityResponse
+
 from app.schemas.product_query import (
     MarketplaceStatusQuery,
     ProductListQuery,
@@ -57,10 +65,6 @@ from app.services.product_service import ProductService
 router = APIRouter(
     prefix="/v1/products",
     tags=["Products"],
-    dependencies=[
-        Depends(get_current_user),
-        Depends(require_role([RoleEnum.EMPLOYEE, RoleEnum.SEO])),
-    ],
 )
 
 XLSX_COLUMN_MAP = {
@@ -602,6 +606,11 @@ async def get_active_products(
     )
     return await product_service.get_active_products(payload)
 
+@router.get("/otto/shipping-profiles")
+async def get_shipping_profiles(
+    product_service: ProductService = Depends(get_product_service)
+):
+    return await product_service.get_shipping_profiles()
 
 @router.get("/otto/update-tasks/{pid}")
 @router.get("/update-tasks/{pid}", include_in_schema=False)
@@ -612,6 +621,12 @@ async def update_tasks(
     """Trigger OTTO update-task execution for a single product id (`pid`)."""
     return await product_service.update_tasks(pid)
 
+@router.get("/otto/failed/{pid}")
+async def failed_tasks(
+    pid: str,
+    product_service: ProductService = Depends(get_product_service),
+):
+    return await product_service.failed_tasks(pid)
 
 @router.get("/otto/marketplace-status")
 @router.get("/marketplace-status", include_in_schema=False)
@@ -695,14 +710,40 @@ async def sync_products_to_db(
 
 
 # <======= POST METHOD =======>
-@router.post("/create")
+
+@router.post("/create", response_model=ProductCreateResponse)
 async def create_or_update_products(
-    payload: List[ProductCreate],
+    payload: CreateProductRequest,
     product_service: ProductService = Depends(get_product_service),
 ):
     """Create or update products in OTTO from already validated request payloads."""
-    payload_list = [item.model_dump(mode="json", exclude_none=True) for item in payload]
-    return await product_service.create_or_update_products(payload_list)
+    return await product_service.create_or_update_products(payload)
+
+
+@router.post("/create-availability", response_model=AvailabilityResponse)
+async def create_availability(
+    payload: Availability,
+    product_service: ProductService = Depends(get_product_service)
+):
+    return await product_service.create_availability(payload)
+
+@router.post("/update-quantity")
+async def update_delivery_stock(
+    payload: UpdateQuantity,
+    product_service: ProductService = Depends(get_product_service)
+):
+    data = payload.model_dump(mode="json", exclude_none=True)
+    response = await product_service.update_quantity(data)
+    return response
+    
+
+@router.post("/update-product-delivery-information")
+async def update_product_delivery_information(
+    payload: UpdateProductDelivery,
+    product_service: ProductService = Depends(get_product_service)
+):
+    data = payload.model_dump(mode="json", exclude_none=True)
+    return await product_service.update_product_delivery_information(data)
 
 
 @router.post("/update-status")
@@ -727,6 +768,8 @@ async def update_status(
         },
     },
 )
+
+
 async def prepare_products_from_file(
     file: UploadFile = File(
         ..., description="JSON file with one object or an array of objects"

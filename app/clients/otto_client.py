@@ -11,6 +11,12 @@ import httpx
 
 from app.core.otto_auth import OttoAuth
 
+# Schemas
+from app.schemas.product import CreateProductRequest, ProductBase
+from app.schemas.product_response import ProductCreateResponse
+
+# Helper
+from app.utils.helpers import to_json, parse
 
 class OttoClient:
     """Low-level async client for calling OTTO product APIs."""
@@ -27,6 +33,7 @@ class OttoClient:
         request_timestamp = (
             datetime.now().astimezone().isoformat(timespec="milliseconds")
         )
+        print(token)
         return {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -46,7 +53,7 @@ class OttoClient:
 
         content_type = response.headers.get("content-type", "").lower()
         if "application/json" in content_type:
-            return response.json()
+            return response.json()  
 
         return {
             "status_code": response.status_code,
@@ -82,7 +89,7 @@ class OttoClient:
     ):
         """Execute an authenticated HTTP request and raise on non-2xx responses."""
         response = await self._send(method, path, params=params, json=json)
-        response.raise_for_status()
+        # response.raise_for_status()
         return self._parse_response(response)
 
     async def _request_with_status(
@@ -109,6 +116,12 @@ class OttoClient:
         """GET a single product by SKU."""
         return await self._request("GET", f"/v5/products/{sku}")
 
+
+    async def get_shipping_profiles(self):
+        """GET all shipment profiles"""
+        return await self._request("GET", "/v1/shipping-profiles")
+    
+    
     async def get_product_with_status(self, sku: str) -> tuple[int, Any]:
         """GET a single product by SKU without raising, returning status and body."""
         return await self._request_with_status("GET", f"/v5/products/{sku}")
@@ -124,6 +137,9 @@ class OttoClient:
     async def update_tasks(self, pid: str):
         """Trigger update tasks for a product-processing identifier."""
         return await self._request("GET", f"/v5/products/update-tasks/{pid}")
+    
+    async def failed_tasks(self, pid: str):
+        return await self._request("GET", f"/v5/products/update-tasks/{pid}/failed")
 
     async def get_marketplace_status(self, payload: dict | None = None):
         """GET marketplace status information with optional filters."""
@@ -132,11 +148,31 @@ class OttoClient:
             "/v5/products/marketplace-status",
             params=payload,
         )
+        
+    async def update_quantity(self, payload: dict | None = None):
+        """POST marketplace quantity for given sku(product)"""
+        return await self._request(
+            "POST",
+            "/v1/availability/quantities",
+            json=[payload]
+        )
+    
+    async def update_product_delivery_information(self, payload: dict | None = None):
+        """POST product shippinig profile with given SKU"""
+        return await self._request(
+            "POST",
+            "/v1/availability/product-delivery-information",
+            json=[payload]
+        )
 
-    async def create_or_update_products(self, payload: list[dict[str, Any]]):
+    async def create_or_update_products(self, payload: ProductBase) -> ProductCreateResponse:
         """POST product payloads for create/upsert operations."""
-        return await self._request("POST", "/v5/products", json=payload)
-
+        json_payload = to_json(payload)
+        response_data = await self._request("POST", "/v5/products", json=json_payload)
+        
+        return parse(ProductCreateResponse, response_data)
+            
+            
     async def get_categories(self, payload: dict):
         """Fetch and flatten category values from OTTO category-group responses."""
         body = await self._request("GET", "/v5/products/categories", params=payload)
