@@ -27,6 +27,8 @@ type CreationResponse = {
   request_bodies?: Record<string, unknown>[];
 };
 
+type ControllerOption = "jv" | "xl";
+
 type SingleRow = {
   id: string;
   productReference: string;
@@ -162,11 +164,17 @@ function splitBulletPoints(raw: string): string[] {
     .filter((item) => item.length > 0);
 }
 
-function rowToPreparedPayload(row: SingleRow): { payload: Record<string, unknown> | null; error?: string } {
+function getBrandIdByController(controller: ControllerOption): string {
+  return controller === "xl" ? "6HMOZBOU" : "UO4EGHSX";
+}
+
+function rowToPreparedPayload(
+  controller: ControllerOption,
+  row: SingleRow
+): { payload: Record<string, unknown> | null; error?: string } {
   if (!row.sku.trim()) return { payload: null, error: "SKU обязателен" };
   if (!row.productReference.trim()) return { payload: null, error: "Product Reference обязателен" };
   if (!row.category.trim()) return { payload: null, error: "Category обязателен" };
-  if (!row.brandId.trim()) return { payload: null, error: "Brand ID обязателен" };
 
   const amount = Number(row.price);
   if (!Number.isFinite(amount) || amount <= 0) {
@@ -185,46 +193,39 @@ function rowToPreparedPayload(row: SingleRow): { payload: Record<string, unknown
   }
 
   const payload: Record<string, unknown> = {
-    productReference: row.productReference.trim(),
-    sku: row.sku.trim(),
-    ean: row.ean.trim() || undefined,
-    moin: row.moin.trim() || undefined,
-    productDescription: {
-      category: row.category.trim(),
-      brandId: row.brandId.trim(),
-      productLine: row.productLine.trim() || row.productReference.trim(),
-      multiPack: false,
-      bundle: false,
-      fscCertified: false,
-      disposal: false,
-      description: row.description.trim() || undefined,
-      bulletPoints: splitBulletPoints(row.bulletPoints),
-      attributes: []
-    },
-    mediaAssets: [
+    controller,
+    products: [
       {
-        type: "IMAGE",
-        location: imageUrl
-      }
-    ],
-    pricing: {
-      standardPrice: {
-        amount,
-        currency: "EUR"
-      },
-      vat: "FULL"
-    },
-    logistics: {
-      packingUnitCount: 1,
-      packingUnits: [
-        {
-          weight: 1,
-          width: 1,
-          height: 1,
-          length: 1
+        productReference: row.productReference.trim(),
+        sku: row.sku.trim(),
+        ean: row.ean.trim() || undefined,
+        productDescription: {
+          category: row.category.trim(),
+          brandId: getBrandIdByController(controller),
+          productLine: row.productLine.trim() || row.productReference.trim(),
+          multiPack: false,
+          bundle: false,
+          fscCertified: false,
+          disposal: false,
+          description: row.description.trim() || undefined,
+          bulletPoints: splitBulletPoints(row.bulletPoints),
+          attributes: []
+        },
+        mediaAssets: [
+          {
+            type: "IMAGE",
+            location: imageUrl
+          }
+        ],
+        pricing: {
+          standardPrice: {
+            amount,
+            currency: "EUR"
+          },
+          vat: "FULL"
         }
-      ]
-    }
+      }
+    ]
   };
 
   return { payload };
@@ -243,6 +244,7 @@ export default function CreatorPage() {
   const [editorData, setEditorData] = useState<JsonValue[]>([]);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set(["$", "0"]));
   const [singleRows, setSingleRows] = useState<SingleRow[]>([createEmptySingleRow()]);
+  const [controller, setController] = useState<ControllerOption>("jv");
 
   const fileLabel = useMemo(() => {
     if (!file) return "Файл не выбран";
@@ -257,14 +259,14 @@ export default function CreatorPage() {
         mode === "file"
           ? editorData
           : singleRows
-              .map((row) => rowToPreparedPayload(row).payload)
+              .map((row) => rowToPreparedPayload(controller, row).payload)
               .filter((item): item is Record<string, unknown> => item !== null);
       return JSON.stringify(source, null, 2);
     } catch (e) {
       console.error("Preview error", e);
       return "Не удалось показать JSON";
     }
-  }, [editorData, mode, singleRows]);
+  }, [controller, editorData, mode, singleRows]);
 
   function pickFile(next: File | null) {
     if (!next) {
@@ -533,7 +535,7 @@ export default function CreatorPage() {
     const requestBodies: Record<string, unknown>[] = [];
 
     nonEmptyRows.forEach((row, index) => {
-      const converted = rowToPreparedPayload(row);
+      const converted = rowToPreparedPayload(controller, row);
       if (!converted.payload) {
         localIssues.push({
           index,
@@ -638,6 +640,18 @@ export default function CreatorPage() {
             По одному
           </button>
         </div>
+        <div className="creator-mode-switch">
+          <label>
+            Controller
+            <select
+              value={controller}
+              onChange={(event) => setController(event.target.value as ControllerOption)}
+            >
+              <option value="jv">jv</option>
+              <option value="xl">xl</option>
+            </select>
+          </label>
+        </div>
 
         {mode === "file" ? (
           <>
@@ -741,7 +755,7 @@ export default function CreatorPage() {
                         <input value={row.category} onChange={(event) => updateSingleRow(row.id, "category", event.target.value)} />
                       </td>
                       <td>
-                        <input value={row.brandId} onChange={(event) => updateSingleRow(row.id, "brandId", event.target.value)} />
+                        <input value={getBrandIdByController(controller)} readOnly />
                       </td>
                       <td>
                         <input value={row.productLine} onChange={(event) => updateSingleRow(row.id, "productLine", event.target.value)} />

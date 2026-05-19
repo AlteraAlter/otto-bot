@@ -31,6 +31,8 @@ def get_otto_auth() -> OttoAuth:
     return OttoAuth(
         client_id=settings.otto_jv_client_id,
         client_secret=settings.otto_jv_client_secret,
+        xl_client_id=settings.otto_xl_client_id,
+        xl_client_secret=settings.otto_xl_client_secret,
         base_url=settings.otto_base_url,
         scope=settings.otto_scope,
         timeout=settings.otto_timeout_seconds,

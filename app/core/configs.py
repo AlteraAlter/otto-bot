@@ -18,6 +18,10 @@ class Settings(BaseSettings):
 
     otto_jv_client_id: str
     otto_jv_client_secret: str
+    
+    otto_xl_client_id: str
+    otto_xl_client_secret: str
+    
     otto_base_url: str = "https://api.otto.market"
     otto_scope: str = "orders products availability shipping-profiles"
     otto_timeout_seconds: float = 20.0

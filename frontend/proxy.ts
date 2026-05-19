@@ -27,10 +27,12 @@ export function proxy(request: NextRequest) {
     searchParams.has("invite") ||
     searchParams.has("code") ||
     searchParams.has("token");
+  const hasExpiredParam = searchParams.has("expired");
 
   if (
     hasSession &&
     PUBLIC_PATHS.has(pathname) &&
+    !(pathname === "/login" && hasExpiredParam) &&
     !(pathname === "/register" && hasInviteParams) &&
     !(pathname === "/employee-register" && hasInviteParams)
   ) {

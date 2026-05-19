@@ -30,6 +30,7 @@ from app.schemas.product_response import (
     OperationResult,
     AvailabilityResponse,
 )
+from app.schemas.enums import Controller
 
 
 class ProductService:
@@ -55,12 +56,12 @@ class ProductService:
         """Fetch active-status listing from OTTO."""
         return await self.client.get_active_products(payload)
 
-    async def update_tasks(self, pid: str):
+    async def update_tasks(self, pid: str, controller: Controller = Controller.JV):
         """Trigger backend update tasks for a given OTTO product id."""
-        return await self.client.update_tasks(pid)
+        return await self.client.update_tasks(pid, controller=controller)
     
-    async def failed_tasks(self, pid: str):
-        return await self.client.failed_tasks(pid)
+    async def failed_tasks(self, pid: str, controller: Controller = Controller.JV):
+        return await self.client.failed_tasks(pid, controller=controller)
 
     async def get_marketplace_status(self, payload: dict):
         """Fetch marketplace status information for products from OTTO."""
@@ -84,7 +85,9 @@ class ProductService:
         
         otto_payload = ProductBase(products)
         
-        return await self.client.create_or_update_products(otto_payload)
+        return await self.client.create_or_update_products(
+            otto_payload, controller=payload.controller
+        )
 
 
     async def update_status(self, payload: dict):
@@ -92,24 +95,28 @@ class ProductService:
         return await self.client.update_status(payload)
 
 
-    async def get_categories(self, payload: dict):
+    async def get_categories(self, payload: dict, controller: Controller = Controller.JV):
         """Fetch category information from OTTO, normalized by the client."""
-        return await self.client.get_categories(payload)
+        return await self.client.get_categories(payload, controller=controller)
     
     
-    async def update_quantity(self, payload: dict):
+    async def update_quantity(self, payload: dict, controller: Controller = Controller.JV):
         """Upload or create quantity for sku(product)"""
-        return await self.client.update_quantity(payload)
+        return await self.client.update_quantity(payload, controller=controller)
     
     
-    async def update_product_delivery_information(self, payload: dict):
+    async def update_product_delivery_information(
+        self, payload: dict, controller: Controller = Controller.JV
+    ):
         """Create or update shipping profile for products"""
-        return await self.client.update_product_delivery_information(payload)
+        return await self.client.update_product_delivery_information(
+            payload, controller=controller
+        )
     
     
-    async def get_shipping_profiles(self):
+    async def get_shipping_profiles(self, controller: Controller = Controller.JV):
         """Fetch all product delivary info from partner(us)"""
-        return await self.client.get_shipping_profiles()
+        return await self.client.get_shipping_profiles(controller=controller)
     
     
     # Post creation of product data process
@@ -131,13 +138,15 @@ class ProductService:
             quantity_payload.model_dump(
                 mode="json",
                 by_alias=True,
-            )
+            ),
+            controller=payload.controller,
         )
         delivery_task = self.update_product_delivery_information(
             delivery_payload.model_dump(
                 mode="json",
                 by_alias=True,
-            )
+            ),
+            controller=payload.controller,
         )
         quantity_result, delivery_result = await asyncio.gather(
             quantity_task,

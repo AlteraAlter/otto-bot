@@ -8,14 +8,23 @@ import {
 
 export async function POST(request: Request) {
   const body = await request.text();
-  const response = await fetch(withBackendPath("/v1/auth/login"), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body,
-    cache: "no-store",
-  });
+  let response: Response;
+  try {
+    response = await fetch(withBackendPath("/v1/auth/login"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body,
+      cache: "no-store",
+      signal: AbortSignal.timeout(12000),
+    });
+  } catch {
+    return NextResponse.json(
+      { detail: "Auth service timeout" },
+      { status: 504 },
+    );
+  }
 
   const text = await response.text();
   if (!response.ok) {

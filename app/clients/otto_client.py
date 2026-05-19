@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from app.core.otto_auth import OttoAuth
+from app.schemas.enums import Controller
 
 # Schemas
 from app.schemas.product import CreateProductRequest, ProductBase
@@ -27,13 +28,14 @@ class OttoClient:
         self.base_url = base_url
         self.timeout = timeout
 
-    async def _header(self):
+    async def _header(self, controller: Controller | str = Controller.JV):
         """Build authenticated headers required by OTTO endpoints."""
-        token = await self.auth.get_token()
+        token = await self.auth.get_token(
+            controller.value if isinstance(controller, Controller) else str(controller)
+        )
         request_timestamp = (
             datetime.now().astimezone().isoformat(timespec="milliseconds")
         )
-        print(token)
         return {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -68,13 +70,14 @@ class OttoClient:
         *,
         params: dict | None = None,
         json: Any = None,
+        controller: Controller | str = Controller.JV,
     ) -> httpx.Response:
         """Execute an authenticated HTTP request and return the raw response."""
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             return await client.request(
                 method,
                 f"{self.base_url}{path}",
-                headers=await self._header(),
+                headers=await self._header(controller),
                 params=params,
                 json=json,
             )
@@ -86,10 +89,13 @@ class OttoClient:
         *,
         params: dict | None = None,
         json: Any = None,
+        controller: Controller | str = Controller.JV,
     ):
         """Execute an authenticated HTTP request and raise on non-2xx responses."""
-        response = await self._send(method, path, params=params, json=json)
-        # response.raise_for_status()
+        response = await self._send(
+            method, path, params=params, json=json, controller=controller
+        )
+        response.raise_for_status()
         return self._parse_response(response)
 
     async def _request_with_status(
@@ -99,9 +105,12 @@ class OttoClient:
         *,
         params: dict | None = None,
         json: Any = None,
+        controller: Controller | str = Controller.JV,
     ) -> tuple[int, Any]:
         """Execute an authenticated request and return both status and parsed body."""
-        response = await self._send(method, path, params=params, json=json)
+        response = await self._send(
+            method, path, params=params, json=json, controller=controller
+        )
         return response.status_code, self._parse_response(response)
 
     async def update_status(self, payload: dict):
@@ -117,9 +126,11 @@ class OttoClient:
         return await self._request("GET", f"/v5/products/{sku}")
 
 
-    async def get_shipping_profiles(self):
+    async def get_shipping_profiles(self, controller: Controller | str = Controller.JV):
         """GET all shipment profiles"""
-        return await self._request("GET", "/v1/shipping-profiles")
+        return await self._request(
+            "GET", "/v1/shipping-profiles", controller=controller
+        )
     
     
     async def get_product_with_status(self, sku: str) -> tuple[int, Any]:
@@ -134,12 +145,20 @@ class OttoClient:
         """GET active-status list."""
         return await self._request("GET", "/v5/products/active-status", params=payload)
 
-    async def update_tasks(self, pid: str):
+    async def update_tasks(
+        self, pid: str, controller: Controller | str = Controller.JV
+    ):
         """Trigger update tasks for a product-processing identifier."""
-        return await self._request("GET", f"/v5/products/update-tasks/{pid}")
+        return await self._request(
+            "GET", f"/v5/products/update-tasks/{pid}", controller=controller
+        )
     
-    async def failed_tasks(self, pid: str):
-        return await self._request("GET", f"/v5/products/update-tasks/{pid}/failed")
+    async def failed_tasks(
+        self, pid: str, controller: Controller | str = Controller.JV
+    ):
+        return await self._request(
+            "GET", f"/v5/products/update-tasks/{pid}/failed", controller=controller
+        )
 
     async def get_marketplace_status(self, payload: dict | None = None):
         """GET marketplace status information with optional filters."""
@@ -149,33 +168,53 @@ class OttoClient:
             params=payload,
         )
         
-    async def update_quantity(self, payload: dict | None = None):
+    async def update_quantity(
+        self,
+        payload: dict | None = None,
+        controller: Controller | str = Controller.JV,
+    ):
         """POST marketplace quantity for given sku(product)"""
         return await self._request(
             "POST",
             "/v1/availability/quantities",
-            json=[payload]
+            json=[payload],
+            controller=controller,
         )
     
-    async def update_product_delivery_information(self, payload: dict | None = None):
+    async def update_product_delivery_information(
+        self,
+        payload: dict | None = None,
+        controller: Controller | str = Controller.JV,
+    ):
         """POST product shippinig profile with given SKU"""
         return await self._request(
             "POST",
             "/v1/availability/product-delivery-information",
-            json=[payload]
+            json=[payload],
+            controller=controller,
         )
 
-    async def create_or_update_products(self, payload: ProductBase) -> ProductCreateResponse:
+    async def create_or_update_products(
+        self,
+        payload: ProductBase,
+        controller: Controller | str = Controller.JV,
+    ) -> ProductCreateResponse:
         """POST product payloads for create/upsert operations."""
         json_payload = to_json(payload)
-        response_data = await self._request("POST", "/v5/products", json=json_payload)
+        response_data = await self._request(
+            "POST", "/v5/products", json=json_payload, controller=controller
+        )
         
         return parse(ProductCreateResponse, response_data)
             
             
-    async def get_categories(self, payload: dict):
+    async def get_categories(
+        self, payload: dict, controller: Controller | str = Controller.JV
+    ):
         """Fetch and flatten category values from OTTO category-group responses."""
-        body = await self._request("GET", "/v5/products/categories", params=payload)
+        body = await self._request(
+            "GET", "/v5/products/categories", params=payload, controller=controller
+        )
         if isinstance(body, dict):
             groups = body.get("categoryGroups")
             if isinstance(groups, list):

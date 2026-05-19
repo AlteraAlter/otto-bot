@@ -28,8 +28,13 @@ export function useCurrentUser(options: UseCurrentUserOptions = {}) {
     let active = true;
 
     async function loadCurrentUser() {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
       try {
-        const response = await fetch("/api/auth/me", { cache: "no-store" });
+        const response = await fetch("/api/auth/me", {
+          cache: "no-store",
+          signal: controller.signal,
+        });
 
         if (!response.ok) {
           if (response.status === 401 && redirectToLogin) {
@@ -54,10 +59,13 @@ export function useCurrentUser(options: UseCurrentUserOptions = {}) {
 
         setError(
           caughtError instanceof Error
-            ? caughtError.message
+            ? caughtError.name === "AbortError"
+              ? "Таймаут загрузки профиля. Обновите страницу."
+              : caughtError.message
             : "Ошибка загрузки профиля",
         );
       } finally {
+        clearTimeout(timeoutId);
         if (active) {
           setIsLoading(false);
         }

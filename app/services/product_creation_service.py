@@ -13,6 +13,7 @@ return actionable feedback to users.
 
 import json
 import re
+from asyncio import sleep
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from pydantic import ValidationError
 from app.mapper import get_default_category_mapper
 from app.mapper.normalizer import build_normalized_product
 from app.mapper.seo import build_seo_description, decode_with_fallback
+from app.schemas.enums import Controller
 from app.schemas.product import CreateProductRequest
 from app.schemas.product_creation import ProductCreationIssue
 from app.services.local_product_sync_service import upsert_local_products_from_payloads
@@ -46,6 +48,66 @@ class ProductCreationService:
         """Initialize service and local category cache."""
         self.product_service = product_service
         self._valid_categories_cache: set[str] | None = None
+
+    @staticmethod
+    def _extract_process_id_from_links(payload: dict[str, Any]) -> str | None:
+        links = payload.get("links")
+        if not isinstance(links, list):
+            return None
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+            if str(link.get("rel", "")).lower() != "self":
+                continue
+            href = str(link.get("href", "")).strip()
+            match = re.search(r"/update-tasks/([^/?#]+)", href)
+            if match:
+                return match.group(1)
+        return None
+
+    @staticmethod
+    def _failed_items_count(payload: Any) -> int:
+        if isinstance(payload, list):
+            return len(payload)
+        if not isinstance(payload, dict):
+            return 0
+        failed = payload.get("failed")
+        if isinstance(failed, int):
+            return failed
+        if isinstance(failed, list):
+            return len(failed)
+        if isinstance(failed, dict):
+            for key in ("count", "total", "size"):
+                value = failed.get(key)
+                if isinstance(value, int):
+                    return value
+        return 0
+
+    @staticmethod
+    def _short_error_payload(payload: Any, max_len: int = 380) -> str:
+        try:
+            text = json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            text = str(payload)
+        compact = " ".join(text.split())
+        if len(compact) <= max_len:
+            return compact
+        return f"{compact[: max_len - 1].rstrip()}…"
+
+    async def _wait_for_update_task_done(
+        self, process_id: str, *, controller: Controller
+    ) -> tuple[bool, dict[str, Any]]:
+        last_payload: dict[str, Any] = {}
+        for _ in range(12):
+            response = await self.product_service.update_tasks(
+                process_id, controller=controller
+            )
+            last_payload = response if isinstance(response, dict) else {}
+            state = str(last_payload.get("state", "")).strip().lower()
+            if state == "done":
+                return True, last_payload
+            await sleep(1.5)
+        return False, last_payload
 
     @staticmethod
     def _extract_categories(payload: Any) -> set[str]:
@@ -409,18 +471,67 @@ class ProductCreationService:
         if not payloads:
             return 0, issues
 
-        payload_list = [payload for _index, payload in payloads]
-        for payload in payload_list:
+        created_count = 0
+        local_upsert_payloads: list[dict[str, Any]] = []
+
+        for source_index, payload in payloads:
             self._sanitize_product_attributes(payload)
             self._trim_product_line(payload, max_len=70)
             await self._normalize_category_for_payload(payload)
+            try:
+                model = CreateProductRequest.model_validate(payload)
+                create_result = await self.product_service.create_or_update_products(model)
+                create_payload = create_result.model_dump(mode="json", exclude_none=True)
+                process_id = self._extract_process_id_from_links(create_payload)
+                if not process_id:
+                    issues.append(
+                        ProductCreationIssue(
+                            index=source_index,
+                            stage="update-task",
+                            message="Create accepted, but update-task process id was not returned.",
+                        )
+                    )
+                    continue
 
-        try:
-            await self.product_service.create_or_update_products(payload_list)
-            await upsert_local_products_from_payloads(payload_list)
-            return len(payloads), issues
-        except Exception as exc:
-            for source_index, _payload in payloads:
+                is_done, task_payload = await self._wait_for_update_task_done(
+                    process_id, controller=model.controller
+                )
+                if not is_done:
+                    issues.append(
+                        ProductCreationIssue(
+                            index=source_index,
+                            stage="update-task",
+                            message=(
+                                "Create accepted, but update-task did not reach DONE in time. "
+                                f"processId={process_id}"
+                            ),
+                        )
+                    )
+                    continue
+
+                failed_payload = await self.product_service.failed_tasks(
+                    process_id, controller=model.controller
+                )
+                failed_count = self._failed_items_count(failed_payload)
+                if failed_count > 0:
+                    issues.append(
+                        ProductCreationIssue(
+                            index=source_index,
+                            stage="update-task",
+                            message=(
+                                f"Update-task has {failed_count} failed item(s). "
+                                f"processId={process_id}. details={self._short_error_payload(failed_payload)}"
+                            ),
+                        )
+                    )
+                    continue
+
+                # If OTTO task finished without failed items, treat request body as created.
+                local_upsert_payloads.extend(
+                    [item.model_dump(mode="json", exclude_none=True) for item in model.products]
+                )
+                created_count += 1
+            except Exception as exc:
                 issues.append(
                     ProductCreationIssue(
                         index=source_index,
@@ -428,7 +539,11 @@ class ProductCreationService:
                         message=f"Backend create failed: {exc}",
                     )
                 )
-            return 0, issues
+
+        if local_upsert_payloads:
+            await upsert_local_products_from_payloads(local_upsert_payloads)
+
+        return created_count, issues
 
     def validate_prepared_payloads(
         self, payloads: list[dict[str, Any]]

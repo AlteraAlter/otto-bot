@@ -10,6 +10,7 @@ Write/import workflows remain under `/v1/products/...`.
 from asyncio import sleep
 from datetime import date, datetime
 from io import BytesIO
+from pathlib import Path
 from typing import Any, List, Optional
 from uuid import uuid4
 
@@ -57,6 +58,7 @@ from app.schemas.product_query import (
 )
 from app.schemas.enums import SortOrderEnum
 from app.schemas.enums import RoleEnum
+from app.schemas.enums import Controller
 from app.tasks import sync_afterbuy_jv_lister_task
 from app.services.afterbuy_sync_service import sync_afterbuy_to_jv_lister
 from app.services.local_product_sync_service import upsert_local_products_from_payloads
@@ -88,6 +90,7 @@ XLSX_COLUMN_MAP = {
 }
 REQUIRED_XLSX_COLUMNS = list(XLSX_COLUMN_MAP.keys())
 MAX_TASK_ERROR_LENGTH = 280
+ATTRIBUTES_LIST_PATH = Path(__file__).resolve().parents[3] / "attributes_list.txt"
 
 
 def _product_to_dict(product: Product) -> dict[str, Any]:
@@ -563,6 +566,21 @@ async def get_db_product_categories(
     }
 
 
+@router.get("/attributes/options")
+async def get_attribute_options():
+    """Return supported attribute names from attributes_list.txt."""
+    if not ATTRIBUTES_LIST_PATH.exists():
+        return {"items": []}
+
+    items: list[str] = []
+    for line in ATTRIBUTES_LIST_PATH.read_text(encoding="utf-8").splitlines():
+        value = line.strip()
+        if value:
+            items.append(value)
+
+    return {"items": items, "total": len(items)}
+
+
 @router.get("/otto")
 async def get_otto_products(
     product_service: ProductService = Depends(get_product_service),
@@ -609,25 +627,28 @@ async def get_active_products(
 
 @router.get("/otto/shipping-profiles")
 async def get_shipping_profiles(
+    controller: Controller = Query(default=Controller.JV),
     product_service: ProductService = Depends(get_product_service)
 ):
-    return await product_service.get_shipping_profiles()
+    return await product_service.get_shipping_profiles(controller=controller)
 
 @router.get("/otto/update-tasks/{pid}")
 @router.get("/update-tasks/{pid}", include_in_schema=False)
 async def update_tasks(
     pid: str,
+    controller: Controller = Query(default=Controller.JV),
     product_service: ProductService = Depends(get_product_service),
 ):
     """Trigger OTTO update-task execution for a single product id (`pid`)."""
-    return await product_service.update_tasks(pid)
+    return await product_service.update_tasks(pid, controller=controller)
 
 @router.get("/otto/failed/{pid}")
 async def failed_tasks(
     pid: str,
+    controller: Controller = Query(default=Controller.JV),
     product_service: ProductService = Depends(get_product_service),
 ):
-    return await product_service.failed_tasks(pid)
+    return await product_service.failed_tasks(pid, controller=controller)
 
 @router.get("/otto/marketplace-status")
 @router.get("/marketplace-status", include_in_schema=False)
@@ -668,10 +689,11 @@ async def get_categories(
     page: int = Query(default=0, ge=0),
     limit: int = Query(default=10, ge=0, le=2000),
     category: Optional[str] = Query(None),
+    controller: Controller = Query(default=Controller.JV),
 ):
     """List available categories from OTTO, optionally filtered by category name."""
     payload = CategoryQuery(page=page, limit=limit, category=category).to_payload()
-    return await product_service.get_categories(payload)
+    return await product_service.get_categories(payload, controller=controller)
 
 
 @router.get("/db/status/{sku}")

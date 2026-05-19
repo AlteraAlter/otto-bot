@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import ValidationError
 
 from app.core.user_auth import UserAuth
 from app.dependencies import get_current_user, get_user_auth, require_role
@@ -37,7 +38,13 @@ async def login(
     content_type = request.headers.get("content-type", "")
 
     if "application/json" in content_type:
-        payload = UserLoginDTO.model_validate(await request.json())
+        try:
+            payload = UserLoginDTO.model_validate(await request.json())
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=exc.errors(),
+            ) from exc
         return await auth_service.login_for_access_token(payload)
 
     if "application/x-www-form-urlencoded" in content_type:

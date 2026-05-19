@@ -29,6 +29,7 @@ function LoginPageContent() {
           "content-type": "application/json",
         },
         body: JSON.stringify({ email, password }),
+        signal: AbortSignal.timeout(12000),
       });
 
       if (!response.ok) {
@@ -46,7 +47,11 @@ function LoginPageContent() {
       router.replace("/");
       router.refresh();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Ошибка входа");
+      if (error instanceof Error && error.name === "TimeoutError") {
+        setMessage("Таймаут входа. Проверьте соединение и попробуйте снова.");
+      } else {
+        setMessage(error instanceof Error ? error.message : "Ошибка входа");
+      }
     } finally {
       setIsSubmitting(false);
     }

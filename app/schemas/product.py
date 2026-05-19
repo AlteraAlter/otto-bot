@@ -188,4 +188,4 @@ class Availability(BaseModel):
     quantity: str
     shippingProfileID: ShippingProfileEnum
     processingTime: str = "DEFAULT"
-
+    controller: Controller = Controller.JV
