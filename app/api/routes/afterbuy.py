@@ -1,0 +1,40 @@
+"""Afterbuy-specific endpoints."""
+
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query
+
+from app.dependencies import get_afterbuy_login, require_role
+from app.services.afterbuy_service import AfterbuyService
+
+from app.schemas.enums import RoleEnum, Controller
+from app.schemas.afterbuy_enums import FactoryEnum
+
+from app.schemas.product import Controller
+
+
+router = APIRouter(prefix="/v1/afterbuy", tags=["Afterbuy"])
+
+
+@router.get("/fetch-raw")
+async def fetch_from_afterbuy_raw(
+    afterbuy: AfterbuyService = Depends(get_afterbuy_login),
+    account: str = Query(default="JV"),
+    dataset: str = Query(default="lister"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=1000, ge=1, le=100000),
+):
+    return await afterbuy.fetch_products_page(
+        account=account,
+        dataset=dataset,
+        offset=offset,
+        limit=limit,
+    )
+    
+@router.get("/fetch-by-factory-id")
+async def get_by_id(
+    afterbuy: AfterbuyService = Depends(get_afterbuy_login),
+    controller: Controller = Controller.JV,
+    factory: Optional[FactoryEnum] = None
+):
+    pass

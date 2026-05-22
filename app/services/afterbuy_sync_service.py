@@ -10,7 +10,7 @@ from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.afterbuy_auth import AfterbuyAuth
+from app.services.afterbuy_service import AfterbuyService
 from app.dependencies import get_afterbuy_login
 from app.database import SessionLocal
 from app.models.jv_lister import JVLister
@@ -131,7 +131,7 @@ async def upsert_jv_lister_batch(
 async def sync_afterbuy_to_jv_lister(
     *,
     db: AsyncSession,
-    afterbuy: AfterbuyAuth,
+    afterbuy: AfterbuyService,
     account: str,
     dataset: str,
     limit: int,

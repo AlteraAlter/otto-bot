@@ -5,7 +5,7 @@ service classes can focus on orchestration instead of transport details.
 """
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -13,11 +13,12 @@ from app.core.otto_auth import OttoAuth
 from app.schemas.enums import Controller
 
 # Schemas
-from app.schemas.product import CreateProductRequest, ProductBase
+from app.schemas.product import CreateProductRequest, ProductBase, ProductResponse
 from app.schemas.product_response import ProductCreateResponse
 
 # Helper
 from app.utils.helpers import to_json, parse
+
 
 class OttoClient:
     """Low-level async client for calling OTTO product APIs."""
@@ -55,7 +56,7 @@ class OttoClient:
 
         content_type = response.headers.get("content-type", "").lower()
         if "application/json" in content_type:
-            return response.json()  
+            return response.json()
 
         return {
             "status_code": response.status_code,
@@ -121,25 +122,26 @@ class OttoClient:
             json=payload,
         )
 
-    async def get_product(self, sku: str):
+    async def get_product(self, sku: str) -> ProductResponse:
         """GET a single product by SKU."""
-        return await self._request("GET", f"/v5/products/{sku}")
-
+        response = await self._request("GET", f"/v5/products/{sku}")
+        print(response)
+        return ProductResponse.model_validate(response)
 
     async def get_shipping_profiles(self, controller: Controller | str = Controller.JV):
         """GET all shipment profiles"""
         return await self._request(
             "GET", "/v1/shipping-profiles", controller=controller
         )
-    
-    
+
     async def get_product_with_status(self, sku: str) -> tuple[int, Any]:
         """GET a single product by SKU without raising, returning status and body."""
         return await self._request_with_status("GET", f"/v5/products/{sku}")
 
-    async def get_products(self, payload: dict | None = None):
+    async def get_products(self, payload: dict | None = None) -> ProductResponse:
         """GET paginated products list."""
-        return await self._request("GET", "/v5/products", params=payload)
+        response = await self._request("GET", "/v5/products", params=payload)
+        return ProductResponse.model_validate(response)
 
     async def get_active_products(self, payload: dict | None = None):
         """GET active-status list."""
@@ -152,7 +154,7 @@ class OttoClient:
         return await self._request(
             "GET", f"/v5/products/update-tasks/{pid}", controller=controller
         )
-    
+
     async def failed_tasks(
         self, pid: str, controller: Controller | str = Controller.JV
     ):
@@ -167,20 +169,28 @@ class OttoClient:
             "/v5/products/marketplace-status",
             params=payload,
         )
-        
+
     async def update_quantity(
         self,
-        payload: dict | None = None,
+        payload: Optional[dict | list] = None,
         controller: Controller | str = Controller.JV,
     ):
         """POST marketplace quantity for given sku(product)"""
+        if isinstance(payload, list):
+            return await self._request(
+                "POST",
+                "/v1/availability/quantities",
+                json=payload,
+                controller=controller,
+            )
+
         return await self._request(
             "POST",
             "/v1/availability/quantities",
             json=[payload],
             controller=controller,
         )
-    
+
     async def update_product_delivery_information(
         self,
         payload: dict | None = None,
@@ -204,10 +214,9 @@ class OttoClient:
         response_data = await self._request(
             "POST", "/v5/products", json=json_payload, controller=controller
         )
-        
+
         return parse(ProductCreateResponse, response_data)
-            
-            
+
     async def get_categories(
         self, payload: dict, controller: Controller | str = Controller.JV
     ):

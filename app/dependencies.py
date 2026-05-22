@@ -19,6 +19,7 @@ from app.database import get_db
 from app.repository.user_repository import UserRepository
 from app.services.product_creation_service import ProductCreationService
 from app.services.product_service import ProductService
+from app.services.afterbuy_service import AfterbuyService
 from app.schemas.enums import RoleEnum
 from app.schemas.userDTO import UserDTO
 
@@ -102,7 +103,9 @@ def require_role(allowed_roles: list[str] | list[RoleEnum]):
         role.value if isinstance(role, RoleEnum) else role for role in allowed_roles
     }
 
-    async def role_checker(current_user: UserDTO = Depends(get_current_user)) -> UserDTO:
+    async def role_checker(
+        current_user: UserDTO = Depends(get_current_user),
+    ) -> UserDTO:
         user_role = current_user.role.value if current_user.role else None
         if user_role not in allowed_role_values:
             raise HTTPException(
@@ -113,6 +116,13 @@ def require_role(allowed_roles: list[str] | list[RoleEnum]):
 
     return role_checker
 
-def get_afterbuy_login() -> AfterbuyAuth:
+
+@lru_cache
+def get_afterbuy_service() -> AfterbuyService:
+    """Create a cached Afterbuy service wrapper."""
+    return AfterbuyService(auth=get_afterbuy_auth())
+
+
+def get_afterbuy_login() -> AfterbuyService:
     """Backward-compatible dependency name for Afterbuy access."""
-    return get_afterbuy_auth()
+    return get_afterbuy_service()

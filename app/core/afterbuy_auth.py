@@ -1,14 +1,12 @@
-"""Afterbuy authentication and paginated product fetch helpers."""
+"""Afterbuy authentication helpers."""
 
 from __future__ import annotations
-
-from typing import Any
 
 import httpx
 
 
 class AfterbuyAuth:
-    """Small HTTP helper that logs in and fetches products from Afterbuy."""
+    """Small HTTP helper responsible only for Afterbuy login."""
 
     def __init__(
         self,
@@ -23,58 +21,17 @@ class AfterbuyAuth:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    async def _login(self, client: httpx.AsyncClient) -> dict[str, str]:
-        """Authenticate and return headers when a bearer token is provided."""
+    async def login_and_get_session(self, client: httpx.AsyncClient) -> str:
+        """Authenticate and return the `session` cookie."""
         response = await client.post(
-            "/auth/login",
+            f"{self.base_url}/auth/login",
             json={
                 "username": self.username,
                 "password": self.password,
             },
         )
         response.raise_for_status()
-
-        try:
-            payload = response.json()
-        except ValueError:
-            return {}
-
-        token = None
-        if isinstance(payload, dict):
-            for key in ("access_token", "accessToken", "token", "jwt"):
-                value = payload.get(key)
-                if isinstance(value, str) and value.strip():
-                    token = value.strip()
-                    break
-
-        if token:
-            return {"Authorization": f"Bearer {token}"}
-        return {}
-
-    async def fetch_products_page(
-        self,
-        *,
-        account: str,
-        dataset: str,
-        offset: int,
-        limit: int,
-    ) -> Any:
-        """Fetch one page from `/api/products` after authenticating."""
-        async with httpx.AsyncClient(
-            base_url=self.base_url,
-            timeout=self.timeout,
-            follow_redirects=True,
-        ) as client:
-            headers = await self._login(client)
-            response = await client.get(
-                "/api/products",
-                params={
-                    "account": account,
-                    "dataset": dataset,
-                    "offset": offset,
-                    "limit": limit,
-                },
-                headers=headers or None,
-            )
-            response.raise_for_status()
-            return response.json()
+        session = response.cookies.get("session") or client.cookies.get("session")
+        if not session:
+            raise RuntimeError("Aftercool login succeeded but `session` cookie was not found.")
+        return session

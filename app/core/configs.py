@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.schemas.enums import Controller
 from app.schemas.product import Compliance, ProductSafety, Address
 
+
 class Settings(BaseSettings):
     """Typed configuration container for API, OTTO auth, and database settings."""
 
@@ -18,10 +19,10 @@ class Settings(BaseSettings):
 
     otto_jv_client_id: str
     otto_jv_client_secret: str
-    
+
     otto_xl_client_id: str
     otto_xl_client_secret: str
-    
+
     otto_base_url: str = "https://api.otto.market"
     otto_scope: str = "orders products availability shipping-profiles"
     otto_timeout_seconds: float = 20.0
@@ -43,8 +44,8 @@ class Settings(BaseSettings):
     smtp_password: str | None = None
     smtp_sender_email: str | None = None
     smtp_use_tls: bool = True
-    
-    #Afterbuy
+
+    # Afterbuy
     afterbuy_base_url: str = "https://aftercool.de"
     afterbuy_timeout_seconds: float = 30.0
     afterbuy_username: str
@@ -53,31 +54,34 @@ class Settings(BaseSettings):
     celery_broker_url: str = "redis://127.0.0.1:6379/0"
     celery_result_backend: str = "redis://127.0.0.1:6379/1"
 
-    
     compliance: ClassVar = {
         Controller.JV: Compliance(
             productSafety=ProductSafety(
-                addresses=[Address(
-                    name="AEA GmbH & Co. KG",
-                    address="Am Flugplatz 28, 88483 Burgrieden",
-                    email="info@jvmoebel.de",
-                    phone="07392 - 93 78 44 0",
-                    url=HttpUrl("https://www.jvmoebel.de/Infos/Kontakt.htm"),
-                )]
+                addresses=[
+                    Address(
+                        name="AEA GmbH & Co. KG",
+                        address="Am Flugplatz 28, 88483 Burgrieden",
+                        email="info@jvmoebel.de",
+                        phone="07392 - 93 78 44 0",
+                        url=HttpUrl("https://www.jvmoebel.de/Infos/Kontakt.htm"),
+                    )
+                ]
             )
         ),
         Controller.XL: Compliance(
             productSafety=ProductSafety(
-                addresses=[Address(
-                    name="DEFAULT",
-                    address="DEFAUL",
-                    email="info@xlmoebel.de",
-                    phone="07392 - 93 78 44 0",
-                    url=HttpUrl("https://www.xlmoebel.de/Infos/Kontakt.htm"),
-                )]
+                addresses=[
+                    Address(
+                        name="DEFAULT",
+                        address="DEFAUL",
+                        email="info@xlmoebel.de",
+                        phone="07392 - 93 78 44 0",
+                        url=HttpUrl("https://www.xlmoebel.de/Infos/Kontakt.htm"),
+                    )
+                ]
             )
-        )
+        ),
     }
-    
+
 
 settings = Settings()

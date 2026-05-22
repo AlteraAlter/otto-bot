@@ -480,8 +480,12 @@ class ProductCreationService:
             await self._normalize_category_for_payload(payload)
             try:
                 model = CreateProductRequest.model_validate(payload)
-                create_result = await self.product_service.create_or_update_products(model)
-                create_payload = create_result.model_dump(mode="json", exclude_none=True)
+                create_result = await self.product_service.create_or_update_products(
+                    model
+                )
+                create_payload = create_result.model_dump(
+                    mode="json", exclude_none=True
+                )
                 process_id = self._extract_process_id_from_links(create_payload)
                 if not process_id:
                     issues.append(
@@ -528,7 +532,10 @@ class ProductCreationService:
 
                 # If OTTO task finished without failed items, treat request body as created.
                 local_upsert_payloads.extend(
-                    [item.model_dump(mode="json", exclude_none=True) for item in model.products]
+                    [
+                        item.model_dump(mode="json", exclude_none=True)
+                        for item in model.products
+                    ]
                 )
                 created_count += 1
             except Exception as exc:

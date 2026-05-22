@@ -25,8 +25,12 @@ class Product(Base):
     price: Mapped[float | None] = mapped_column(Float, nullable=True)
     recommended_retail_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     sale_price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    sale_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
-    sale_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    sale_start: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True
+    )
+    sale_end: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True
+    )
     marketplace_status: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(String, nullable=True)
     active_status: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -35,4 +39,6 @@ class Product(Base):
         ARRAY(String),
         nullable=True,
     )
-    last_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    last_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True
+    )

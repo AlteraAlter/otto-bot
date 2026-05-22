@@ -3,12 +3,14 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ReactNode, useState } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 
 import { CurrentUser } from "../hooks/use-current-user";
 
 type AppWorkspaceShellProps = {
   currentUser: CurrentUser | null;
-  activeHref: "/" | "/creator" | "/manual-creator" | "/imports" | "/invitations";
+  activeHref: "/" | "/creator" | "/manual-creator" | "/tasks" | "/imports" | "/invitations";
   sectionLabel: string;
   title: string;
   description: string;
@@ -32,6 +34,7 @@ export function AppWorkspaceShell({
     { href: "/manual-creator", label: "Ручное создание", shortLabel: "R" },
     ...(currentUser?.role === "SEO"
       ? [
+          { href: "/tasks", label: "Задачи", shortLabel: "T" },
           { href: "/imports", label: "Data Operations", shortLabel: "D" },
           { href: "/invitations", label: "Приглашения", shortLabel: "П" },
         ]
@@ -91,7 +94,9 @@ export function AppWorkspaceShell({
           </nav>
 
           <div className="side-note">
-            <span className="sync-pill">{currentUser?.role ?? "USER"}</span>
+            <Badge className="sync-pill" variant="secondary">
+              {currentUser?.role ?? "USER"}
+            </Badge>
             <p>Unified navigation for catalog work, creation flows, imports, and internal tasks.</p>
           </div>
         </aside>
@@ -107,12 +112,14 @@ export function AppWorkspaceShell({
               <div className="user-context-mini">
                 <div className="user-context-mini-head">
                   <strong>{currentUser?.email ?? "Профиль"}</strong>
-                  <span className="sync-pill">{currentUser?.role ?? "USER"}</span>
+                  <Badge className="sync-pill" variant="secondary">
+                    {currentUser?.role ?? "USER"}
+                  </Badge>
                 </div>
               </div>
-              <button className="secondary-btn" onClick={handleLogout} type="button">
+              <Button className="secondary-btn" onClick={handleLogout} type="button" variant="secondary">
                 Выйти
-              </button>
+              </Button>
             </div>
           </header>
 

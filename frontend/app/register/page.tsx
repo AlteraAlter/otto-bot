@@ -3,6 +3,7 @@
 import Link from "next/link";
 
 import { AuthShell } from "../ui/auth-shell";
+import { Button } from "@/components/ui/button";
 
 export default function RegisterPage() {
   return (
@@ -25,9 +26,9 @@ export default function RegisterPage() {
           Если у вас уже есть аккаунт, используйте обычный вход.
         </p>
 
-        <Link className="primary-btn full" href="/login">
-          Перейти ко входу
-        </Link>
+        <Button asChild className="primary-btn full">
+          <Link href="/login">Перейти ко входу</Link>
+        </Button>
       </div>
     </AuthShell>
   );

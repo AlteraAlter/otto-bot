@@ -7,30 +7,43 @@ Read APIs are intentionally split:
 Write/import workflows remain under `/v1/products/...`.
 """
 
-from asyncio import sleep
-from datetime import date, datetime
+import asyncio
+from datetime import UTC, date, datetime
 from io import BytesIO
 from pathlib import Path
+import re
 from typing import Any, List, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    Form,
+    Query,
+    UploadFile,
+    status,
+)
 from fastapi.responses import JSONResponse
 from sqlalchemy import asc, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from openpyxl import load_workbook
 
 from app.database import SessionLocal
-from app.core.afterbuy_auth import AfterbuyAuth
 from app.dependencies import (
     get_current_user,
     get_product_creation_service,
     get_product_service,
     require_role,
-    get_afterbuy_login,
 )
 from app.database import get_db
 from app.models.product_import_tasks import ProductImportTask
+from app.models.product_creation_tasks import (
+    ProductCreationTask,
+    ProductCreationTaskItem,
+)
 from app.models.products import Product
 from app.schemas.marketplaceStatus import MarketPlaceStatus
 from app.schemas.product_creation import (
@@ -43,13 +56,24 @@ from app.schemas.product_creation import (
     ProductSpreadsheetImportResponse,
 )
 from app.schemas.product import (
-    CreateProductRequest, 
+    ProductResponse,
+    CreateProductRequest,
     Status,
     Availability,
     UpdateQuantity,
     UpdateProductDelivery,
 )
-from app.schemas.product_response import ProductCreateResponse, AvailabilityResponse
+from app.schemas.product_response import (
+    ProductCreateResponse,
+    AvailabilityResponse,
+    DeleteProductResponse,
+)
+from app.schemas.product_tasks import (
+    ProductTaskCreateRequestDTO,
+    ProductTaskDTO,
+    ProductTaskItemDTO,
+    ProductTaskListResponseDTO,
+)
 
 from app.schemas.product_query import (
     MarketplaceStatusQuery,
@@ -91,6 +115,13 @@ XLSX_COLUMN_MAP = {
 REQUIRED_XLSX_COLUMNS = list(XLSX_COLUMN_MAP.keys())
 MAX_TASK_ERROR_LENGTH = 280
 ATTRIBUTES_LIST_PATH = Path(__file__).resolve().parents[3] / "attributes_list.txt"
+TASK_STATUS_IN_PROGRESS = "IN_PROGRESS"
+TASK_STATUS_DONE = "DONE"
+TASK_STATUS_FAILED = "FAILED"
+CREATE_DONE_RU = "Создание успешно"
+CREATE_FAILED_RU = "Создание с ошибкой"
+AVAILABILITY_DONE_RU = "Доступность успешно"
+AVAILABILITY_FAILED_RU = "Доступность с ошибкой"
 
 
 def _product_to_dict(product: Product) -> dict[str, Any]:
@@ -143,6 +174,53 @@ def _task_to_dto(task: ProductImportTask) -> ProductImportTaskDTO:
         updated_at=task.updated_at.isoformat(),
         started_at=task.started_at.isoformat() if task.started_at else None,
         finished_at=task.finished_at.isoformat() if task.finished_at else None,
+    )
+
+
+def _extract_process_id(create_result: ProductCreateResponse) -> str | None:
+    for link in create_result.links:
+        match = re.search(r"update-tasks/([^/?#]+)", link.href)
+        if match:
+            return match.group(1)
+    match = re.search(
+        r"\b([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\b",
+        create_result.message or "",
+        re.IGNORECASE,
+    )
+    if match:
+        return match.group(1)
+    return None
+
+
+def _to_task_item_dto(item: ProductCreationTaskItem) -> ProductTaskItemDTO:
+    return ProductTaskItemDTO(
+        item_index=item.item_index,
+        sku=item.sku,
+        product_reference=item.product_reference,
+        create_status_ru=item.create_status_ru,
+        availability_status_ru=item.availability_status_ru,
+        error_message=item.error_message,
+        payload=item.payload,
+        availability_payload=item.availability_payload,
+    )
+
+
+def _to_task_dto(
+    task: ProductCreationTask, items: list[ProductCreationTaskItem]
+) -> ProductTaskDTO:
+    return ProductTaskDTO(
+        id=task.id,
+        status=task.status,
+        controller=Controller(task.controller),
+        process_id=task.process_id,
+        process_state=task.process_state,
+        total_items=task.total_items,
+        failed_items=task.failed_items,
+        error_message=task.error_message,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+        finished_at=task.finished_at,
+        items=[_to_task_item_dto(item) for item in items],
     )
 
 
@@ -294,8 +372,12 @@ async def _upsert_products_in_batches(
     upserted_rows = 0
     for start in range(0, len(rows), batch_size):
         chunk = rows[start : start + batch_size]
-        sku_values = {_as_text(row.get("sku")) for row in chunk if _as_text(row.get("sku"))}
-        ean_values = {_as_text(row.get("ean")) for row in chunk if _as_text(row.get("ean"))}
+        sku_values = {
+            _as_text(row.get("sku")) for row in chunk if _as_text(row.get("sku"))
+        }
+        ean_values = {
+            _as_text(row.get("ean")) for row in chunk if _as_text(row.get("ean"))
+        }
         reference_values = {
             _as_text(row.get("product_reference"))
             for row in chunk
@@ -334,7 +416,11 @@ async def _upsert_products_in_batches(
             for candidate in (
                 existing_by_sku.get(sku) if sku else None,
                 existing_by_ean.get(ean) if ean else None,
-                existing_by_reference.get(product_reference) if product_reference else None,
+                (
+                    existing_by_reference.get(product_reference)
+                    if product_reference
+                    else None
+                ),
             ):
                 if candidate is not None:
                     matched_product = candidate
@@ -354,7 +440,9 @@ async def _upsert_products_in_batches(
             if matched_product.ean:
                 existing_by_ean[matched_product.ean] = matched_product
             if matched_product.product_reference:
-                existing_by_reference[matched_product.product_reference] = matched_product
+                existing_by_reference[matched_product.product_reference] = (
+                    matched_product
+                )
 
         upserted_rows += len(chunk)
         if progress_callback is not None:
@@ -581,7 +669,7 @@ async def get_attribute_options():
     return {"items": items, "total": len(items)}
 
 
-@router.get("/otto")
+@router.get("/otto", response_model=ProductResponse)
 async def get_otto_products(
     product_service: ProductService = Depends(get_product_service),
     product_reference: Optional[str] = Query(None, alias="productReference"),
@@ -625,12 +713,14 @@ async def get_active_products(
     )
     return await product_service.get_active_products(payload)
 
+
 @router.get("/otto/shipping-profiles")
 async def get_shipping_profiles(
     controller: Controller = Query(default=Controller.JV),
-    product_service: ProductService = Depends(get_product_service)
+    product_service: ProductService = Depends(get_product_service),
 ):
     return await product_service.get_shipping_profiles(controller=controller)
+
 
 @router.get("/otto/update-tasks/{pid}")
 @router.get("/update-tasks/{pid}", include_in_schema=False)
@@ -642,6 +732,7 @@ async def update_tasks(
     """Trigger OTTO update-task execution for a single product id (`pid`)."""
     return await product_service.update_tasks(pid, controller=controller)
 
+
 @router.get("/otto/failed/{pid}")
 async def failed_tasks(
     pid: str,
@@ -649,6 +740,7 @@ async def failed_tasks(
     product_service: ProductService = Depends(get_product_service),
 ):
     return await product_service.failed_tasks(pid, controller=controller)
+
 
 @router.get("/otto/marketplace-status")
 @router.get("/marketplace-status", include_in_schema=False)
@@ -734,6 +826,235 @@ async def sync_products_to_db(
 
 # <======= POST METHOD =======>
 
+
+@router.get("/tasks", response_model=ProductTaskListResponseDTO)
+async def list_product_tasks(
+    current_user=Depends(require_role([RoleEnum.SEO])),
+    db: AsyncSession = Depends(get_db),
+    status_filter: str | None = Query(default=None, alias="status"),
+    date_from: date | None = Query(default=None, alias="dateFrom"),
+    date_to: date | None = Query(default=None, alias="dateTo"),
+):
+    stmt = (
+        select(ProductCreationTask)
+        .where(ProductCreationTask.created_by_user_id == current_user.id)
+        .order_by(ProductCreationTask.created_at.desc())
+    )
+    if status_filter:
+        stmt = stmt.where(ProductCreationTask.status == status_filter.strip().upper())
+    if date_from:
+        stmt = stmt.where(
+            ProductCreationTask.created_at
+            >= datetime.combine(date_from, datetime.min.time(), tzinfo=UTC)
+        )
+    if date_to:
+        stmt = stmt.where(
+            ProductCreationTask.created_at
+            <= datetime.combine(date_to, datetime.max.time(), tzinfo=UTC)
+        )
+
+    tasks = (await db.execute(stmt)).scalars().all()
+    if not tasks:
+        return ProductTaskListResponseDTO(success=True, items=[])
+
+    task_ids = [task.id for task in tasks]
+    items_stmt = (
+        select(ProductCreationTaskItem)
+        .where(ProductCreationTaskItem.task_id.in_(task_ids))
+        .order_by(
+            ProductCreationTaskItem.task_id.asc(),
+            ProductCreationTaskItem.item_index.asc(),
+        )
+    )
+    items = (await db.execute(items_stmt)).scalars().all()
+    items_by_task: dict[str, list[ProductCreationTaskItem]] = {}
+    for item in items:
+        items_by_task.setdefault(item.task_id, []).append(item)
+
+    return ProductTaskListResponseDTO(
+        success=True,
+        items=[_to_task_dto(task, items_by_task.get(task.id, [])) for task in tasks],
+    )
+
+
+@router.post("/tasks/create", response_model=ProductTaskDTO)
+async def create_product_task(
+    payload: ProductTaskCreateRequestDTO,
+    current_user=Depends(require_role([RoleEnum.SEO])),
+    db: AsyncSession = Depends(get_db),
+    product_service: ProductService = Depends(get_product_service),
+):
+    if not payload.items:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"detail": "At least one product card is required"},
+        )
+
+    task_id = str(uuid4())
+    task = ProductCreationTask(
+        id=task_id,
+        created_by_user_id=current_user.id,
+        controller=payload.controller.value,
+        status=TASK_STATUS_IN_PROGRESS,
+        total_items=len(payload.items),
+        failed_items=0,
+        request_payload=payload.model_dump(mode="json"),
+    )
+    db.add(task)
+
+    task_items: list[ProductCreationTaskItem] = []
+    for index, item in enumerate(payload.items):
+        availability_payload = {
+            "sku": item.product.sku,
+            "quantity": str(item.quantity),
+            "shippingProfileID": item.shippingProfileID.value,
+            "processingTime": item.processingTime,
+            "controller": payload.controller.value,
+        }
+        task_item = ProductCreationTaskItem(
+            task_id=task_id,
+            item_index=index,
+            sku=item.product.sku,
+            product_reference=item.product.productReference,
+            payload=item.product.model_dump(mode="json", exclude_none=True),
+            availability_payload=availability_payload,
+        )
+        db.add(task_item)
+        task_items.append(task_item)
+    await db.commit()
+
+    async def _reload_and_to_task_dto() -> ProductTaskDTO:
+        await db.refresh(task)
+        refreshed_items = (
+            (
+                await db.execute(
+                    select(ProductCreationTaskItem)
+                    .where(ProductCreationTaskItem.task_id == task.id)
+                    .order_by(ProductCreationTaskItem.item_index.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return _to_task_dto(task, refreshed_items)
+
+    try:
+        create_payload = CreateProductRequest(
+            controller=payload.controller,
+            products=[item.product for item in payload.items],
+        )
+        create_result = await product_service.create_or_update_products(create_payload)
+        task.process_id = _extract_process_id(create_result)
+        task.process_state = (create_result.state or "").upper()
+        await db.commit()
+
+        update_task_state = ""
+        update_task_failed_count = 0
+        if task.process_id:
+            for _ in range(36):
+                update_result = await product_service.update_tasks(
+                    task.process_id, controller=payload.controller
+                )
+                update_task_state = str(update_result.get("state", "")).upper()
+                update_task_failed_count = int(
+                    update_result.get("failed")
+                    or (update_result.get("results") or {}).get("failed")
+                    or (update_result.get("summary") or {}).get("failed")
+                    or 0
+                )
+                if update_task_state == "DONE":
+                    break
+                if update_task_state in {"FAILED", "ERROR"}:
+                    break
+                await asyncio.sleep(5)
+        else:
+            update_task_state = "FAILED"
+            update_task_failed_count = len(task_items)
+
+        task.process_state = update_task_state or task.process_state
+
+        if update_task_state != "DONE" or update_task_failed_count > 0:
+            task.status = TASK_STATUS_FAILED
+            task.failed_items = len(task_items)
+            task.finished_at = datetime.now(UTC)
+            task.error_message = (
+                f"Update-task failed count: {update_task_failed_count}"
+                if update_task_failed_count > 0
+                else "Update-task did not finish successfully"
+            )
+            for item in task_items:
+                item.create_status_ru = CREATE_FAILED_RU
+                item.availability_status_ru = AVAILABILITY_FAILED_RU
+                item.error_message = (
+                    "Availability не запускался: создание завершилось с ошибками"
+                )
+            await db.commit()
+            return await _reload_and_to_task_dto()
+
+        for item in task_items:
+            item.create_status_ru = CREATE_DONE_RU
+
+        failed_items = 0
+        for item in task_items:
+            availability = Availability.model_validate(item.availability_payload)
+            availability_result = await product_service.create_availability(
+                availability
+            )
+            quantity_ok = bool(
+                availability_result.update_quantity
+                and availability_result.update_quantity.success
+            )
+            delivery_ok = bool(
+                availability_result.update_delivery
+                and availability_result.update_delivery.success
+            )
+            if quantity_ok and delivery_ok:
+                item.availability_status_ru = AVAILABILITY_DONE_RU
+            else:
+                failed_items += 1
+                item.availability_status_ru = AVAILABILITY_FAILED_RU
+                errors = []
+                if (
+                    availability_result.update_quantity
+                    and availability_result.update_quantity.errors
+                ):
+                    errors.append(
+                        f"quantity: {availability_result.update_quantity.errors}"
+                    )
+                if (
+                    availability_result.update_delivery
+                    and availability_result.update_delivery.errors
+                ):
+                    errors.append(
+                        f"delivery: {availability_result.update_delivery.errors}"
+                    )
+                item.error_message = (
+                    "; ".join(errors) if errors else "Ошибка availability"
+                )
+
+        task.failed_items = failed_items
+        task.status = TASK_STATUS_FAILED if failed_items > 0 else TASK_STATUS_DONE
+        task.finished_at = datetime.now(UTC)
+        if failed_items > 0:
+            task.error_message = f"Availability failed for {failed_items} item(s)"
+        await db.commit()
+        return await _reload_and_to_task_dto()
+    except Exception as exc:
+        task.status = TASK_STATUS_FAILED
+        task.failed_items = len(task_items)
+        task.error_message = _summarize_task_error(exc)
+        task.finished_at = datetime.now(UTC)
+        for item in task_items:
+            if not item.create_status_ru:
+                item.create_status_ru = CREATE_FAILED_RU
+            if not item.availability_status_ru:
+                item.availability_status_ru = AVAILABILITY_FAILED_RU
+            if not item.error_message:
+                item.error_message = task.error_message
+        await db.commit()
+        return await _reload_and_to_task_dto()
+
+
 @router.post("/create", response_model=ProductCreateResponse)
 async def create_or_update_products(
     payload: CreateProductRequest,
@@ -746,24 +1067,26 @@ async def create_or_update_products(
 @router.post("/create-availability", response_model=AvailabilityResponse)
 async def create_availability(
     payload: Availability,
-    product_service: ProductService = Depends(get_product_service)
+    product_service: ProductService = Depends(get_product_service),
 ):
     return await product_service.create_availability(payload)
 
+
 @router.post("/update-quantity")
 async def update_delivery_stock(
-    payload: UpdateQuantity,
-    product_service: ProductService = Depends(get_product_service)
+    payload: list[UpdateQuantity],
+    controller: Controller = Controller.JV,
+    product_service: ProductService = Depends(get_product_service),
 ):
-    data = payload.model_dump(mode="json", exclude_none=True)
-    response = await product_service.update_quantity(data)
+    data = [item.model_dump() for item in payload]
+    response = await product_service.update_quantity(data, controller=controller)
     return response
-    
+
 
 @router.post("/update-product-delivery-information")
 async def update_product_delivery_information(
     payload: UpdateProductDelivery,
-    product_service: ProductService = Depends(get_product_service)
+    product_service: ProductService = Depends(get_product_service),
 ):
     data = payload.model_dump(mode="json", exclude_none=True)
     return await product_service.update_product_delivery_information(data)
@@ -791,8 +1114,6 @@ async def update_status(
         },
     },
 )
-
-
 async def prepare_products_from_file(
     file: UploadFile = File(
         ..., description="JSON file with one object or an array of objects"
@@ -1019,8 +1340,8 @@ async def create_products_from_file(
         skipped_items=result.skipped_items,
         issues=result.issues,
     )
-    
-    
+
+
 @router.post(
     "/upload-xlsx",
     response_model=ProductSpreadsheetImportResponse,
@@ -1107,7 +1428,7 @@ async def upload_products(
 async def create_xlsx_import_task(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
-    current_user = Depends(require_role([RoleEnum.SEO])),
+    current_user=Depends(require_role([RoleEnum.SEO])),
     file: UploadFile = File(..., description="XLSX file exported from OTTO market"),
 ):
     """Create a background XLSX import task and return its initial status."""
@@ -1158,7 +1479,7 @@ async def create_xlsx_import_task(
 )
 async def list_product_import_tasks(
     db: AsyncSession = Depends(get_db),
-    _current_user = Depends(require_role([RoleEnum.SEO])),
+    _current_user=Depends(require_role([RoleEnum.SEO])),
     limit: int = Query(default=20, ge=1, le=100),
 ):
     stmt = (
@@ -1168,9 +1489,7 @@ async def list_product_import_tasks(
     )
     result = await db.execute(stmt)
     tasks = result.scalars().all()
-    return ProductImportTaskListResponse(
-        items=[_task_to_dto(task) for task in tasks]
-    )
+    return ProductImportTaskListResponse(items=[_task_to_dto(task) for task in tasks])
 
 
 @router.get(
@@ -1180,7 +1499,7 @@ async def list_product_import_tasks(
 async def get_product_import_task(
     task_id: str,
     db: AsyncSession = Depends(get_db),
-    _current_user = Depends(require_role([RoleEnum.SEO])),
+    _current_user=Depends(require_role([RoleEnum.SEO])),
 ):
     task = await db.get(ProductImportTask, task_id)
     if task is None:
@@ -1241,32 +1560,6 @@ async def create_afterbuy_fetch_task(
     return _task_to_dto(task)
 
 
-@router.api_route("/fetch-afterbuy", methods=["GET", "POST"])
-@router.api_route("/fetch_afterbuy", methods=["GET", "POST"], include_in_schema=False)
-async def fetch_from_afterbuy(
-    db: AsyncSession = Depends(get_db),
-    afterbuy: AfterbuyAuth = Depends(get_afterbuy_login),
-    _current_user=Depends(require_role([RoleEnum.SEO])),
-    account: str = Query(default="JV"),
-    dataset: str = Query(default="lister"),
-    limit: int = Query(default=100000, ge=1, le=100000),
-    start_page: int = Query(default=0, ge=0, alias="startPage"),
-):
-    """Fetch Afterbuy pages until empty and upsert rows into the local JV lister table."""
-    result = await sync_afterbuy_to_jv_lister(
-        db=db,
-        afterbuy=afterbuy,
-        account=account,
-        dataset=dataset,
-        limit=limit,
-        start_page=start_page,
-    )
-    return {
-        **result,
-        "table": "jv_lister",
-    }
-
-
 @router.get("/db/{sku}")
 @router.get("/{sku}", include_in_schema=False)
 async def get_db_product(
@@ -1285,6 +1578,8 @@ async def get_db_product(
             content={"message": f"Product with sku '{sku}' not found in DB"},
         )
     return _product_to_dict(product)
+
+
 @router.get("/otto/{sku}")
 async def get_otto_product(
     sku: str,
@@ -1292,3 +1587,12 @@ async def get_otto_product(
 ):
     """Fetch one product directly from OTTO by SKU."""
     return await product_service.get_product(sku)
+
+
+@router.delete("delete-by-url/product", response_model=DeleteProductResponse)
+async def delete_by_url(
+    skus: list[str],
+    controller: Controller = Controller.JV,
+    product_service: ProductService = Depends(get_product_service),
+):
+    return await product_service.delete_product_from_file(skus, controller)

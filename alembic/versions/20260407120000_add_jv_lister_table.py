@@ -12,7 +12,6 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-
 # revision identifiers, used by Alembic.
 revision: str = "20260407120000"
 down_revision: Union[str, Sequence[str], None] = "20260406183000"
@@ -46,7 +45,9 @@ def upgrade() -> None:
             name="uq_jv_lister_account_remote_product_id",
         ),
     )
-    op.create_index(op.f("ix_jv_lister_account"), "jv_lister", ["account"], unique=False)
+    op.create_index(
+        op.f("ix_jv_lister_account"), "jv_lister", ["account"], unique=False
+    )
 
 
 def downgrade() -> None:

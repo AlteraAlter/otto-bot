@@ -22,13 +22,13 @@ class VatEnum(str, Enum):
 class RoleEnum(str, Enum):
     SEO = "SEO"
     EMPLOYEE = "EMPLOYEE"
-    
+
 
 class Controller(str, Enum):
     JV = "jv"
-    XL = "xl"    
+    XL = "xl"
 
-    
+
 class ShippingProfileEnum(str, Enum):
     FOUR_TO_EIGHT_WEEKS = "786c6468-3baf-52e0-88b5-13757eb7f873"
     SIX_TO_TEN_WEEKS = "360835cf-4962-59bb-ae66-78e8a41c8948"
@@ -37,4 +37,6 @@ class ShippingProfileEnum(str, Enum):
     EXPRESS_PRODUCTION = "571dd076-4e59-5216-a86f-3e5f30319e9c"
     DELIVERY_TIME_EIGHT_TO_TWELVE_WEEKS = "935a75b0-ac88-55a8-98df-8556306f1386"
     AVAILABLE_IMMEDIATELY = "b4139e65-603f-52f7-9b99-393cf6b2461f"
-    PREFERRED_LOCATION_TWO_MAN_SERVICE_IMMEDIATE = "83feaefc-c110-5b39-af53-49344b77ae89"
+    PREFERRED_LOCATION_TWO_MAN_SERVICE_IMMEDIATE = (
+        "83feaefc-c110-5b39-af53-49344b77ae89"
+    )

@@ -4,7 +4,7 @@ These schemas describe the canonical request body shape used when creating or
 updating products through OTTO APIs.
 """
 
-from pydantic import BaseModel, HttpUrl, RootModel
+from pydantic import BaseModel, HttpUrl, RootModel, ConfigDict
 from typing import List, Optional
 from datetime import datetime
 
@@ -22,6 +22,7 @@ class Attribute(BaseModel):
 class ProductDescription(BaseModel):
     """Core merchandising details shown on product detail pages."""
 
+    productLine: Optional[str] = None
     brandId: str
     bundle: bool = False
     category: str
@@ -31,7 +32,6 @@ class ProductDescription(BaseModel):
     bulletPoints: List[str]
     attributes: List[Attribute]
     description: Optional[str] = None
-    productLine: Optional[str] = None
     productUrl: Optional[HttpUrl] = None
 
 
@@ -121,12 +121,34 @@ class ProductSafety(BaseModel):
 
     addresses: list[Address]
 
+
 class Compliance(BaseModel):
     """Optional compliance container for safety and food declarations."""
 
     productSafety: Optional[ProductSafety] = None
 
 
+#   ==GET PRODUCT SCHEMAS==
+class ProductGet(BaseModel):
+    """Product get schema"""
+
+    productReference: str
+    sku: str
+    ean: str
+    productDescription: ProductDescription
+    mediaAssets: list[MediaAsset]
+    pricing: Pricing
+    order: Optional[Order] = None
+    logistics: Optional[Logistics] = None
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class ProductResponse(BaseModel):
+    productVariations: list[ProductGet]
+
+
+# POST
 class Product(BaseModel):
     """Top-level product create/update payload sent to OTTO."""
 
@@ -137,7 +159,10 @@ class Product(BaseModel):
     pricing: Pricing
     mediaAssets: List[MediaAsset]
 
+    model_config = ConfigDict(extra="ignore")
 
+
+# POST
 class ProductClient(BaseModel):
     productReference: str
     sku: str
@@ -148,10 +173,12 @@ class ProductClient(BaseModel):
     compliance: Optional[Compliance] = None
 
 
+# POST
 class ProductBase(RootModel[list[ProductClient]]):
     pass
 
 
+# POST
 class CreateProductRequest(BaseModel):
     controller: Controller
     products: list[Product]
@@ -168,24 +195,35 @@ class Status(BaseModel):
     """Batch status update payload."""
 
     status: List[StatusList]
-    
-    
+
+
 class UpdateQuantity(BaseModel):
 
     sku: str
     quantity: str
-    
+
+
+class UpdateQuantityRequest(BaseModel):
+
+    list[UpdateQuantity]
+    controller: Controller = Controller.JV
+
 
 class UpdateProductDelivery(BaseModel):
-    
+
     sku: str
     processingTime: str = "DEFAULT"
     shippingProfileId: ShippingProfileEnum
-    
-    
+
+
 class Availability(BaseModel):
     sku: str
     quantity: str
     shippingProfileID: ShippingProfileEnum
     processingTime: str = "DEFAULT"
+    controller: Controller = Controller.JV
+
+
+class AvailabilityRequest(BaseModel):
+    availability: list[Availability]
     controller: Controller = Controller.JV

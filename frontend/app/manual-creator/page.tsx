@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, DragEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, DragEvent, useEffect, useState } from "react";
 
 import { useCurrentUser } from "../hooks/use-current-user";
 import { AppWorkspaceShell } from "../ui/app-workspace-shell";
@@ -18,29 +18,18 @@ type CreationResponse = {
   state?: string;
   total?: number;
   message?: string;
-  links?: Array<{ href?: string; rel?: string; method?: string }>;
-};
-
-type UpdateTaskResponse = {
-  state?: string;
-  failed?: number;
-  succeeded?: number;
-  unchanged?: number;
-  results?: {
-    failed?: number;
-    succeeded?: number;
-    unchanged?: number;
-  };
-  summary?: {
-    failed?: number;
-    succeeded?: number;
-    unchanged?: number;
-  };
 };
 
 type ImageUploadResponse = {
   success?: boolean;
   imageUrl?: string;
+  message?: string;
+  detail?: string;
+};
+
+type AvailabilityResult = {
+  update_quantity?: { success?: boolean; errors?: string | null };
+  update_delivery?: { success?: boolean; errors?: string | null };
   message?: string;
 };
 
@@ -58,6 +47,7 @@ type ShippingProfileOption = {
 };
 
 type ControllerOption = "jv" | "xl";
+type CardSection = "base" | "content" | "availability" | "media";
 
 type ShippingProfilesResponse = {
   shippingProfiles?: ShippingProfileOption[];
@@ -118,14 +108,6 @@ function getBrandIdByController(controller: ControllerOption): string {
 function toPreviewImageUrl(source: string): string {
   const trimmed = source.trim();
   if (!trimmed) return "";
-  const uploadMarker = "/uploads/";
-  const markerIndex = trimmed.indexOf(uploadMarker);
-  if (markerIndex >= 0) {
-    const file = trimmed.slice(markerIndex + uploadMarker.length).split("?")[0].split("#")[0];
-    if (file) {
-      return `/api/uploads/local?file=${encodeURIComponent(file)}`;
-    }
-  }
   return trimmed;
 }
 
@@ -141,100 +123,11 @@ function splitBulletPointsForEdit(raw: string): string[] {
   return raw.split("|").map((item) => item.trim());
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-function extractProcessId(links: CreationResponse["links"]): string | null {
-  if (!Array.isArray(links)) return null;
-  for (const link of links) {
-    const href = link?.href;
-    if (!href) continue;
-    const match = href.match(/update-tasks\/([^/?#]+)/i);
-    if (match?.[1]) return match[1];
-  }
-  return null;
-}
-
-function extractProcessIdFromMessage(message: string | undefined): string | null {
-  if (!message) return null;
-  const direct = message.match(/\b([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\b/i);
-  if (direct?.[1]) return direct[1];
-  const pathLike = message.match(/update-tasks\/([^/\s?#]+)/i);
-  return pathLike?.[1] ?? null;
-}
-
-function extractFailedCount(payload: UpdateTaskResponse | null): number {
-  if (!payload) return 0;
-  const candidates = [
-    payload.failed,
-    payload.results?.failed,
-    payload.summary?.failed,
-  ];
-  for (const value of candidates) {
-    if (typeof value === "number" && Number.isFinite(value)) {
-      return value;
-    }
-  }
-  return 0;
-}
-
-async function waitForUpdateTaskDone(
-  processId: string,
-  controller: ControllerOption,
-): Promise<{ ok: boolean; failedCount: number; error?: string }> {
-  const maxAttempts = 36;
-  const intervalMs = 5000;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const response = await fetch(
-      `/api/products/update-tasks/${encodeURIComponent(processId)}?controller=${encodeURIComponent(controller)}`,
-      { method: "GET", cache: "no-store" },
-    );
-    const payload = await readJsonResponse<UpdateTaskResponse>(response);
-
-    if (!response.ok) {
-      // OTTO task status can lag right after create; tolerate transient misses.
-      if (response.status === 404 || response.status === 409) {
-        await sleep(intervalMs);
-        continue;
-      }
-      return {
-        ok: false,
-        failedCount: 0,
-        error: readApiErrorMessage(payload, "Ошибка проверки update-task", response.status),
-      };
-    }
-
-    const state = String(payload?.state ?? "").toUpperCase();
-    if (state === "DONE") {
-      const failedCount = extractFailedCount(payload);
-      return { ok: failedCount === 0, failedCount };
-    }
-    if (state === "FAILED" || state === "ERROR") {
-      return {
-        ok: false,
-        failedCount: Math.max(1, extractFailedCount(payload)),
-        error: "Update-task завершился с ошибкой.",
-      };
-    }
-
-    await sleep(intervalMs);
-  }
-
-  return {
-    ok: false,
-    failedCount: 0,
-    error: "Таймаут ожидания update-task (state != DONE).",
-  };
-}
-
 function getRequiredFieldCount(row: SingleRow): { done: number; total: number } {
   const checks = [
     row.productReference.trim().length > 0,
     row.sku.trim().length > 0,
+    row.ean.trim().length > 0,
     row.category.trim().length > 0,
     Number.isFinite(Number(row.price)) && Number(row.price) > 0,
     Number.isInteger(Number(row.quantity)) && Number(row.quantity) > 0,
@@ -256,6 +149,7 @@ function rowToPreparedPayload(
   if (!row.productReference.trim()) {
     return { payload: null, error: "Поле Product Reference обязательно" };
   }
+  if (!row.ean.trim()) return { payload: null, error: "Поле EAN обязательно" };
   if (!row.category.trim()) return { payload: null, error: "Поле Category обязательно" };
   if (!row.shippingProfileID.trim()) {
     return { payload: null, error: "Нужно выбрать Shipping Profile" };
@@ -303,7 +197,7 @@ function rowToPreparedPayload(
     payload: {
       productReference: row.productReference.trim(),
       sku: row.sku.trim(),
-      ean: row.ean.trim() || undefined,
+      ean: row.ean.trim(),
       productDescription: {
         category: row.category.trim(),
         brandId: getBrandIdByController(controller),
@@ -329,11 +223,10 @@ function rowToPreparedPayload(
 }
 
 export default function ManualCreatorPage() {
+  const STORAGE_KEY = "manual_creator_draft_v2";
   const { currentUser, isLoading, error } = useCurrentUser();
   const [state, setState] = useState<UploadState>("idle");
-  const [message, setMessage] = useState(
-    "Заполните карточки товара и нажмите «Создать товары».",
-  );
+  const [message, setMessage] = useState("");
   const [issues, setIssues] = useState<CreationIssue[]>([]);
   const [rows, setRows] = useState<SingleRow[]>([createEmptySingleRow()]);
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
@@ -344,15 +237,34 @@ export default function ManualCreatorPage() {
   const [shippingProfiles, setShippingProfiles] = useState<ShippingProfileOption[]>([]);
   const [controller, setController] = useState<ControllerOption>("jv");
   const [loadingCategories, setLoadingCategories] = useState<boolean>(false);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [activeCardIndex, setActiveCardIndex] = useState(0);
+  const [activeSectionByCard, setActiveSectionByCard] = useState<Record<string, CardSection>>({});
 
-  const progress = useMemo(() => {
-    const totalRequired = rows.length * 7;
-    const doneRequired = rows.reduce(
-      (sum, row) => sum + getRequiredFieldCount(row).done,
-      0,
-    );
-    return { doneRequired, totalRequired };
-  }, [rows]);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as { controller?: ControllerOption; rows?: SingleRow[] };
+      if (parsed.controller === "jv" || parsed.controller === "xl") {
+        setController(parsed.controller);
+      }
+      if (Array.isArray(parsed.rows) && parsed.rows.length > 0) {
+        setRows(parsed.rows);
+      }
+    } catch {
+      // ignore broken draft
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ controller, rows }));
+    } catch {
+      // ignore storage failures
+    }
+  }, [controller, rows]);
 
   useEffect(() => {
     let active = true;
@@ -462,18 +374,28 @@ export default function ManualCreatorPage() {
 
   function addRow() {
     const nextRow = createEmptySingleRow();
-    setRows((prev) => [...prev, nextRow]);
+    setRows((prev) => {
+      const next = [...prev, nextRow];
+      setActiveCardIndex(next.length - 1);
+      return next;
+    });
     setCollapsedIds((prev) => {
       const next = new Set(prev);
       next.delete(nextRow.id);
       return next;
     });
+    setActiveSectionByCard((prev) => ({ ...prev, [nextRow.id]: "base" }));
   }
 
   function removeRow(id: string) {
     setRows((prev) => {
       const next = prev.filter((row) => row.id !== id);
-      return next.length > 0 ? next : [createEmptySingleRow()];
+      if (next.length === 0) {
+        setActiveCardIndex(0);
+        return [createEmptySingleRow()];
+      }
+      setActiveCardIndex((current) => Math.max(0, Math.min(current, next.length - 1)));
+      return next;
     });
     setCollapsedIds((prev) => {
       const next = new Set(prev);
@@ -486,6 +408,11 @@ export default function ManualCreatorPage() {
       return next;
     });
     setImageUploadErrors((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    setActiveSectionByCard((prev) => {
       const next = { ...prev };
       delete next[id];
       return next;
@@ -573,6 +500,34 @@ export default function ManualCreatorPage() {
     );
   }
 
+  function moveImage(id: string, idx: number, direction: "left" | "right") {
+    setRows((prev) =>
+      prev.map((row) => {
+        if (row.id !== id) return row;
+        const next = [...row.imageUrls];
+        const target = direction === "left" ? idx - 1 : idx + 1;
+        if (target < 0 || target >= next.length) return row;
+        const temp = next[idx];
+        next[idx] = next[target];
+        next[target] = temp;
+        return { ...row, imageUrls: next };
+      }),
+    );
+  }
+
+  function setMainImage(id: string, idx: number) {
+    setRows((prev) =>
+      prev.map((row) => {
+        if (row.id !== id) return row;
+        if (idx <= 0 || idx >= row.imageUrls.length) return row;
+        const next = [...row.imageUrls];
+        const [chosen] = next.splice(idx, 1);
+        next.unshift(chosen);
+        return { ...row, imageUrls: next };
+      }),
+    );
+  }
+
   function addAttribute(id: string) {
     setRows((prev) =>
       prev.map((row) => {
@@ -620,11 +575,16 @@ export default function ManualCreatorPage() {
           method: "POST",
           body: form,
         });
-        const payload = (await response.json()) as ImageUploadResponse;
-        if (!response.ok || !payload.imageUrl) {
+        const payload = await readJsonResponse<ImageUploadResponse>(response);
+        if (!response.ok || !payload?.imageUrl) {
+          const reason = readApiErrorMessage(
+            payload,
+            payload?.message ?? payload?.detail ?? "Не удалось загрузить изображение.",
+            response.status,
+          );
           setImageUploadErrors((prev) => ({
             ...prev,
-            [id]: payload.message ?? "Не удалось загрузить изображение.",
+            [id]: reason,
           }));
           continue;
         }
@@ -642,8 +602,14 @@ export default function ManualCreatorPage() {
           }),
         );
       }
-    } catch {
-      setImageUploadErrors((prev) => ({ ...prev, [id]: "Не удалось загрузить изображение." }));
+    } catch (caughtError) {
+      setImageUploadErrors((prev) => ({
+        ...prev,
+        [id]:
+          caughtError instanceof Error
+            ? `Не удалось загрузить изображение: ${caughtError.message}`
+            : "Не удалось загрузить изображение.",
+      }));
     } finally {
       setUploadingImageIds((prev) => {
         const next = new Set(prev);
@@ -678,13 +644,12 @@ export default function ManualCreatorPage() {
     }
 
     const localIssues: CreationIssue[] = [];
-    const products: Record<string, unknown>[] = [];
-    const availabilityBodies: Array<{
-      sku: string;
-      quantity: string;
+    const items: Array<{
+      product: Record<string, unknown>;
+      quantity: number;
       shippingProfileID: string;
       processingTime: string;
-      controller: ControllerOption;
+      sku: string;
     }> = [];
 
     nonEmptyRows.forEach((row, index) => {
@@ -697,13 +662,12 @@ export default function ManualCreatorPage() {
         });
         return;
       }
-      products.push(converted.payload);
-      availabilityBodies.push({
-        sku: row.sku.trim(),
-        quantity: String(Number(row.quantity)),
+      items.push({
+        product: converted.payload,
+        quantity: Number(row.quantity),
         shippingProfileID: row.shippingProfileID.trim(),
         processingTime: row.processingTime.trim() || "DEFAULT",
-        controller,
+        sku: row.sku.trim(),
       });
     });
 
@@ -715,7 +679,7 @@ export default function ManualCreatorPage() {
     }
 
     setState("loading");
-    setMessage("Создаем товары...");
+    setMessage("Submitting...");
     setIssues([]);
 
     try {
@@ -724,7 +688,7 @@ export default function ManualCreatorPage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           controller,
-          products,
+          products: items.map((item) => item.product),
         }),
         cache: "no-store",
       });
@@ -737,80 +701,65 @@ export default function ManualCreatorPage() {
         return;
       }
 
-      const processId = extractProcessId(parsed?.links) ?? extractProcessIdFromMessage(parsed?.message);
-      if (!processId) {
-        setState("error");
-        setMessage("Не найден processId в ответе create_or_update_products (links/message).");
-        return;
-      }
-
-      setMessage("Товары отправлены. Ждем завершения update-task...");
-      const updateTaskResult = await waitForUpdateTaskDone(processId, controller);
-      if (!updateTaskResult.ok) {
-        setState("error");
-        if (updateTaskResult.failedCount > 0) {
-          setMessage(
-            `Update-task завершен с ошибками: failed=${updateTaskResult.failedCount}. Availability не запускался.`,
-          );
-        } else {
-          setMessage(updateTaskResult.error ?? "Update-task не завершился успешно.");
-        }
-        return;
-      }
-
-      setMessage("Update-task DONE без ошибок. Создаем availability...");
-
-      const availabilityResults = await Promise.allSettled(
-        availabilityBodies.map((availabilityPayload) =>
-          fetch("/api/products/create-availability", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(availabilityPayload),
-            cache: "no-store",
+      const availabilityIssues: CreationIssue[] = [];
+      for (let index = 0; index < items.length; index += 1) {
+        const item = items[index];
+        const availabilityResponse = await fetch("/api/products/create-availability", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            sku: item.sku,
+            quantity: String(item.quantity),
+            shippingProfileID: item.shippingProfileID,
+            processingTime: item.processingTime,
+            controller,
           }),
-        ),
-      );
-      const availabilityErrors: CreationIssue[] = [];
-      for (let i = 0; i < availabilityResults.length; i += 1) {
-        const result = availabilityResults[i];
-        if (result.status === "rejected") {
-          availabilityErrors.push({
-            index: i,
+          cache: "no-store",
+        });
+
+        const availabilityParsed = await readJsonResponse<AvailabilityResult>(availabilityResponse);
+        if (!availabilityResponse.ok) {
+          availabilityIssues.push({
+            index,
             stage: "availability",
-            message: "Ошибка сети при создании availability",
+            message: readApiErrorMessage(
+              availabilityParsed,
+              "Не удалось обновить availability",
+              availabilityResponse.status,
+            ),
           });
           continue;
         }
-        if (!result.value.ok) {
-          const errorPayload = await readJsonResponse<{ message?: string }>(result.value);
-          availabilityErrors.push({
-            index: i,
+
+        const quantityOk = availabilityParsed?.update_quantity?.success !== false;
+        const deliveryOk = availabilityParsed?.update_delivery?.success !== false;
+        if (!quantityOk || !deliveryOk) {
+          availabilityIssues.push({
+            index,
             stage: "availability",
-            message: readApiErrorMessage(
-              errorPayload,
-              "Ошибка создания availability",
-              result.value.status,
-            ),
+            message:
+              availabilityParsed?.update_quantity?.errors ||
+              availabilityParsed?.update_delivery?.errors ||
+              "Availability обновился с ошибкой",
           });
         }
       }
-      if (availabilityErrors.length > 0) {
-        setIssues(availabilityErrors);
+
+      if (availabilityIssues.length > 0) {
         setState("error");
+        setIssues(availabilityIssues);
         setMessage(
-          `Товары созданы, но availability с ошибками: ${availabilityErrors.length} из ${availabilityBodies.length}.`,
+          `Summary: ${items.length - availabilityIssues.length}/${items.length} succeeded, ${availabilityIssues.length} failed.`,
         );
         return;
       }
 
       setState("success");
-      setMessage(
-        parsed?.message ??
-          `Успешно: создано/обновлено ${parsed?.total ?? products.length} товаров. Update-task DONE, availability создан.`,
-      );
+      setMessage(`Success: ${items.length}/${items.length} created.`);
       const freshRow = createEmptySingleRow();
       setRows([freshRow]);
       setCollapsedIds(new Set());
+      localStorage.removeItem(STORAGE_KEY);
     } catch (caughtError) {
       setState("error");
       setMessage(
@@ -819,6 +768,15 @@ export default function ManualCreatorPage() {
           : "Ошибка запроса",
       );
     }
+  }
+
+  function openConfirmModal() {
+    setShowConfirmModal(true);
+  }
+
+  async function confirmAndCreate() {
+    setShowConfirmModal(false);
+    await handleCreateItems();
   }
 
   if (isLoading) {
@@ -839,21 +797,19 @@ export default function ManualCreatorPage() {
       currentUser={currentUser}
       sectionLabel="Создание"
       title="Ручное создание товаров"
-      description="Интерфейс собран по backend-схеме: заполняете карточки и отправляете одним действием."
+      description="Создание товаров вручную."
     >
       <div className="creator-workspace manual-creator-workspace">
         {error ? <p className="helper-banner">{error}</p> : null}
-        <p className={`helper-banner ${state === "error" ? "" : state === "success" ? "success" : "info"}`}>
-          {message}
-        </p>
+        {state !== "idle" && message ? (
+          <p className={`helper-banner ${state === "error" ? "" : state === "success" ? "success" : "info"}`}>
+            {message}
+          </p>
+        ) : null}
 
         <section className="manual-creator-header-card">
           <div>
-            <h2>Конструктор карточек товара</h2>
-            <p>
-              Поля со звездочкой обязательны. Отправляем данные в формате backend-схемы
-              `create_or_update_products`.
-            </p>
+            <h2>Конструктор / Product Builder</h2>
             <label className="manual-controller-select">
               <span>Controller</span>
               <select
@@ -864,56 +820,59 @@ export default function ManualCreatorPage() {
                 <option value="xl">xl</option>
               </select>
             </label>
-            <p className="manual-progress-line">
-              Готовность: {progress.doneRequired} / {progress.totalRequired} обязательных полей.
-            </p>
+            <div className="manual-card-graph" aria-label="Навигация по карточкам">
+              {rows.map((graphRow, index) => {
+                const cardProgress = getRequiredFieldCount(graphRow);
+                const isDone = cardProgress.done === cardProgress.total;
+                const isActive = index === activeCardIndex;
+                const tone = isDone ? "done" : isActive ? "active" : "idle";
+                return (
+                  <div className="manual-card-graph-node-wrap" key={`graph-${graphRow.id}`}>
+                    <button
+                      type="button"
+                      className={`manual-card-graph-node ${tone}`.trim()}
+                      onClick={() => setActiveCardIndex(index)}
+                      aria-label={`Товар ${index + 1}`}
+                      title={`Товар ${index + 1}`}
+                    />
+                    {index < rows.length - 1 ? <span className="manual-card-graph-edge" aria-hidden="true" /> : null}
+                  </div>
+                );
+              })}
+            </div>
           </div>
           <div className="manual-creator-header-actions">
-            <button className="ghost-btn" type="button" onClick={expandAll}>
-              Раскрыть все
-            </button>
-            <button className="ghost-btn" type="button" onClick={collapseAll}>
-              Свернуть все
-            </button>
             <button className="secondary-btn" type="button" onClick={addRow}>
               Добавить карточку
             </button>
-            <button
-              className="primary-btn"
-              type="button"
-              onClick={handleCreateItems}
-              disabled={state === "loading"}
-            >
-              {state === "loading" ? "Создаем..." : "Создать товары"}
+            <button className="primary-btn" type="button" onClick={openConfirmModal} disabled={state === "loading"}>
+              {state === "loading" ? (
+                <>
+                  <span className="manual-submit-spinner" aria-hidden="true" />
+                  Submitting...
+                </>
+              ) : (
+                "Create"
+              )}
             </button>
           </div>
         </section>
 
         <div className="manual-creator-cards">
-          {rows.map((row, cardIndex) => {
+          {rows
+            .map((row, index) => ({ row, index }))
+            .filter(({ index }) => index === activeCardIndex)
+            .map(({ row, index: cardIndex }) => {
             const bulletPoints = splitBulletPointsForEdit(row.bulletPoints);
             const isCollapsed = collapsedIds.has(row.id);
             const isUploadingImage = uploadingImageIds.has(row.id);
             const imageError = imageUploadErrors[row.id];
-            const status = getRequiredFieldCount(row);
+            const mainImage = row.imageUrls[0] ?? "";
             return (
               <section className="manual-product-card" key={row.id}>
-                {row.imageUrls.length > 0 ? (
-                  <div className="manual-image-strip">
-                    {row.imageUrls.map((url, imageIndex) => (
-                      <img
-                        className="manual-image-strip-item"
-                        src={toPreviewImageUrl(url)}
-                        alt={`Товар ${cardIndex + 1} изображение ${imageIndex + 1}`}
-                        key={`${row.id}-top-img-${imageIndex}`}
-                      />
-                    ))}
-                  </div>
-                ) : null}
                 <div className="manual-product-card-head">
                   <h3>
                     {row.sku.trim() ? `SKU ${row.sku.trim()}` : `SKU #${cardIndex + 1}`}
-                    <span className="manual-card-progress">{status.done}/{status.total}</span>
                   </h3>
                   <div className="manual-product-card-actions">
                     <button type="button" className="ghost-btn" onClick={() => toggleCard(row.id)}>
@@ -924,11 +883,140 @@ export default function ManualCreatorPage() {
                     </button>
                   </div>
                 </div>
+                <div className="manual-card-tabs">
+                  {([
+                    ["base", "База"],
+                    ["content", "Контент"],
+                    ["availability", "Availability"],
+                  ] as const).map(([section, label], index, all) => {
+                    const current = activeSectionByCard[row.id] ?? "base";
+                    const isActive = current === section;
+                    const isDone =
+                      section === "base"
+                        ? row.productReference.trim().length > 0 &&
+                          row.sku.trim().length > 0 &&
+                          row.ean.trim().length > 0 &&
+                          row.category.trim().length > 0
+                        : section === "content"
+                          ? row.description.trim().length > 0 || row.bulletPoints.trim().length > 0
+                          : section === "availability"
+                            ? row.shippingProfileID.trim().length > 0 && Number(row.quantity) > 0
+                            : row.imageUrls.some((item) => item.trim().length > 0);
+                    const tone = isDone ? "done" : isActive ? "active" : "idle";
+                    return (
+                      <div className="manual-section-step-wrap" key={`${row.id}-${section}`}>
+                        <button
+                          type="button"
+                          className={`manual-section-step ${tone}`.trim()}
+                          onClick={() => setActiveSectionByCard((prev) => ({ ...prev, [row.id]: section }))}
+                        >
+                          <span className="manual-section-step-dot" aria-hidden="true" />
+                          <span>{label}</span>
+                        </button>
+                        {index < all.length - 1 ? <span className="manual-section-step-edge" aria-hidden="true" /> : null}
+                      </div>
+                    );
+                  })}
+                </div>
 
+                <div className="manual-card-layout">
+                {!isCollapsed ? (
+                  <aside className="manual-card-media">
+                    <details className="manual-form-section" open>
+                      <summary><h4>Media First / Preview</h4></summary>
+                      <div className="manual-media-stage">
+                        {mainImage ? (
+                          <>
+                            <img
+                              className="manual-media-main-image"
+                              src={toPreviewImageUrl(mainImage)}
+                              alt={`Товар ${cardIndex + 1} основное изображение`}
+                            />
+                            {row.imageUrls.length > 1 ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="manual-media-nav prev"
+                                  onClick={() => moveImage(row.id, 0, "right")}
+                                  aria-label="Предыдущее изображение"
+                                >
+                                  ‹
+                                </button>
+                                <button
+                                  type="button"
+                                  className="manual-media-nav next"
+                                  onClick={() => moveImage(row.id, 0, "left")}
+                                  aria-label="Следующее изображение"
+                                >
+                                  ›
+                                </button>
+                              </>
+                            ) : null}
+                          </>
+                        ) : (
+                          <div className="manual-media-main-placeholder">Загрузите первое изображение</div>
+                        )}
+                      </div>
+
+                      <div className="manual-media-dots" aria-label="Индикатор изображений">
+                        {row.imageUrls.length === 0 ? (
+                          <p className="manual-collapsed-note">Пока нет изображений.</p>
+                        ) : (
+                          row.imageUrls.map((url, imageIndex) => (
+                            <button
+                              type="button"
+                              key={`${row.id}-dot-${imageIndex}`}
+                              className={`manual-media-dot ${imageIndex === 0 ? "active" : ""}`.trim()}
+                              onClick={() => setMainImage(row.id, imageIndex)}
+                              aria-label={`Сделать изображение ${imageIndex + 1} активным`}
+                            />
+                          ))
+                        )}
+                      </div>
+
+                      <div className="manual-form-grid">
+                        <label className="manual-field-full">
+                          Изображения товара *
+                          <label
+                            className={`manual-image-dropzone ${isUploadingImage ? "is-uploading" : ""}`}
+                            onDragOver={(event) => event.preventDefault()}
+                            onDrop={(event) => onImageDrop(row.id, event)}
+                          >
+                            <input
+                              type="file"
+                              accept="image/*"
+                              multiple
+                              onChange={(event) => onImageInputChange(row.id, event)}
+                            />
+                            <strong>{isUploadingImage ? "Загружаем изображения..." : "Перетащите изображения сюда"}</strong>
+                            <span>или нажмите и выберите один или несколько файлов</span>
+                          </label>
+                          {imageError ? <em className="manual-image-error">{imageError}</em> : null}
+                        </label>
+                        <label className="manual-field-full">
+                          Внешняя ссылка на изображение (опционально)
+                          <div className="manual-image-url-row">
+                            <input
+                              value={row.pendingImageUrl}
+                              onChange={(e) => updateRow(row.id, "pendingImageUrl", e.target.value)}
+                              placeholder="https://..."
+                            />
+                            <button type="button" className="secondary-btn" onClick={() => addImageUrl(row.id)}>
+                              Добавить
+                            </button>
+                          </div>
+                        </label>
+                      </div>
+                    </details>
+                  </aside>
+                ) : null}
+                <div className="manual-card-main">
                 {!isCollapsed ? (
                   <>
-                    <div className="manual-form-section">
-                      <h4>Идентификаторы</h4>
+                    {(activeSectionByCard[row.id] ?? "base") === "base" ? (
+                    <>
+                    <details className="manual-form-section" open>
+                      <summary><h4>Идентификаторы / Identity</h4></summary>
                       <div className="manual-form-grid">
                         <label>
                           Product Reference *
@@ -955,10 +1043,10 @@ export default function ManualCreatorPage() {
                           />
                         </label>
                       </div>
-                    </div>
+                    </details>
 
-                    <div className="manual-form-section">
-                      <h4>Каталог</h4>
+                    <details className="manual-form-section" open>
+                      <summary><h4>Каталог / Catalog</h4></summary>
                       <div className="manual-form-grid">
                         <label>
                           Категория *
@@ -994,10 +1082,13 @@ export default function ManualCreatorPage() {
                           />
                         </label>
                       </div>
-                    </div>
+                    </details>
+                    </>
+                    ) : null}
 
-                    <div className="manual-form-section">
-                      <h4>Контент</h4>
+                    {(activeSectionByCard[row.id] ?? "base") === "content" ? (
+                    <details className="manual-form-section" open>
+                      <summary><h4>Контент / Content</h4></summary>
                       <label className="manual-field-full">
                         Описание
                         <textarea
@@ -1034,25 +1125,19 @@ export default function ManualCreatorPage() {
                           <span>Attributes</span>
                         </div>
                         <div className="manual-attribute-add-row">
-                          {attributeOptions.length > 0 ? (
-                            <select
-                              value={row.pendingAttributeName}
-                              onChange={(e) => updateRow(row.id, "pendingAttributeName", e.target.value)}
-                            >
-                              {attributeOptions.map((item) => (
-                                <option key={item} value={item}>
-                                  {item}
-                                </option>
-                              ))}
-                            </select>
-                          ) : (
-                            <input
-                              value={row.pendingAttributeName}
-                              onChange={(e) => updateRow(row.id, "pendingAttributeName", e.target.value)}
-                              placeholder="Название атрибута"
-                            />
-                          )}
+                          <select
+                            value={row.pendingAttributeName}
+                            onChange={(e) => updateRow(row.id, "pendingAttributeName", e.target.value)}
+                          >
+                            <option value="">Выберите атрибут</option>
+                            {attributeOptions.map((item) => (
+                              <option key={item} value={item}>
+                                {item}
+                              </option>
+                            ))}
+                          </select>
                           <input
+                            className="manual-attribute-value-input"
                             value={row.pendingAttributeValue}
                             onChange={(e) => updateRow(row.id, "pendingAttributeValue", e.target.value)}
                             placeholder="Значение"
@@ -1072,11 +1157,21 @@ export default function ManualCreatorPage() {
                           ))}
                         </div>
                       </div>
-                    </div>
+                    </details>
+                    ) : null}
 
-                    <div className="manual-form-section">
-                      <h4>Availability</h4>
+                    {(activeSectionByCard[row.id] ?? "base") === "availability" ? (
+                    <details className="manual-form-section" open>
+                      <summary><h4>Availability</h4></summary>
                       <div className="manual-form-grid">
+                        <label>
+                          Цена (EUR) *
+                          <input
+                            value={row.price}
+                            onChange={(e) => updateRow(row.id, "price", e.target.value)}
+                            placeholder="99.99"
+                          />
+                        </label>
                         <label>
                           Quantity *
                           <input
@@ -1115,86 +1210,19 @@ export default function ManualCreatorPage() {
                           )}
                         </label>
                       </div>
-                    </div>
-
-                    <div className="manual-form-section">
-                      <h4>Цена и медиа</h4>
-                      <div className="manual-form-grid">
-                        <label>
-                          Цена (EUR) *
-                          <input
-                            value={row.price}
-                            onChange={(e) => updateRow(row.id, "price", e.target.value)}
-                            placeholder="99.99"
-                          />
-                        </label>
-                        <label className="manual-field-full">
-                          Изображения товара *
-                          <label
-                            className={`manual-image-dropzone ${isUploadingImage ? "is-uploading" : ""}`}
-                            onDragOver={(event) => event.preventDefault()}
-                            onDrop={(event) => onImageDrop(row.id, event)}
-                          >
-                            <input
-                              type="file"
-                              accept="image/*"
-                              multiple
-                              onChange={(event) => onImageInputChange(row.id, event)}
-                            />
-                            <strong>{isUploadingImage ? "Загружаем изображения..." : "Перетащите изображения сюда"}</strong>
-                            <span>или нажмите и выберите один или несколько файлов</span>
-                          </label>
-                          {imageError ? <em className="manual-image-error">{imageError}</em> : null}
-                        </label>
-                        <label className="manual-field-full">
-                          Внешняя ссылка на изображение (опционально)
-                          <div className="manual-image-url-row">
-                            <input
-                              value={row.pendingImageUrl}
-                              onChange={(e) => updateRow(row.id, "pendingImageUrl", e.target.value)}
-                              placeholder="https://..."
-                            />
-                            <button type="button" className="secondary-btn" onClick={() => addImageUrl(row.id)}>
-                              Добавить
-                            </button>
-                          </div>
-                        </label>
-                        <div className="manual-field-full manual-images-list">
-                          {row.imageUrls.length === 0 ? (
-                            <p className="manual-collapsed-note">Пока нет изображений.</p>
-                          ) : (
-                            row.imageUrls.map((url, imageIndex) => (
-                              <div className="manual-image-item" key={`${row.id}-img-${imageIndex}`}>
-                                <img
-                                  className="manual-image-preview"
-                                  src={toPreviewImageUrl(url)}
-                                  alt={`Товар ${cardIndex + 1} изображение ${imageIndex + 1}`}
-                                />
-                                <div className="manual-image-item-meta">
-                                  <span>{url}</span>
-                                  <button
-                                    type="button"
-                                    className="ghost-btn"
-                                    onClick={() => removeImageUrl(row.id, imageIndex)}
-                                  >
-                                    Удалить
-                                  </button>
-                                </div>
-                              </div>
-                            ))
-                          )}
-                        </div>
-                      </div>
-                    </div>
+                    </details>
+                    ) : null}
                   </>
                 ) : (
                   <p className="manual-collapsed-note">
                     Карточка свернута. Нажмите «Раскрыть», чтобы продолжить редактирование.
                   </p>
                 )}
+                </div>
+                </div>
               </section>
             );
-          })}
+            })}
         </div>
 
         {issues.length > 0 ? (
@@ -1205,6 +1233,19 @@ export default function ManualCreatorPage() {
               </li>
             ))}
           </ul>
+        ) : null}
+        {showConfirmModal ? (
+          <div className="manual-confirm-backdrop">
+            <div className="manual-confirm-modal">
+              <h3>Подтверждение / Confirm</h3>
+              <p>Будет отправлено карточек: <strong>{rows.length}</strong></p>
+              <p>Controller: <strong>{controller}</strong></p>
+              <div className="manual-product-card-actions">
+                <button className="ghost-btn" type="button" onClick={() => setShowConfirmModal(false)}>Отмена</button>
+                <button className="primary-btn" type="button" onClick={confirmAndCreate}>Отправить</button>
+              </div>
+            </div>
+          </div>
         ) : null}
       </div>
     </AppWorkspaceShell>

@@ -97,13 +97,17 @@ def _payload_to_local_row(payload: dict[str, Any]) -> dict[str, Any]:
             standard_price.get("amount") if isinstance(standard_price, dict) else None
         ),
         "recommended_retail_price": _as_float(
-            msrp.get("amount") if isinstance    (msrp, dict) else None
+            msrp.get("amount") if isinstance(msrp, dict) else None
         ),
         "sale_price": _as_float(
             sale_price.get("amount") if isinstance(sale_price, dict) else None
         ),
-        "sale_start": _as_datetime(sale.get("startDate") if isinstance(sale, dict) else None),
-        "sale_end": _as_datetime(sale.get("endDate") if isinstance(sale, dict) else None),
+        "sale_start": _as_datetime(
+            sale.get("startDate") if isinstance(sale, dict) else None
+        ),
+        "sale_end": _as_datetime(
+            sale.get("endDate") if isinstance(sale, dict) else None
+        ),
         "marketplace_status": "Created/Updated via OTTO API",
         "error_message": None,
         "otto_url": _as_text(
@@ -145,8 +149,10 @@ async def upsert_local_products_from_payloads(payloads: list[dict[str, Any]]) ->
             existing: Product | None = None
             if conditions:
                 existing = (
-                    await db.execute(select(Product).where(or_(*conditions)).limit(1))
-                ).scalars().first()
+                    (await db.execute(select(Product).where(or_(*conditions)).limit(1)))
+                    .scalars()
+                    .first()
+                )
 
             if existing is None:
                 db.add(Product(**row))

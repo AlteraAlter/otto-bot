@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 
 import { readApiErrorMessage } from "../lib/api";
 import { AuthShell } from "../ui/auth-shell";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 export default function EmployeeRegisterPage() {
   const router = useRouter();
@@ -151,7 +153,7 @@ export default function EmployeeRegisterPage() {
         <div className="form-stack">
           <label className="field">
             <span>Имя</span>
-            <input
+            <Input
               autoComplete="given-name"
               className="text-input"
               onChange={(event) => setName(event.target.value)}
@@ -163,7 +165,7 @@ export default function EmployeeRegisterPage() {
 
           <label className="field">
             <span>Фамилия</span>
-            <input
+            <Input
               autoComplete="family-name"
               className="text-input"
               onChange={(event) => setLastName(event.target.value)}
@@ -175,7 +177,7 @@ export default function EmployeeRegisterPage() {
 
           <label className="field">
             <span>Email</span>
-            <input
+            <Input
               autoComplete="email"
               className="text-input"
               readOnly
@@ -187,7 +189,7 @@ export default function EmployeeRegisterPage() {
 
           <label className="field">
             <span>Код приглашения</span>
-            <input
+            <Input
               className="text-input"
               readOnly
               required
@@ -198,7 +200,7 @@ export default function EmployeeRegisterPage() {
 
           <label className="field">
             <span>Пароль</span>
-            <input
+            <Input
               autoComplete="new-password"
               className="text-input"
               onChange={(event) => setPassword(event.target.value)}
@@ -210,7 +212,7 @@ export default function EmployeeRegisterPage() {
 
           <label className="field">
             <span>Повторите пароль</span>
-            <input
+            <Input
               autoComplete="new-password"
               className="text-input"
               onChange={(event) => setPasswordRepeat(event.target.value)}
@@ -227,9 +229,9 @@ export default function EmployeeRegisterPage() {
 
           {message ? <p className="helper-banner">{message}</p> : null}
 
-          <button className="primary-btn full" disabled={isSubmitting} type="submit">
+          <Button className="primary-btn full" disabled={isSubmitting} type="submit">
             {isSubmitting ? "Создаём аккаунт..." : "Зарегистрироваться"}
-          </button>
+          </Button>
 
           <p className="auth-footer">
             Уже есть аккаунт?{" "}

@@ -43,6 +43,9 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       FRONTEND_APP_URL: http://localhost
+      UPLOADS_DIR: /app/uploads
+    volumes:
+      - ./storage/uploads:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,6 +83,9 @@ services:
     environment:
       BACKEND_BASE_URL: http://backend:8000
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      UPLOADS_DIR: /app/uploads
+    volumes:
+      - ./storage/uploads:/app/uploads
     depends_on:
       - backend
     restart: unless-stopped
@@ -91,6 +97,7 @@ services:
       - "127.0.0.1:18080:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./storage/uploads:/var/www/uploads:ro
     depends_on:
       - frontend
       - backend

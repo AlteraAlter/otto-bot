@@ -21,6 +21,7 @@ from typing import Any
 import ijson
 
 from app.mapper import get_default_category_mapper
+
 try:
     from app.generate_seo_descriptions import (
         build_seo_description,

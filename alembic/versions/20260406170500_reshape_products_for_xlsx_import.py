@@ -11,7 +11,6 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
-
 # revision identifiers, used by Alembic.
 revision: str = "20260406170500"
 down_revision: Union[str, Sequence[str], None] = "20260403143506"
@@ -34,11 +33,15 @@ def upgrade() -> None:
     op.add_column("products", sa.Column("sale_price", sa.Float(), nullable=True))
     op.add_column("products", sa.Column("sale_start", sa.DateTime(), nullable=True))
     op.add_column("products", sa.Column("sale_end", sa.DateTime(), nullable=True))
-    op.add_column("products", sa.Column("marketplace_status", sa.String(), nullable=True))
+    op.add_column(
+        "products", sa.Column("marketplace_status", sa.String(), nullable=True)
+    )
     op.add_column("products", sa.Column("error_message", sa.String(), nullable=True))
     op.add_column("products", sa.Column("active_status", sa.String(), nullable=True))
     op.add_column("products", sa.Column("otto_url", sa.String(), nullable=True))
-    op.add_column("products", sa.Column("last_changed_at", sa.DateTime(), nullable=True))
+    op.add_column(
+        "products", sa.Column("last_changed_at", sa.DateTime(), nullable=True)
+    )
 
     op.alter_column("products", "sku", existing_type=sa.String(), nullable=True)
     op.alter_column(
@@ -58,7 +61,9 @@ def downgrade() -> None:
     """Downgrade schema."""
     op.add_column(
         "products",
-        sa.Column("bullet_points", sa.ARRAY(sa.String()), nullable=False, server_default="{}"),
+        sa.Column(
+            "bullet_points", sa.ARRAY(sa.String()), nullable=False, server_default="{}"
+        ),
     )
     op.add_column("products", sa.Column("description", sa.String(), nullable=True))
     op.add_column("products", sa.Column("productLine", sa.String(), nullable=True))
@@ -74,7 +79,9 @@ def downgrade() -> None:
     )
     op.add_column(
         "products",
-        sa.Column("account_source", sa.String(length=20), nullable=False, server_default="JV"),
+        sa.Column(
+            "account_source", sa.String(length=20), nullable=False, server_default="JV"
+        ),
     )
 
     op.alter_column("products", "price", existing_type=sa.Float(), nullable=False)

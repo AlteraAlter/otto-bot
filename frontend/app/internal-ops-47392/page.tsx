@@ -6,6 +6,8 @@ import { FormEvent, useState } from "react";
 import { useCurrentUser } from "../hooks/use-current-user";
 import { readApiErrorMessage } from "../lib/api";
 import { AuthShell } from "../ui/auth-shell";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 type Role = "SEO" | "EMPLOYEE";
 
@@ -110,7 +112,7 @@ export default function InternalOpsPage() {
         <div className="form-stack">
           <label className="field">
             <span>Имя</span>
-            <input
+            <Input
               className="text-input"
               onChange={(event) => setName(event.target.value)}
               required
@@ -121,7 +123,7 @@ export default function InternalOpsPage() {
 
           <label className="field">
             <span>Фамилия</span>
-            <input
+            <Input
               className="text-input"
               onChange={(event) => setLastName(event.target.value)}
               required
@@ -132,7 +134,7 @@ export default function InternalOpsPage() {
 
           <label className="field">
             <span>Email</span>
-            <input
+            <Input
               className="text-input"
               onChange={(event) => setEmail(event.target.value)}
               required
@@ -143,7 +145,7 @@ export default function InternalOpsPage() {
 
           <label className="field">
             <span>Пароль</span>
-            <input
+            <Input
               className="text-input"
               onChange={(event) => setPassword(event.target.value)}
               required
@@ -175,13 +177,13 @@ export default function InternalOpsPage() {
             </p>
           ) : null}
 
-          <button
+          <Button
             className="primary-btn full"
             disabled={!isSeoUser || isSubmitting}
             type="submit"
           >
             {isSubmitting ? "Создаём пользователя..." : "Создать пользователя"}
-          </button>
+          </Button>
         </div>
       </form>
     </AuthShell>

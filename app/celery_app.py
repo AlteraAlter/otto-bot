@@ -4,7 +4,6 @@ from celery import Celery
 
 from app.core.configs import settings
 
-
 celery_app = Celery(
     "otto_bot",
     broker=settings.celery_broker_url,

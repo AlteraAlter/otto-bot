@@ -115,7 +115,11 @@ def _normalize_description_rows(
             normalized_bullet_point = (
                 _normalize_text(bullet_point)
                 if isinstance(bullet_point, str)
-                else _normalize_text(str(bullet_point)) if bullet_point is not None else None
+                else (
+                    _normalize_text(str(bullet_point))
+                    if bullet_point is not None
+                    else None
+                )
             )
             if normalized_bullet_point:
                 rows.append(
@@ -176,7 +180,9 @@ async def _replace_product_description_rows(
     if current_values == next_values:
         return False
 
-    await db.execute(delete(ProductAttributes).where(ProductAttributes.product_sku == sku))
+    await db.execute(
+        delete(ProductAttributes).where(ProductAttributes.product_sku == sku)
+    )
     if description_rows:
         await db.execute(insert(ProductAttributes).values(description_rows))
     return True
@@ -232,7 +238,9 @@ async def sync_product_media_assets(
             continue
 
         try:
-            status_code, otto_product = await product_service.get_product_with_status(product.sku)
+            status_code, otto_product = await product_service.get_product_with_status(
+                product.sku
+            )
             if print_status_codes:
                 print(
                     f"[sync_product_media_assets] sku={product.sku} status={status_code}",

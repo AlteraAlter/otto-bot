@@ -88,7 +88,9 @@ async def list_invitations(
     return await auth_service.list_invitations(invited_by_user_id=current_user.id)
 
 
-@router.delete("/invitations/{invitation_id}", response_model=UserInvitationDeleteResponseDTO)
+@router.delete(
+    "/invitations/{invitation_id}", response_model=UserInvitationDeleteResponseDTO
+)
 async def delete_invitation(
     invitation_id: int,
     current_user: UserDTO = Depends(require_role([RoleEnum.SEO])),

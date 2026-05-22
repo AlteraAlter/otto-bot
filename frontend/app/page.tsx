@@ -55,6 +55,7 @@ export default function Home() {
     { href: "/manual-creator", label: "Ручное создание", shortLabel: "R", active: false },
     ...(currentUser?.role === "SEO"
       ? [
+          { href: "/tasks", label: "Задачи", shortLabel: "T", active: false },
           { href: "/imports", label: "Data Operations", shortLabel: "D", active: false },
           { href: "/invitations", label: "Приглашения", shortLabel: "П", active: false },
         ]

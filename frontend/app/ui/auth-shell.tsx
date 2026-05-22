@@ -1,10 +1,12 @@
 import { ReactNode } from "react";
+import { Card } from "@/components/ui/card";
 
 type AuthShellProps = {
   title: string;
   description: string;
   sideContent?: ReactNode;
   children: ReactNode;
+  compact?: boolean;
 };
 
 export function AuthShell({
@@ -12,10 +14,24 @@ export function AuthShell({
   description,
   sideContent,
   children,
+  compact = false,
 }: AuthShellProps) {
+  if (compact) {
+    return (
+      <main className="login-page">
+        <Card className="login-shell login-shell-compact">
+          <div className="login-compact-head">
+            <p className="brand">OTTO Контроль</p>
+          </div>
+          <div className="login-card">{children}</div>
+        </Card>
+      </main>
+    );
+  }
+
   return (
     <main className="login-page">
-      <section className="login-shell">
+      <Card className="login-shell">
         <div className="login-hero">
           <p className="brand">OTTO Контроль</p>
           <p className="brand-subtitle">Product workspace</p>
@@ -25,7 +41,7 @@ export function AuthShell({
         </div>
 
         <div className="login-card">{children}</div>
-      </section>
+      </Card>
     </main>
   );
 }

@@ -24,7 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--sku", help="Only sync one SKU.")
-    parser.add_argument("--limit", type=int, help="Maximum number of local products to scan.")
+    parser.add_argument(
+        "--limit", type=int, help="Maximum number of local products to scan."
+    )
     parser.add_argument(
         "--only-missing",
         action="store_true",

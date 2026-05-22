@@ -6,6 +6,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 import { readApiErrorMessage } from "../lib/api";
 import { AuthShell } from "../ui/auth-shell";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 function LoginPageContent() {
   const router = useRouter();
@@ -59,24 +61,15 @@ function LoginPageContent() {
 
   return (
     <AuthShell
-      title="Вход в рабочее пространство OTTO"
-      description="Спокойный, прямой вход без лишних шагов. Авторизуйтесь, чтобы открыть каталог, создание товаров и служебные инструменты."
-      sideContent={
-        <div className="auth-note">
-          <p>Что доступно после входа:</p>
-          <ul className="auth-list">
-            <li>каталог товаров и массовые действия</li>
-            <li>создание новых товаров</li>
-            <li>приглашения сотрудников для SEO</li>
-          </ul>
-        </div>
-      }
+      title=""
+      description=""
+      compact
     >
       <form onSubmit={handleSubmit}>
         <div className="form-stack">
           <label className="field">
             <span>Email</span>
-            <input
+            <Input
               autoComplete="email"
               className="text-input"
               onChange={(event) => setEmail(event.target.value)}
@@ -88,7 +81,7 @@ function LoginPageContent() {
 
           <label className="field">
             <span>Пароль</span>
-            <input
+            <Input
               autoComplete="current-password"
               className="text-input"
               onChange={(event) => setPassword(event.target.value)}
@@ -100,9 +93,9 @@ function LoginPageContent() {
 
           {message ? <p className="helper-banner">{message}</p> : null}
 
-          <button className="primary-btn full" disabled={isSubmitting} type="submit">
+          <Button className="primary-btn full" disabled={isSubmitting} type="submit">
             {isSubmitting ? "Входим..." : "Войти"}
-          </button>
+          </Button>
         </div>
 
         <p className="auth-footer">
@@ -121,8 +114,9 @@ export default function LoginPage() {
     <Suspense
       fallback={
         <AuthShell
-          title="Вход в рабочее пространство OTTO"
-          description="Подготавливаем форму входа."
+          title=""
+          description=""
+          compact
         >
           <p className="helper-banner info">Пожалуйста, подождите...</p>
         </AuthShell>

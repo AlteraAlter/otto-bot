@@ -64,7 +64,9 @@ class UserAuth:
 
     def _build_invitation_link(self, *, email: str, token: str) -> str:
         base = settings.frontend_app_url.rstrip("/")
-        return f"{base}/employee-register?{urlencode({'email': email, 'invite': token})}"
+        return (
+            f"{base}/employee-register?{urlencode({'email': email, 'invite': token})}"
+        )
 
     def _send_employee_invitation_email(
         self,
@@ -105,7 +107,9 @@ class UserAuth:
         )
 
         try:
-            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20) as smtp:
+            with smtplib.SMTP(
+                settings.smtp_host, settings.smtp_port, timeout=20
+            ) as smtp:
                 if settings.smtp_use_tls:
                     smtp.starttls()
                 smtp.login(settings.smtp_username, settings.smtp_password)
@@ -163,7 +167,7 @@ class UserAuth:
         return f"{header_segment}.{payload_segment}.{signature}"
 
     def decode_token(self, token: str) -> dict[str, Any]:
-        
+
         credentials_exception = HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
@@ -234,7 +238,9 @@ class UserAuth:
         role: RoleEnum,
     ) -> UserDTO:
         normalized_email = email.lower().strip()
-        existing_user = await self.user_repository.select_user_by_email(normalized_email)
+        existing_user = await self.user_repository.select_user_by_email(
+            normalized_email
+        )
         print(existing_user)
         if existing_user:
             raise HTTPException(
@@ -248,7 +254,9 @@ class UserAuth:
             email=normalized_email,
             password=self.hash_password(password),
         )
-        assigned_role = await self.user_repository.assign_role(user_id=user.id, role=role)
+        assigned_role = await self.user_repository.assign_role(
+            user_id=user.id, role=role
+        )
 
         return UserDTO.model_validate(
             {
@@ -272,7 +280,9 @@ class UserAuth:
             expires_in=int(access_token_expires.total_seconds()),
         )
 
-    def _map_invitation_status(self, *, accepted_at: datetime | None, expires_at: datetime) -> str:
+    def _map_invitation_status(
+        self, *, accepted_at: datetime | None, expires_at: datetime
+    ) -> str:
         now = datetime.now(timezone.utc)
         if accepted_at is not None:
             return "accepted"
@@ -353,8 +363,12 @@ class UserAuth:
             expires_at=invitation.expires_at,
         )
 
-    async def list_invitations(self, *, invited_by_user_id: int) -> UserInvitationListResponseDTO:
-        invitations = await self.user_repository.list_invitations(invited_by=invited_by_user_id)
+    async def list_invitations(
+        self, *, invited_by_user_id: int
+    ) -> UserInvitationListResponseDTO:
+        invitations = await self.user_repository.list_invitations(
+            invited_by=invited_by_user_id
+        )
         return UserInvitationListResponseDTO(
             success=True,
             items=[
@@ -396,10 +410,14 @@ class UserAuth:
         *,
         invited_by_user_id: int,
     ) -> UserInvitationDeleteResponseDTO:
-        deleted_count = await self.user_repository.delete_pending_invitations_for_inviter(
-            invited_by=invited_by_user_id,
+        deleted_count = (
+            await self.user_repository.delete_pending_invitations_for_inviter(
+                invited_by=invited_by_user_id,
+            )
         )
-        return UserInvitationDeleteResponseDTO(success=True, deleted_count=deleted_count)
+        return UserInvitationDeleteResponseDTO(
+            success=True, deleted_count=deleted_count
+        )
 
     async def admin_create_user(
         self, payload: AdminUserCreateDTO
