@@ -182,7 +182,7 @@ class ProductService:
             https://www.otto.de/p/jvmoebel-weinschrank-weinschrank-mit-kuehlschrankfunktion-und-flaschenregal-1-st-made-in-europe-S0CFH0N8/
         """
         # Reading a file
-        
+
         date = datetime.now().strftime("%d-%m-%Y")
 
         util = UtilityService()

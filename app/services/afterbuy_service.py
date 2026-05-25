@@ -4,16 +4,21 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
-
+from app.clients.afterbuy_client import (
+    AfterbuyClient,
+    FactoriesFetchResponse,
+)
 from app.core.afterbuy_auth import AfterbuyAuth
+
+# Schemas
 
 
 class AfterbuyService:
-    """Service that fetches Afterbuy product pages using session-cookie auth."""
+    """Service that orchestrates Afterbuy login and product-page retrieval."""
 
-    def __init__(self, auth: AfterbuyAuth):
+    def __init__(self, auth: AfterbuyAuth, client: AfterbuyClient):
         self.auth = auth
+        self.client = client
 
     async def fetch_products_page(
         self,
@@ -23,20 +28,30 @@ class AfterbuyService:
         offset: int,
         limit: int,
     ) -> Any:
-        """Fetch one raw page from `/api/products` via authenticated session cookie."""
-        async with httpx.AsyncClient(timeout=self.auth.timeout, follow_redirects=True) as client:
-            session = await self.auth.login_and_get_session(client)
-            response = await client.get(
-                f"{self.auth.base_url}/api/products",
-                params={
-                    "account": account,
-                    "dataset": dataset,
-                    "offset": offset,
-                    "limit": limit,
-                },
-                cookies={"session": session},
-            )
-            response.raise_for_status()
-            return response.json()
+        """Фетчит продукты из Афтеркула"""
         
-    async def fetch_by_factory(self, factory, )
+        session = await self.client.login(
+            username=self.auth.username,
+            password=self.auth.password,
+        )
+        return await self.client.get_products_page(
+            session=session,
+            account=account,
+            dataset=dataset,
+            offset=offset,
+            limit=limit,
+        )
+
+    
+    async def fetch_factory(self) -> FactoriesFetchResponse:
+        """Фетчит фабрики"""
+        session = await self.client.login(
+            username=self.auth.username,
+            password=self.auth.password,
+        )
+        
+        response = await self.client.fetch_factory(session)
+        filtered_result = [factory for factory in response.factory if factory.items_count > 0]
+
+        return FactoriesFetchResponse(factory = filtered_result)
+        

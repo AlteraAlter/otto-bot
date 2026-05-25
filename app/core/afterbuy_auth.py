@@ -33,5 +33,7 @@ class AfterbuyAuth:
         response.raise_for_status()
         session = response.cookies.get("session") or client.cookies.get("session")
         if not session:
-            raise RuntimeError("Aftercool login succeeded but `session` cookie was not found.")
+            raise RuntimeError(
+                "Aftercool login succeeded but `session` cookie was not found."
+            )
         return session

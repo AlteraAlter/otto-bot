@@ -10,6 +10,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.clients.afterbuy_client import AfterbuyClient
 from app.clients.otto_client import OttoClient
 from app.core.configs import settings
 from app.core.otto_auth import OttoAuth
@@ -73,6 +74,15 @@ def get_afterbuy_auth() -> AfterbuyAuth:
     )
 
 
+@lru_cache
+def get_afterbuy_client() -> AfterbuyClient:
+    """Create a cached Afterbuy HTTP client instance."""
+    return AfterbuyClient(
+        base_url=settings.afterbuy_base_url,
+        timeout=settings.afterbuy_timeout_seconds,
+    )
+
+
 def get_user_repository(
     db: AsyncSession = Depends(get_db),
 ) -> UserRepository:
@@ -120,7 +130,7 @@ def require_role(allowed_roles: list[str] | list[RoleEnum]):
 @lru_cache
 def get_afterbuy_service() -> AfterbuyService:
     """Create a cached Afterbuy service wrapper."""
-    return AfterbuyService(auth=get_afterbuy_auth())
+    return AfterbuyService(auth=get_afterbuy_auth(), client=get_afterbuy_client())
 
 
 def get_afterbuy_login() -> AfterbuyService:
