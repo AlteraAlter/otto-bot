@@ -1,16 +1,22 @@
 """Afterbuy service with request-level business logic."""
 
 from __future__ import annotations
+from datetime import datetime
 
 from typing import Any
 from xmlrpc.client import boolean
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Scheme
 from app.clients.afterbuy_client import (
     AfterbuyClient,
     FactoriesFetchResponse,
 )
+
+# Models
+from app.models.factories import Factories
+
 from app.core.afterbuy_auth import AfterbuyAuth
 
 # Schemas
@@ -47,7 +53,7 @@ class AfterbuyService:
 
     
     async def fetch_factory(self, save: bool, db: AsyncSession) -> FactoriesFetchResponse:
-        """Фетчит фабрики"""
+        """Фетчит фабрики и сейвит в бд"""
         session = await self.client.login(
             username=self.auth.username,
             password=self.auth.password,
@@ -56,5 +62,18 @@ class AfterbuyService:
         response = await self.client.fetch_factory(session)
         filtered_result = [factory for factory in response.factory if factory.items_count > 0]
         if save:
-            pass
+            factory_orm_object = [
+                Factories(
+                    factory_id=item.id,
+                    name=item.name,
+                    kind=item.kind.value,
+                    account=item.account,
+                    items_count=item.items_count,
+                    last_changed_at=datetime.now(),
+                )
+                for item in filtered_result
+            ] 
+            db.add_all(factory_orm_object)
+            await db.commit()
+            
         return FactoriesFetchResponse(factory = filtered_result)
