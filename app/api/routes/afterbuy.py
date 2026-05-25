@@ -13,6 +13,7 @@ from app.services.afterbuy_service import AfterbuyService
 from app.schemas.enums import RoleEnum, Controller
 
 from app.schemas.afterbuy_products_response import (
+    ProductFetchResponse,
     FactoriesFetchResponse,
 )
 
@@ -35,12 +36,21 @@ async def fetch_from_afterbuy_raw(
     )
 
 
-@router.get("/fetch-by-factory-id")
-async def get_by_factory(
+@router.get("/load-factories-by-controller", response_model=FactoriesFetchResponse)
+async def load_factories_by_controller(
+    afterbuy: AfterbuyService = Depends(get_afterbuy_login),
+    session: AsyncSession = Depends(get_db),
+    controller: Controller = Controller.JV
+):
+    return await afterbuy.get_factory(controller, session)
+
+@router.get("/fetch-by-factory-id", response_model=ProductFetchResponse)
+async def get_by_factory_id(
     afterbuy: AfterbuyService = Depends(get_afterbuy_login),
     controller: Controller = Controller.JV,
+    factory_id: Optional[int] = None
 ):
-    pass
+    return await afterbuy.get_products_by_factory_id(controller, factory_id)
 
 @router.get("/fetch-factory", response_model=FactoriesFetchResponse)
 async def get_factory(

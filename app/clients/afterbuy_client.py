@@ -8,6 +8,8 @@ import httpx
 
 # Schemas
 from app.schemas.afterbuy_products_response import (
+    ProductBase,
+    ProductFetchResponse,
     FactoriesFetchResponse,
 )
 
@@ -90,4 +92,30 @@ class AfterbuyClient:
         response.raise_for_status()
         result = response.json()
         return FactoriesFetchResponse(factory = result.get("items"))
+    
+    
+    async def get_products_by_factory_id(self, session, controller, factory_id):
+        """Получает фильтрованные данные по контроллеру и фабрике"""
+        
+        response = await self.send_request(
+            "GET",
+            "/api/products",
+            params={
+                "account": controller.value,
+                "dataset": "lister",
+                "factory_id": factory_id,
+                "include_row": 1,
+                "limit": 0
+            },
+            cookies={"session": session}
+        )
+        
+        response.raise_for_status()
+        
+        result = response.json().get("items", None)
+        raw_datas = [item.get("row", None) for item in result]
+        products = [ProductBase.model_validate(data) for data in raw_datas if data]
+        
+
+        return ProductFetchResponse(products=products)
         

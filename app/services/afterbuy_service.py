@@ -3,10 +3,11 @@
 from __future__ import annotations
 from datetime import datetime
 
-from typing import Any
+from typing import Any, Optional
 from xmlrpc.client import boolean
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 # Scheme
 from app.clients.afterbuy_client import (
@@ -18,9 +19,12 @@ from app.clients.afterbuy_client import (
 from app.models.factories import Factories
 
 from app.core.afterbuy_auth import AfterbuyAuth
+from app.schemas.enums import Controller
 
 # Schemas
-
+from app.schemas.afterbuy_products_response import (
+    ProductFetchResponse,
+)
 
 class AfterbuyService:
     """Service that orchestrates Afterbuy login and product-page retrieval."""
@@ -77,3 +81,21 @@ class AfterbuyService:
             await db.commit()
             
         return FactoriesFetchResponse(factory = filtered_result)
+
+
+    async def get_factory(self, controller: Controller, session: AsyncSession):
+        result = await session.execute(
+            select(Factories).where(
+                Factories.account == controller.value.upper()
+            )
+        )
+        
+        factories = result.scalars().all()
+        return factories
+    
+    async def get_products_by_factory_id(self, controller: Controller, factory_id: Optional[int]) -> ProductFetchResponse:
+        session = await self.client.login(
+            username=self.auth.username,
+            password=self.auth.password,
+        )
+        return await self.client.get_products_by_factory_id(session, controller, factory_id)

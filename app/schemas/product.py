@@ -32,14 +32,14 @@ class ProductDescription(BaseModel):
     bulletPoints: List[str]
     attributes: List[Attribute]
     description: Optional[str] = None
-    productUrl: Optional[HttpUrl] = None
+    productUrl: Optional[str] = None
 
 
 class MediaAsset(BaseModel):
     """Image or media resource attached to a product."""
 
     type: str = "IMAGE"
-    location: HttpUrl
+    filename: str
 
 
 class MaxOrderQuantity(BaseModel):
