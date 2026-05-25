@@ -3,12 +3,14 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_afterbuy_login, require_role
+from app.dependencies import get_afterbuy_login
+from app.database import get_db
+
 from app.services.afterbuy_service import AfterbuyService
 
 from app.schemas.enums import RoleEnum, Controller
-from app.schemas.afterbuy_enums import FactoryEnum
 
 from app.schemas.afterbuy_products_response import (
     FactoriesFetchResponse,
@@ -37,14 +39,15 @@ async def fetch_from_afterbuy_raw(
 async def get_by_factory(
     afterbuy: AfterbuyService = Depends(get_afterbuy_login),
     controller: Controller = Controller.JV,
-    factory: Optional[FactoryEnum] = None,
 ):
     pass
 
 @router.get("/fetch-factory", response_model=FactoriesFetchResponse)
 async def get_factory(
+    save: bool = False,
+    db: AsyncSession = Depends(get_db),
     afterbuy: AfterbuyService = Depends(get_afterbuy_login)
 ):
-    return await afterbuy.fetch_factory()
+    return await afterbuy.fetch_factory(save, db)
     
 

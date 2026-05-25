@@ -1,7 +1,7 @@
 """add product creation tasks
 
 Revision ID: 20260519133000
-Revises: 20260407153000_add_media_asset_links_to_products
+Revises: 20260409113000
 Create Date: 2026-05-19 13:30:00.000000
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision = "20260519133000"
-down_revision = "20260407153000_add_media_asset_links_to_products"
+down_revision = "20260409113000"
 branch_labels = None
 depends_on = None
 

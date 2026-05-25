@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from typing import Any
+from xmlrpc.client import boolean
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.afterbuy_client import (
     AfterbuyClient,
@@ -43,7 +46,7 @@ class AfterbuyService:
         )
 
     
-    async def fetch_factory(self) -> FactoriesFetchResponse:
+    async def fetch_factory(self, save: bool, db: AsyncSession) -> FactoriesFetchResponse:
         """Фетчит фабрики"""
         session = await self.client.login(
             username=self.auth.username,
@@ -52,6 +55,6 @@ class AfterbuyService:
         
         response = await self.client.fetch_factory(session)
         filtered_result = [factory for factory in response.factory if factory.items_count > 0]
-
+        if save:
+            pass
         return FactoriesFetchResponse(factory = filtered_result)
-        

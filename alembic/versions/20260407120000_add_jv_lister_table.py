@@ -52,5 +52,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema."""
-    op.drop_index(op.f("ix_jv_lister_account"), table_name="jv_lister")
+    op.drop_index(op.f("ix_jv_lister_account"), table_name="jv_lister", if_exists=True)
     op.drop_table("jv_lister")

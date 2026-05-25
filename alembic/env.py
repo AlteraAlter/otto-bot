@@ -16,6 +16,7 @@ import app.models.jv_lister
 import app.models.user_invitations
 import app.models.users
 import app.models.user_roles
+import app.models.factories
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
