@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { SESSION_COOKIE_NAME } from "./lib/auth";
 
-const PUBLIC_PATHS = new Set(["/login", "/register", "/employee-register"]);
+const PUBLIC_PATHS = new Set(["/login", "/register"]);
 
 export function proxy(request: NextRequest) {
   const { pathname, searchParams } = request.nextUrl;
@@ -33,8 +33,7 @@ export function proxy(request: NextRequest) {
     hasSession &&
     PUBLIC_PATHS.has(pathname) &&
     !(pathname === "/login" && hasExpiredParam) &&
-    !(pathname === "/register" && hasInviteParams) &&
-    !(pathname === "/employee-register" && hasInviteParams)
+    !(pathname === "/register" && hasInviteParams)
   ) {
     const url = new URL("/", request.url);
     return NextResponse.redirect(url);

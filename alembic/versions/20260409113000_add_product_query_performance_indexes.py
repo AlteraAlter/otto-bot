@@ -10,7 +10,6 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
-
 revision: str = "20260409113000"
 down_revision: Union[str, Sequence[str], None] = "20260407153000"
 branch_labels: Union[str, Sequence[str], None] = None
@@ -24,32 +23,24 @@ def _exec_autocommit(sql: str) -> None:
 
 
 def upgrade() -> None:
-    _exec_autocommit(
-        """
+    _exec_autocommit("""
         CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_product_descriptions_product_sku_name
         ON product_descriptions (product_sku, name)
-        """
-    )
-    _exec_autocommit(
-        """
+        """)
+    _exec_autocommit("""
         CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_product_descriptions_non_empty_description_sku
         ON product_descriptions (product_sku)
         WHERE name = 'description' AND length(trim(value)) > 0
-        """
-    )
+        """)
 
-    _exec_autocommit(
-        """
+    _exec_autocommit("""
         CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_products_product_category
         ON products (product_category)
-        """
-    )
-    _exec_autocommit(
-        """
+        """)
+    _exec_autocommit("""
         CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_products_product_category_normalized
         ON products ((lower(trim(product_category))))
-        """
-    )
+        """)
 
     bind = op.get_bind()
     pg_trgm_available = bool(
@@ -75,12 +66,10 @@ def upgrade() -> None:
         ]
 
         for column in trigram_columns:
-            _exec_autocommit(
-                f"""
+            _exec_autocommit(f"""
                 CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_products_{column}_trgm
                 ON products USING gin ({column} gin_trgm_ops)
-                """
-            )
+                """)
 
 
 def downgrade() -> None:
@@ -103,9 +92,7 @@ def downgrade() -> None:
     _exec_autocommit(
         'DROP INDEX CONCURRENTLY IF EXISTS "ix_products_product_category_normalized"'
     )
-    _exec_autocommit(
-        'DROP INDEX CONCURRENTLY IF EXISTS "ix_products_product_category"'
-    )
+    _exec_autocommit('DROP INDEX CONCURRENTLY IF EXISTS "ix_products_product_category"')
     _exec_autocommit(
         'DROP INDEX CONCURRENTLY IF EXISTS "ix_product_descriptions_non_empty_description_sku"'
     )

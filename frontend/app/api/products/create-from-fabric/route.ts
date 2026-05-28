@@ -1,3 +1,5 @@
+import { NextResponse } from "next/server";
+
 import {
   getAuthorizedHeaders,
   toClientResponse,
@@ -6,7 +8,7 @@ import {
 
 export async function POST(request: Request) {
   const body = await request.text();
-  const response = await fetch(withBackendPath("/v1/auth/invite-employee"), {
+  const response = await fetch(withBackendPath("/v1/products/tasks/create-from-factory"), {
     method: "POST",
     headers: await getAuthorizedHeaders({
       "content-type": "application/json",

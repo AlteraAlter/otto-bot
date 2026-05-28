@@ -3,26 +3,17 @@ import hashlib
 import hmac
 import json
 import secrets
-import smtplib
 from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
 from typing import Any
-from urllib.parse import urlencode
 
 from fastapi import HTTPException, status
 
-from app.core.configs import settings
 from app.schemas.enums import RoleEnum
 from app.repository.user_repository import UserRepository
 from app.schemas.tokenDTO import TokenDTO
 from app.schemas.userDTO import (
     AdminUserCreateDTO,
     AdminUserCreateResponseDTO,
-    EmployeeInviteRequestDTO,
-    EmployeeInviteResponseDTO,
-    UserInvitationDTO,
-    UserInvitationListResponseDTO,
-    UserInvitationDeleteResponseDTO,
     UserDTO,
     UserLoginDTO,
     UserRegisterDTO,
@@ -58,67 +49,6 @@ class UserAuth:
             signing_input,
             hashlib.sha256,
         ).digest()
-
-    def _hash_invitation_token(self, token: str) -> str:
-        return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-    def _build_invitation_link(self, *, email: str, token: str) -> str:
-        base = settings.frontend_app_url.rstrip("/")
-        return (
-            f"{base}/employee-register?{urlencode({'email': email, 'invite': token})}"
-        )
-
-    def _send_employee_invitation_email(
-        self,
-        *,
-        recipient_email: str,
-        invitation_link: str,
-        invitation_code: str,
-        expires_at: datetime,
-    ) -> None:
-        if (
-            not settings.smtp_host
-            or not settings.smtp_username
-            or not settings.smtp_password
-            or not settings.smtp_sender_email
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="SMTP settings are not configured for invitation emails",
-            )
-
-        message = EmailMessage()
-        message["Subject"] = "Your OTTO employee invitation"
-        message["From"] = settings.smtp_sender_email
-        message["To"] = recipient_email
-        message.set_content(
-            "\n".join(
-                [
-                    "You have been invited to create an OTTO employee account.",
-                    "",
-                    f"Complete registration here: {invitation_link}",
-                    f"Invitation code: {invitation_code}",
-                    "If the link does not open correctly, copy the code and paste it into the registration form.",
-                    f"Invitation expires at: {expires_at.isoformat()}",
-                    "",
-                    "If you did not expect this email, you can ignore it.",
-                ]
-            )
-        )
-
-        try:
-            with smtplib.SMTP(
-                settings.smtp_host, settings.smtp_port, timeout=20
-            ) as smtp:
-                if settings.smtp_use_tls:
-                    smtp.starttls()
-                smtp.login(settings.smtp_username, settings.smtp_password)
-                smtp.send_message(message)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Unable to send invitation email: {exc}",
-            ) from exc
 
     def hash_password(self, password: str) -> str:
         salt = secrets.token_bytes(16)
@@ -280,144 +210,15 @@ class UserAuth:
             expires_in=int(access_token_expires.total_seconds()),
         )
 
-    def _map_invitation_status(
-        self, *, accepted_at: datetime | None, expires_at: datetime
-    ) -> str:
-        now = datetime.now(timezone.utc)
-        if accepted_at is not None:
-            return "accepted"
-        if expires_at <= now:
-            return "expired"
-        return "pending"
-
     async def register_user(self, payload: UserRegisterDTO) -> TokenDTO:
-        invitation = await self.user_repository.select_active_invitation_by_token_hash(
-            self._hash_invitation_token(payload.invite_token)
-        )
-        if not invitation:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Invitation is invalid, expired, or already used",
-            )
-        if invitation.email.lower().strip() != payload.email.lower().strip():
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Invitation email does not match the registration email",
-            )
-
         user = await self._create_user_account(
             name=payload.name,
             last_name=payload.last_name,
             email=payload.email,
             password=payload.password,
-            role=invitation.role,
+            role=RoleEnum.EMPLOYEE,
         )
-        await self.user_repository.mark_invitation_accepted(invitation.id)
         return self._issue_token_for_user(user)
-
-    async def invite_employee(
-        self,
-        payload: EmployeeInviteRequestDTO,
-        *,
-        invited_by_user_id: int,
-    ) -> EmployeeInviteResponseDTO:
-        existing_user = await self.user_repository.select_user_by_email(payload.email)
-        if existing_user:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="A user with this email already exists",
-            )
-
-        await self.user_repository.delete_pending_invitations_for_email(
-            email=payload.email,
-            role=payload.role,
-        )
-
-        raw_token = secrets.token_urlsafe(32)
-        expires_at = datetime.now(timezone.utc) + timedelta(
-            hours=settings.employee_invitation_expire_hours
-        )
-        invitation = await self.user_repository.create_invitation(
-            email=payload.email,
-            role=payload.role,
-            token_hash=self._hash_invitation_token(raw_token),
-            invited_by=invited_by_user_id,
-            expires_at=expires_at,
-        )
-        invitation_link = self._build_invitation_link(
-            email=payload.email,
-            token=raw_token,
-        )
-        self._send_employee_invitation_email(
-            recipient_email=payload.email,
-            invitation_link=invitation_link,
-            invitation_code=raw_token,
-            expires_at=expires_at,
-        )
-
-        return EmployeeInviteResponseDTO(
-            success=True,
-            id=invitation.id,
-            email=invitation.email,
-            role=invitation.role,
-            expires_at=invitation.expires_at,
-        )
-
-    async def list_invitations(
-        self, *, invited_by_user_id: int
-    ) -> UserInvitationListResponseDTO:
-        invitations = await self.user_repository.list_invitations(
-            invited_by=invited_by_user_id
-        )
-        return UserInvitationListResponseDTO(
-            success=True,
-            items=[
-                UserInvitationDTO(
-                    id=invitation.id,
-                    email=invitation.email,
-                    role=invitation.role,
-                    status=self._map_invitation_status(
-                        accepted_at=invitation.accepted_at,
-                        expires_at=invitation.expires_at,
-                    ),
-                    created_at=invitation.created_at,
-                    expires_at=invitation.expires_at,
-                    accepted_at=invitation.accepted_at,
-                )
-                for invitation in invitations
-            ],
-        )
-
-    async def delete_invitation(
-        self,
-        *,
-        invitation_id: int,
-        invited_by_user_id: int,
-    ) -> UserInvitationDeleteResponseDTO:
-        deleted = await self.user_repository.delete_invitation_by_id(
-            invitation_id=invitation_id,
-            invited_by=invited_by_user_id,
-        )
-        if not deleted:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Invitation not found",
-            )
-        return UserInvitationDeleteResponseDTO(success=True, deleted_count=1)
-
-    async def delete_pending_invitations(
-        self,
-        *,
-        invited_by_user_id: int,
-    ) -> UserInvitationDeleteResponseDTO:
-        deleted_count = (
-            await self.user_repository.delete_pending_invitations_for_inviter(
-                invited_by=invited_by_user_id,
-            )
-        )
-        return UserInvitationDeleteResponseDTO(
-            success=True, deleted_count=deleted_count
-        )
 
     async def admin_create_user(
         self, payload: AdminUserCreateDTO

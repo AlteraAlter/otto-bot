@@ -40,24 +40,24 @@ async def fetch_from_afterbuy_raw(
 async def load_factories_by_controller(
     afterbuy: AfterbuyService = Depends(get_afterbuy_login),
     session: AsyncSession = Depends(get_db),
-    controller: Controller = Controller.JV
+    controller: Controller = Controller.JV,
 ):
     return await afterbuy.get_factory(controller, session)
+
 
 @router.get("/fetch-by-factory-id", response_model=ProductFetchResponse)
 async def get_by_factory_id(
     afterbuy: AfterbuyService = Depends(get_afterbuy_login),
     controller: Controller = Controller.JV,
-    factory_id: Optional[int] = None
+    factory_id: Optional[int] = None,
 ):
     return await afterbuy.get_products_by_factory_id(controller, factory_id)
+
 
 @router.get("/fetch-factory", response_model=FactoriesFetchResponse)
 async def get_factory(
     save: bool = False,
     db: AsyncSession = Depends(get_db),
-    afterbuy: AfterbuyService = Depends(get_afterbuy_login)
+    afterbuy: AfterbuyService = Depends(get_afterbuy_login),
 ):
     return await afterbuy.fetch_factory(save, db)
-    
-

@@ -1,597 +1,137 @@
 "use client";
 
-import { ChangeEvent, DragEvent, FormEvent, ReactNode, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
+
+import { readApiErrorMessage, readJsonResponse } from "../lib/api";
 import { useCurrentUser } from "../hooks/use-current-user";
 import { AppWorkspaceShell } from "../ui/app-workspace-shell";
 
 type UploadState = "idle" | "loading" | "success" | "error";
-type CreatorMode = "file" | "single";
-type JsonPrimitive = string | number | boolean | null;
-type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
-type PathPart = string | number;
-
-type CreationIssue = {
-  index: number;
-  stage: string;
-  message: string;
-};
-
-type CreationResponse = {
-  success: boolean;
-  message?: string;
-  source_items?: number;
-  normalized_items?: number;
-  created_items?: number;
-  skipped_items?: number;
-  issues?: CreationIssue[];
-  request_bodies?: Record<string, unknown>[];
-};
-
 type ControllerOption = "jv" | "xl";
 
-type SingleRow = {
+type FabricOption = {
   id: string;
-  productReference: string;
-  sku: string;
-  ean: string;
-  moin: string;
-  category: string;
-  brandId: string;
-  productLine: string;
-  description: string;
-  bulletPoints: string;
-  price: string;
-  imageUrl: string;
+  name: string;
+  items_count?: number;
 };
 
-function createEmptySingleRow(): SingleRow {
-  return {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    productReference: "",
-    sku: "",
-    ean: "",
-    moin: "",
-    category: "KOB Set-Artikel",
-    brandId: "JVmoebel",
-    productLine: "",
-    description: "",
-    bulletPoints: "",
-    price: "99.99",
-    imageUrl: "https://example.com/image.jpg"
-  };
-}
+type FabricListResponse = {
+  factory?: FabricOption[];
+};
 
-function isJsonObject(value: JsonValue): value is { [key: string]: JsonValue } {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isBranchNode(value: JsonValue): boolean {
-  return Array.isArray(value) || isJsonObject(value);
-}
-
-function normalizeJsonValue(input: unknown): JsonValue {
-  if (input === null) return null;
-  if (typeof input === "string" || typeof input === "number" || typeof input === "boolean") {
-    return input;
-  }
-  if (Array.isArray(input)) {
-    return input.map((item) => normalizeJsonValue(item));
-  }
-  if (typeof input === "object") {
-    const result: { [key: string]: JsonValue } = {};
-    for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
-      if (value !== undefined) {
-        result[key] = normalizeJsonValue(value);
-      }
-    }
-    return result;
-  }
-  return String(input);
-}
-
-function valueToCell(value: JsonValue): string {
-  if (value === null) return "null";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function cellToValue(raw: string): JsonValue | undefined {
-  const trimmed = raw.trim();
-  if (trimmed.length === 0) return "";
-  if (trimmed === "true") return true;
-  if (trimmed === "false") return false;
-  if (trimmed === "null") return null;
-  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) return Number(trimmed);
-
-  const first = trimmed[0];
-  if (first === "{" || first === "[" || first === '"') {
-    try {
-      return normalizeJsonValue(JSON.parse(trimmed));
-    } catch {
-      return raw;
-    }
-  }
-
-  return raw;
-}
-
-function pathToKey(path: PathPart[]): string {
-  if (path.length === 0) return "$";
-  return path.map((part) => String(part)).join("~");
-}
-
-function updateNodeAtPath(root: JsonValue, path: PathPart[], nextValue: JsonValue): JsonValue {
-  if (path.length === 0) {
-    return nextValue;
-  }
-
-  const [head, ...tail] = path;
-
-  if (typeof head === "number") {
-    if (!Array.isArray(root) || head < 0 || head >= root.length) {
-      return root;
-    }
-    const nextArray = [...root];
-    nextArray[head] = updateNodeAtPath(nextArray[head], tail, nextValue);
-    return nextArray;
-  }
-
-  if (!isJsonObject(root) || !(head in root)) {
-    return root;
-  }
-
-  const nextObject = { ...root };
-  nextObject[head] = updateNodeAtPath(nextObject[head], tail, nextValue);
-  return nextObject;
-}
-
-function nodeMeta(value: JsonValue): string {
-  if (Array.isArray(value)) return `array(${value.length})`;
-  if (isJsonObject(value)) return `object(${Object.keys(value).length})`;
-  if (value === null) return "null";
-  return typeof value;
-}
-
-function splitBulletPoints(raw: string): string[] {
-  return raw
-    .split("|")
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0);
-}
-
-function getBrandIdByController(controller: ControllerOption): string {
-  return controller === "xl" ? "6HMOZBOU" : "UO4EGHSX";
-}
-
-function rowToPreparedPayload(
-  controller: ControllerOption,
-  row: SingleRow
-): { payload: Record<string, unknown> | null; error?: string } {
-  if (!row.sku.trim()) return { payload: null, error: "SKU обязателен" };
-  if (!row.productReference.trim()) return { payload: null, error: "Product Reference обязателен" };
-  if (!row.category.trim()) return { payload: null, error: "Category обязателен" };
-
-  const amount = Number(row.price);
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return { payload: null, error: "Цена должна быть положительным числом" };
-  }
-
-  const imageUrl = row.imageUrl.trim();
-  let parsedImageUrl: URL | null = null;
-  try {
-    parsedImageUrl = new URL(imageUrl);
-  } catch {
-    parsedImageUrl = null;
-  }
-  if (!parsedImageUrl || !/^https?:$/i.test(parsedImageUrl.protocol)) {
-    return { payload: null, error: "Image URL должен начинаться с http:// или https://" };
-  }
-
-  const payload: Record<string, unknown> = {
-    controller,
-    products: [
-      {
-        productReference: row.productReference.trim(),
-        sku: row.sku.trim(),
-        ean: row.ean.trim() || undefined,
-        productDescription: {
-          category: row.category.trim(),
-          brandId: getBrandIdByController(controller),
-          productLine: row.productLine.trim() || row.productReference.trim(),
-          multiPack: false,
-          bundle: false,
-          fscCertified: false,
-          disposal: false,
-          description: row.description.trim() || undefined,
-          bulletPoints: splitBulletPoints(row.bulletPoints),
-          attributes: []
-        },
-        mediaAssets: [
-          {
-            type: "IMAGE",
-            location: imageUrl
-          }
-        ],
-        pricing: {
-          standardPrice: {
-            amount,
-            currency: "EUR"
-          },
-          vat: "FULL"
-        }
-      }
-    ]
-  };
-
-  return { payload };
-}
+type CreateFromFabricResponse = {
+  success?: boolean;
+  source_items?: number;
+  mapped_items?: number;
+  payload_items?: number;
+  process_id?: string | null;
+  process_state?: string | null;
+  issues?: string[];
+};
 
 export default function CreatorPage() {
   const { currentUser, isLoading, error } = useCurrentUser();
-  const [mode, setMode] = useState<CreatorMode>("file");
-  const [file, setFile] = useState<File | null>(null);
-  const [state, setState] = useState<UploadState>("idle");
-  const [message, setMessage] = useState<string>(
-    "Выберите режим создания: из JSON-файла или добавление товаров по одному."
-  );
-  const [issues, setIssues] = useState<CreationIssue[]>([]);
-  const [isDragOver, setIsDragOver] = useState(false);
-  const [editorData, setEditorData] = useState<JsonValue[]>([]);
-  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set(["$", "0"]));
-  const [singleRows, setSingleRows] = useState<SingleRow[]>([createEmptySingleRow()]);
+
   const [controller, setController] = useState<ControllerOption>("jv");
+  const [fabrics, setFabrics] = useState<FabricOption[]>([]);
+  const [selectedFabricId, setSelectedFabricId] = useState<string>("");
 
-  const fileLabel = useMemo(() => {
-    if (!file) return "Файл не выбран";
-    return `${file.name} (${Math.round(file.size / 1024)} KB)`;
-  }, [file]);
+  const [state, setState] = useState<UploadState>("idle");
+  const [isLoadingFabrics, setIsLoadingFabrics] = useState(false);
+  const [message, setMessage] = useState("Выберите fabric и нажмите «Выставить».");
+  const [issues, setIssues] = useState<string[]>([]);
+  const [processId, setProcessId] = useState<string>("");
 
-  const currentJsonPreview = useMemo(() => {
-    try {
-      // We keep the preview derived from the same in-memory source the user edits,
-      // so the JSON preview always matches what will actually be sent to the backend.
-      const source =
-        mode === "file"
-          ? editorData
-          : singleRows
-              .map((row) => rowToPreparedPayload(controller, row).payload)
-              .filter((item): item is Record<string, unknown> => item !== null);
-      return JSON.stringify(source, null, 2);
-    } catch (e) {
-      console.error("Preview error", e);
-      return "Не удалось показать JSON";
-    }
-  }, [controller, editorData, mode, singleRows]);
+  useEffect(() => {
+    let active = true;
 
-  function pickFile(next: File | null) {
-    if (!next) {
-      setFile(null);
-      setEditorData([]);
-      setExpandedKeys(new Set(["$", "0"]));
-      return;
-    }
+    async function loadFabrics() {
+      setIsLoadingFabrics(true);
+      try {
+        const response = await fetch(
+          `/api/products/fabrics?controller=${encodeURIComponent(controller)}`,
+          {
+            method: "GET",
+            cache: "no-store",
+          },
+        );
+        const parsed = await readJsonResponse<FabricListResponse>(response);
+        if (!active) return;
 
-    if (!next.name.toLowerCase().endsWith(".json")) {
-      setState("error");
-      setMessage("Поддерживаются только файлы .json.");
-      setFile(null);
-      setEditorData([]);
-      setExpandedKeys(new Set(["$", "0"]));
-      return;
-    }
-
-    setFile(next);
-    setState("idle");
-    setMessage("Файл выбран. Нажмите «Подготовить данные».");
-    setIssues([]);
-    setEditorData([]);
-    setExpandedKeys(new Set(["$", "0"]));
-  }
-
-  function onInputChange(event: ChangeEvent<HTMLInputElement>) {
-    pickFile(event.target.files?.[0] ?? null);
-  }
-
-  function onDrop(event: DragEvent<HTMLLabelElement>) {
-    event.preventDefault();
-    setIsDragOver(false);
-    pickFile(event.dataTransfer.files?.[0] ?? null);
-  }
-
-  function onDragOver(event: DragEvent<HTMLLabelElement>) {
-    event.preventDefault();
-    setIsDragOver(true);
-  }
-
-  function onDragLeave(event: DragEvent<HTMLLabelElement>) {
-    event.preventDefault();
-    setIsDragOver(false);
-  }
-
-  function toggleExpanded(path: PathPart[]) {
-    const key = pathToKey(path);
-    setExpandedKeys((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
-      return next;
-    });
-  }
-
-  function updateLeaf(path: PathPart[], raw: string) {
-    if (mode !== "file") return;
-    setEditorData((prev) => {
-      const nextValue = cellToValue(raw);
-      const normalized = nextValue === undefined ? "" : nextValue;
-      const updated = updateNodeAtPath(prev, path, normalized);
-      return Array.isArray(updated) ? updated : prev;
-    });
-  }
-
-  function renderTreeNode(value: JsonValue, path: PathPart[], label: string, depth: number): ReactNode {
-    const branch = isBranchNode(value);
-    const paddingLeft = 10 + depth * 14;
-    const key = pathToKey(path);
-
-    if (branch) {
-      const expanded = expandedKeys.has(key);
-      const children: ReactNode[] = [];
-
-      if (Array.isArray(value)) {
-        for (let i = 0; i < value.length; i += 1) {
-          children.push(renderTreeNode(value[i], [...path, i], `[${i}]`, depth + 1));
+        if (!response.ok) {
+          setFabrics([]);
+          setSelectedFabricId("");
+          setMessage(readApiErrorMessage(parsed, "Не удалось загрузить fabrics", response.status));
+          return;
         }
-      } else if (isJsonObject(value)) {
-        for (const childKey of Object.keys(value)) {
-          children.push(renderTreeNode(value[childKey], [...path, childKey], childKey, depth + 1));
+
+        const items = Array.isArray(parsed?.factory) ? parsed.factory : [];
+        setFabrics(items);
+        setSelectedFabricId(items[0]?.id ?? "");
+      } catch {
+        if (!active) return;
+        setFabrics([]);
+        setSelectedFabricId("");
+        setMessage("Ошибка загрузки списка fabrics.");
+      } finally {
+        if (active) {
+          setIsLoadingFabrics(false);
         }
       }
-
-      return (
-        <div key={`${key}-${label}`}>
-          <button
-            type="button"
-            className="tree-node-btn tree-node-branch"
-            style={{ paddingLeft }}
-            onClick={() => toggleExpanded(path)}
-          >
-            <span className="tree-node-left">
-              <span className="tree-node-arrow">{expanded ? "▾" : "▸"}</span>
-              <span className="tree-node-label">{label}</span>
-            </span>
-            <span className="tree-node-meta">{nodeMeta(value)}</span>
-          </button>
-          {expanded ? <div className="tree-node-children">{children}</div> : null}
-        </div>
-      );
     }
 
-    return (
-      <div className="tree-leaf-row" key={`${key}-${label}`} style={{ paddingLeft }}>
-        <span className="tree-leaf-label">{label}</span>
-        <input
-          className="tree-leaf-input"
-          value={valueToCell(value)}
-          onChange={(event) => updateLeaf(path, event.target.value)}
-        />
-      </div>
-    );
-  }
+    void loadFabrics();
 
-  async function handleRunScript(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+    return () => {
+      active = false;
+    };
+  }, [controller]);
 
-    if (!file) {
+  async function handleCreate() {
+    if (!selectedFabricId) {
       setState("error");
-      setMessage("Выберите JSON-файл или перетащите его в область загрузки.");
+      setMessage("Сначала выберите fabric.");
       return;
     }
 
     setState("loading");
-    setMessage("Подготавливаем данные из файла...");
+    setMessage("Запускаю выставление в OTTO...");
     setIssues([]);
+    setProcessId("");
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("maxChars", "2000");
-
-      const response = await fetch("/api/products/prepare-from-file", {
+      const response = await fetch("/api/products/create-from-fabric", {
         method: "POST",
-        body: formData,
-        cache: "no-store"
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          controller,
+          factory_id: selectedFabricId,
+        }),
+        cache: "no-store",
       });
 
-      const text = await response.text();
-      const parsed = (() => {
-        try {
-          return JSON.parse(text) as CreationResponse;
-        } catch {
-          return null;
-        }
-      })();
+      const parsed = await readJsonResponse<CreateFromFabricResponse>(response);
 
-      setIssues(Array.isArray(parsed?.issues) ? parsed.issues : []);
-
-      if (!response.ok) {
+      if (!response.ok || parsed?.success === false) {
         setState("error");
-        setMessage(parsed?.message ?? `Ошибка запроса (${response.status})`);
-        setEditorData([]);
-        setExpandedKeys(new Set(["$", "0"]));
+        setIssues(Array.isArray(parsed?.issues) ? parsed.issues : []);
+        setMessage(readApiErrorMessage(parsed, "Не удалось запустить выставление", response.status));
         return;
       }
 
-      const requestBodies = Array.isArray(parsed?.request_bodies) ? parsed.request_bodies : [];
-      const normalized = requestBodies.map((item) => normalizeJsonValue(item));
-      setEditorData(normalized);
-      setExpandedKeys(new Set(["$", "0"]));
-
       setState("success");
+      setProcessId(parsed?.process_id ?? "");
+      setIssues(Array.isArray(parsed?.issues) ? parsed.issues : []);
       setMessage(
-        `Готово. Загружено элементов: ${normalized.length}. Вложенные узлы можно раскрывать, простые значения — редактировать.`
+        `Готово: source=${parsed?.source_items ?? 0}, mapped=${parsed?.mapped_items ?? 0}, payload=${parsed?.payload_items ?? 0}, state=${parsed?.process_state ?? "-"}.`,
       );
-    } catch (error) {
+    } catch (caughtError) {
       setState("error");
-      const detail = error instanceof Error ? error.message : "Неизвестная ошибка";
-      setMessage(`Не удалось выполнить запрос: ${detail}`);
-    }
-  }
-
-  async function handleSendToCreate() {
-    if (editorData.length === 0) {
-      setState("error");
-      setMessage("Сначала подготовьте данные, чтобы заполнить дерево.");
-      return;
-    }
-
-    const requestBodies = editorData.filter((item): item is { [key: string]: JsonValue } => isJsonObject(item));
-
-    if (requestBodies.length === 0) {
-      setState("error");
-      setMessage("В корневом массиве нет валидных объектов для отправки.");
-      return;
-    }
-
-    setState("loading");
-    setMessage("Отправляем данные на создание...");
-    setIssues([]);
-
-    try {
-      const response = await fetch("/api/products/create-from-prepared", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({ request_bodies: requestBodies }),
-        cache: "no-store"
-      });
-
-      const text = await response.text();
-      const parsed = (() => {
-        try {
-          return JSON.parse(text) as CreationResponse;
-        } catch {
-          return null;
-        }
-      })();
-
-      setIssues(Array.isArray(parsed?.issues) ? parsed.issues : []);
-
-      if (!response.ok) {
-        setState("error");
-        setMessage(parsed?.message ?? `Ошибка запроса (${response.status})`);
-        return;
-      }
-
-      setState("success");
-      setMessage(`Создано товаров: ${parsed?.created_items ?? 0} из ${parsed?.source_items ?? 0}.`);
-    } catch (error) {
-      setState("error");
-      const detail = error instanceof Error ? error.message : "Неизвестная ошибка";
-      setMessage(`Не удалось выполнить запрос: ${detail}`);
-    }
-  }
-
-  function updateSingleRow(id: string, field: keyof SingleRow, value: string) {
-    setSingleRows((prev) =>
-      prev.map((row) => (row.id === id ? { ...row, [field]: value } : row))
-    );
-  }
-
-  function addSingleRow() {
-    setSingleRows((prev) => [...prev, createEmptySingleRow()]);
-  }
-
-  function removeSingleRow(id: string) {
-    setSingleRows((prev) => {
-      const next = prev.filter((row) => row.id !== id);
-      return next.length > 0 ? next : [createEmptySingleRow()];
-    });
-  }
-
-  async function handleCreateSingleItems() {
-    const nonEmptyRows = singleRows.filter(
-      (row) =>
-        row.productReference.trim().length > 0 ||
-        row.sku.trim().length > 0 ||
-        row.productLine.trim().length > 0
-    );
-
-    if (nonEmptyRows.length === 0) {
-      setState("error");
-      setMessage("Заполните хотя бы одну строку таблицы.");
-      return;
-    }
-
-    const localIssues: CreationIssue[] = [];
-    const requestBodies: Record<string, unknown>[] = [];
-
-    nonEmptyRows.forEach((row, index) => {
-      const converted = rowToPreparedPayload(controller, row);
-      if (!converted.payload) {
-        localIssues.push({
-          index,
-          stage: "validate",
-          message: converted.error ?? "Ошибка валидации строки"
-        });
-        return;
-      }
-      requestBodies.push(converted.payload);
-    });
-
-    if (localIssues.length > 0) {
-      setIssues(localIssues);
-      setState("error");
-      setMessage("Проверьте таблицу: есть ошибки в заполнении строк.");
-      return;
-    }
-
-    setState("loading");
-    setMessage("Создаем товары из таблицы...");
-    setIssues([]);
-
-    try {
-      const response = await fetch("/api/products/create-from-prepared", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({ request_bodies: requestBodies }),
-        cache: "no-store"
-      });
-
-      const text = await response.text();
-      const parsed = (() => {
-        try {
-          return JSON.parse(text) as CreationResponse;
-        } catch {
-          return null;
-        }
-      })();
-
-      setIssues(Array.isArray(parsed?.issues) ? parsed.issues : []);
-
-      if (!response.ok) {
-        setState("error");
-        setMessage(parsed?.message ?? `Ошибка запроса (${response.status})`);
-        return;
-      }
-
-      setState("success");
-      setMessage(`Создано товаров: ${parsed?.created_items ?? 0} из ${requestBodies.length}.`);
-      setSingleRows([createEmptySingleRow()]);
-    } catch (error) {
-      setState("error");
-      const detail = error instanceof Error ? error.message : "Неизвестная ошибка";
-      setMessage(`Не удалось выполнить запрос: ${detail}`);
+      setMessage(
+        caughtError instanceof Error
+          ? `Ошибка запроса: ${caughtError.message}`
+          : "Ошибка запроса",
+      );
     }
   }
 
@@ -612,217 +152,73 @@ export default function CreatorPage() {
       activeHref="/creator"
       currentUser={currentUser}
       sectionLabel="Создание"
-      title="Создание товаров"
-      description="Два понятных сценария: подготовка из JSON-файла и ручное добавление товаров по одному."
+      title="Выставление по Fabric"
+      description="Выберите fabric, запустите mapper-процесс и отправку полного payload в OTTO."
     >
       <div className="creator-workspace">
         {error ? <p className="helper-banner">{error}</p> : null}
-        <div className="creator-head">
-          <div className="creator-head-copy">
-            <h2>Рабочий поток создания</h2>
-            <p>Подготовьте payload из файла или создавайте позиции вручную в табличном режиме.</p>
+
+        <section className="creator-editor">
+          <div className="creator-editor-head">
+            <h2>Новый сценарий создания</h2>
           </div>
-        </div>
 
-        <div className="creator-mode-switch">
-          <button
-            type="button"
-            className={`mode-btn ${mode === "file" ? "active" : ""}`}
-            onClick={() => setMode("file")}
-          >
-            Из JSON-файла
-          </button>
-          <button
-            type="button"
-            className={`mode-btn ${mode === "single" ? "active" : ""}`}
-            onClick={() => setMode("single")}
-          >
-            По одному
-          </button>
-        </div>
-        <div className="creator-mode-switch">
-          <label>
-            Controller
-            <select
-              value={controller}
-              onChange={(event) => setController(event.target.value as ControllerOption)}
-            >
-              <option value="jv">jv</option>
-              <option value="xl">xl</option>
-            </select>
-          </label>
-        </div>
-
-        {mode === "file" ? (
-          <>
-            <form className="creator-form" onSubmit={handleRunScript}>
-              <label
-                htmlFor="creator-file"
-                className={`dropzone ${isDragOver ? "drag-over" : ""}`}
-                onDrop={onDrop}
-                onDragOver={onDragOver}
-                onDragLeave={onDragLeave}
-              >
-                <input
-                  id="creator-file"
-                  type="file"
-                  accept="application/json,.json"
-                  onChange={onInputChange}
-                />
-                <strong>Перетащите JSON-файл сюда</strong>
-                <span>или нажмите, чтобы выбрать файл с компьютера</span>
-                <em>{fileLabel}</em>
-              </label>
-
-              <button className="primary-btn" type="submit" disabled={state === "loading"}>
-                {state === "loading" ? "Подготовка..." : "Подготовить данные"}
-              </button>
-            </form>
-
-            <section className="creator-editor">
-              <div className="creator-editor-head">
-                <h2>Редактор дерева</h2>
-                <button
-                  className="primary-btn"
-                  type="button"
-                  onClick={handleSendToCreate}
-                  disabled={state === "loading" || editorData.length === 0}
-                >
-                  Отправить на создание
-                </button>
-              </div>
-              <p>Узлы-объекты и массивы раскрываются, простые значения можно редактировать.</p>
-
-              {editorData.length > 0 ? (
-                <div className="creator-tree-layout">
-                  <div className="creator-tree-panel">{renderTreeNode(editorData, [], "request_bodies", 0)}</div>
-                </div>
-              ) : (
-                <div className="empty-state">Подготовьте данные, чтобы они появились в редакторе.</div>
-              )}
-
-              <h3>Итоговый JSON</h3>
-              <pre className="uploader-response creator-json-preview">{currentJsonPreview}</pre>
-            </section>
-          </>
-        ) : (
-          <section className="creator-editor">
-            <div className="creator-editor-head">
-              <h2>Табличное добавление товаров</h2>
-              <button
-                className="primary-btn"
-                type="button"
-                onClick={handleCreateSingleItems}
+          <div className="creator-mode-switch">
+            <label>
+              Controller
+              <select
+                value={controller}
+                onChange={(event) => setController(event.target.value as ControllerOption)}
                 disabled={state === "loading"}
               >
-                Создать из таблицы
-              </button>
-            </div>
-            <p>Заполняйте строки таблицы: одна строка = один товар.</p>
+                <option value="jv">jv</option>
+                <option value="xl">xl</option>
+              </select>
+            </label>
 
-            <div className="single-table-wrap">
-              <table className="single-create-table">
-                <thead>
-                  <tr>
-                    <th>Product Ref</th>
-                    <th>SKU</th>
-                    <th>EAN</th>
-                    <th>MOIN</th>
-                    <th>Category</th>
-                    <th>Brand ID</th>
-                    <th>Title</th>
-                    <th>Price EUR</th>
-                    <th>Image URL</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {singleRows.map((row) => (
-                    <tr key={row.id}>
-                      <td>
-                        <input value={row.productReference} onChange={(event) => updateSingleRow(row.id, "productReference", event.target.value)} />
-                      </td>
-                      <td>
-                        <input value={row.sku} onChange={(event) => updateSingleRow(row.id, "sku", event.target.value)} />
-                      </td>
-                      <td>
-                        <input value={row.ean} onChange={(event) => updateSingleRow(row.id, "ean", event.target.value)} />
-                      </td>
-                      <td>
-                        <input value={row.moin} onChange={(event) => updateSingleRow(row.id, "moin", event.target.value)} />
-                      </td>
-                      <td>
-                        <input value={row.category} onChange={(event) => updateSingleRow(row.id, "category", event.target.value)} />
-                      </td>
-                      <td>
-                        <input value={getBrandIdByController(controller)} readOnly />
-                      </td>
-                      <td>
-                        <input value={row.productLine} onChange={(event) => updateSingleRow(row.id, "productLine", event.target.value)} />
-                      </td>
-                      <td>
-                        <input value={row.price} onChange={(event) => updateSingleRow(row.id, "price", event.target.value)} />
-                      </td>
-                      <td>
-                        <input value={row.imageUrl} onChange={(event) => updateSingleRow(row.id, "imageUrl", event.target.value)} />
-                      </td>
-                      <td>
-                        <button type="button" className="ghost-btn" onClick={() => removeSingleRow(row.id)}>
-                          Удалить
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <label>
+              Fabric
+              <select
+                value={selectedFabricId}
+                onChange={(event) => setSelectedFabricId(event.target.value)}
+                disabled={isLoadingFabrics || state === "loading" || fabrics.length === 0}
+              >
+                {fabrics.length === 0 ? (
+                  <option value="">
+                    {isLoadingFabrics ? "Загрузка fabrics..." : "Нет fabrics"}
+                  </option>
+                ) : (
+                  fabrics.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name ?? item.id} ({item.items_count ?? 0})
+                    </option>
+                  ))
+                )}
+              </select>
+            </label>
 
-            <div className="single-actions">
-              <button className="primary-btn" type="button" onClick={addSingleRow} disabled={state === "loading"}>
-                Добавить строку
-              </button>
-            </div>
-
-            <div className="single-extra-grid">
-              {singleRows.map((row) => (
-                <div key={`${row.id}-extra`} className="single-extra-card">
-                  <p>Доп. поля для SKU: {row.sku || "—"}</p>
-                  <input
-                    placeholder="Description"
-                    value={row.description}
-                    onChange={(event) => updateSingleRow(row.id, "description", event.target.value)}
-                  />
-                  <input
-                    placeholder="Bullet points через |"
-                    value={row.bulletPoints}
-                    onChange={(event) => updateSingleRow(row.id, "bulletPoints", event.target.value)}
-                  />
-                </div>
-              ))}
-            </div>
-
-            <h3>Итоговый JSON</h3>
-            <pre className="uploader-response creator-json-preview">{currentJsonPreview}</pre>
-
-            <div className="single-queue">
-              <h3>Строк в таблице: {singleRows.length}</h3>
-            </div>
-          </section>
-        )}
-
-        <p className={`uploader-message ${state}`}>{message}</p>
-
-        {issues.length > 0 ? (
-          <div className="creator-issues">
-            <h2>Замечания</h2>
-            {issues.map((issue, index) => (
-              <p key={`${issue.index}-${issue.stage}-${index}`}>
-                #{issue.index} [{issue.stage}] {issue.message}
-              </p>
-            ))}
+            <button
+              className="primary-btn"
+              type="button"
+              onClick={handleCreate}
+              disabled={state === "loading" || !selectedFabricId}
+            >
+              {state === "loading" ? "Запуск..." : "Выставить"}
+            </button>
           </div>
-        ) : null}
 
+          <p className={`helper-banner ${state === "error" ? "error" : "info"}`}>{message}</p>
+
+          {processId ? <p className="helper-banner info">Process ID: {processId}</p> : null}
+
+          {issues.length > 0 ? (
+            <ul className="issues-list">
+              {issues.map((item, index) => (
+                <li key={`${index}-${item}`}>{item}</li>
+              ))}
+            </ul>
+          ) : null}
+        </section>
       </div>
     </AppWorkspaceShell>
   );

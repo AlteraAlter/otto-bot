@@ -46,6 +46,7 @@ services:
       UPLOADS_DIR: /app/uploads
     volumes:
       - ./storage/uploads:/app/uploads
+      - ./logs:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -73,6 +74,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
     restart: unless-stopped
 
   frontend:

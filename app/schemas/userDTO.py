@@ -1,5 +1,4 @@
 import re
-from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
 
@@ -21,7 +20,6 @@ class UserRegisterDTO(BaseModel):
     last_name: str
     email: EmailStr
     password: str
-    invite_token: str
 
     @field_validator("password")
     @classmethod
@@ -41,19 +39,8 @@ class UserRegisterDTO(BaseModel):
 
     @field_validator("email")
     @classmethod
-    def validate_gmail_address(cls, value: EmailStr) -> EmailStr:
-        normalized = value.lower().strip()
-        if not normalized.endswith("@gmail.com"):
-            raise ValueError("Employee registration requires a Gmail address")
-        return normalized
-
-    @field_validator("invite_token")
-    @classmethod
-    def validate_invite_token(cls, value: str) -> str:
-        token = value.strip()
-        if not token:
-            raise ValueError("Invitation token is required")
-        return token
+    def normalize_email(cls, value: EmailStr) -> EmailStr:
+        return value.lower().strip()
 
 
 class AdminUserCreateDTO(BaseModel):
@@ -77,48 +64,3 @@ class AdminUserCreateResponseDTO(BaseModel):
 class UserLoginDTO(BaseModel):
     email: EmailStr
     password: str
-
-
-class EmployeeInviteRequestDTO(BaseModel):
-    email: EmailStr
-    role: RoleEnum = RoleEnum.EMPLOYEE
-
-    @field_validator("email")
-    @classmethod
-    def validate_gmail_address(cls, value: EmailStr) -> EmailStr:
-        normalized = value.lower().strip()
-        if not normalized.endswith("@gmail.com"):
-            raise ValueError("Invitations can only be sent to Gmail addresses")
-        return normalized
-
-
-class EmployeeInviteResponseDTO(BaseModel):
-    success: bool
-    id: int
-    email: EmailStr
-    role: RoleEnum
-    expires_at: datetime
-
-
-class InvitationStatusDTO(str):
-    pass
-
-
-class UserInvitationDTO(BaseModel):
-    id: int
-    email: EmailStr
-    role: RoleEnum
-    status: str
-    created_at: datetime
-    expires_at: datetime
-    accepted_at: datetime | None = None
-
-
-class UserInvitationListResponseDTO(BaseModel):
-    success: bool
-    items: list[UserInvitationDTO]
-
-
-class UserInvitationDeleteResponseDTO(BaseModel):
-    success: bool
-    deleted_count: int

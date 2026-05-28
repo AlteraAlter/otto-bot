@@ -1,9 +1,6 @@
-from datetime import datetime, timezone
-
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.user_invitations import UserInvitation
 from app.models.user_roles import UserRoles
 from app.models.users import User
 from app.schemas.enums import RoleEnum
@@ -62,92 +59,3 @@ class UserRepository:
         if row is None:
             return None
         return row[0], row[1]
-
-    async def delete_pending_invitations_for_email(
-        self, *, email: str, role: RoleEnum
-    ) -> None:
-        stmt = delete(UserInvitation).where(
-            UserInvitation.email == email.lower().strip(),
-            UserInvitation.role == role,
-            UserInvitation.accepted_at.is_(None),
-        )
-        await self.db.execute(stmt)
-        await self.db.commit()
-
-    async def create_invitation(
-        self,
-        *,
-        email: str,
-        role: RoleEnum,
-        token_hash: str,
-        invited_by: int | None,
-        expires_at: datetime,
-    ) -> UserInvitation:
-        invitation = UserInvitation(
-            email=email.lower().strip(),
-            role=role,
-            token_hash=token_hash,
-            invited_by=invited_by,
-            expires_at=expires_at,
-        )
-        self.db.add(invitation)
-        await self.db.commit()
-        await self.db.refresh(invitation)
-        return invitation
-
-    async def select_active_invitation_by_token_hash(
-        self, token_hash: str
-    ) -> UserInvitation | None:
-        stmt = select(UserInvitation).where(
-            UserInvitation.token_hash == token_hash,
-            UserInvitation.accepted_at.is_(None),
-            UserInvitation.expires_at > datetime.now(timezone.utc),
-        )
-        result = await self.db.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def mark_invitation_accepted(
-        self, invitation_id: int
-    ) -> UserInvitation | None:
-        invitation = await self.db.get(UserInvitation, invitation_id)
-        if invitation is None:
-            return None
-        invitation.accepted_at = datetime.now(timezone.utc)
-        await self.db.commit()
-        await self.db.refresh(invitation)
-        return invitation
-
-    async def list_invitations(self, *, invited_by: int | None) -> list[UserInvitation]:
-        stmt = select(UserInvitation).order_by(
-            UserInvitation.created_at.desc(), UserInvitation.id.desc()
-        )
-        if invited_by is not None:
-            stmt = stmt.where(UserInvitation.invited_by == invited_by)
-        result = await self.db.execute(stmt)
-        return list(result.scalars().all())
-
-    async def delete_invitation_by_id(
-        self,
-        *,
-        invitation_id: int,
-        invited_by: int | None,
-    ) -> bool:
-        stmt = delete(UserInvitation).where(UserInvitation.id == invitation_id)
-        if invited_by is not None:
-            stmt = stmt.where(UserInvitation.invited_by == invited_by)
-        result = await self.db.execute(stmt)
-        await self.db.commit()
-        return (result.rowcount or 0) > 0
-
-    async def delete_pending_invitations_for_inviter(
-        self, *, invited_by: int | None
-    ) -> int:
-        stmt = delete(UserInvitation).where(
-            UserInvitation.accepted_at.is_(None),
-            UserInvitation.expires_at > datetime.now(timezone.utc),
-        )
-        if invited_by is not None:
-            stmt = stmt.where(UserInvitation.invited_by == invited_by)
-        result = await self.db.execute(stmt)
-        await self.db.commit()
-        return int(result.rowcount or 0)

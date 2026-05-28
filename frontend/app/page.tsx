@@ -52,12 +52,10 @@ export default function Home() {
   const navItems = [
     { href: "/", label: "Каталог", shortLabel: "К", active: true },
     { href: "/creator", label: "Создание товара", shortLabel: "+", active: false },
-    { href: "/manual-creator", label: "Ручное создание", shortLabel: "R", active: false },
     ...(currentUser?.role === "SEO"
       ? [
           { href: "/tasks", label: "Задачи", shortLabel: "T", active: false },
           { href: "/imports", label: "Data Operations", shortLabel: "D", active: false },
-          { href: "/invitations", label: "Приглашения", shortLabel: "П", active: false },
         ]
       : []),
   ];

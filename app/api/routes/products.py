@@ -10,11 +10,13 @@ Write/import workflows remain under `/v1/products/...`.
 import asyncio
 from datetime import UTC, date, datetime
 from io import BytesIO
+import logging
 from pathlib import Path
 import re
 from typing import Any, List, Optional
 from uuid import uuid4
 
+import httpx
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -33,6 +35,7 @@ from openpyxl import load_workbook
 
 from app.database import SessionLocal
 from app.dependencies import (
+    get_afterbuy_login,
     get_current_user,
     get_product_creation_service,
     get_product_service,
@@ -58,6 +61,7 @@ from app.schemas.product_creation import (
 from app.schemas.product import (
     ProductResponse,
     CreateProductRequest,
+    Product as ProductPayload,
     Status,
     Availability,
     UpdateQuantity,
@@ -69,6 +73,8 @@ from app.schemas.product_response import (
     DeleteProductResponse,
 )
 from app.schemas.product_tasks import (
+    ProductFactoryCreateRequestDTO,
+    ProductFactoryCreateResponseDTO,
     ProductTaskCreateRequestDTO,
     ProductTaskDTO,
     ProductTaskItemDTO,
@@ -85,7 +91,10 @@ from app.schemas.enums import RoleEnum
 from app.schemas.enums import Controller
 from app.tasks import sync_afterbuy_jv_lister_task
 from app.services.afterbuy_sync_service import sync_afterbuy_to_jv_lister
+from app.services.afterbuy_service import AfterbuyService
 from app.services.local_product_sync_service import upsert_local_products_from_payloads
+from app.mapper.seo import build_seo_description
+from app.mapper.normalizer import build_normalized_product
 from app.services.product_creation_service import ProductCreationService
 from app.services.product_service import ProductService
 
@@ -122,6 +131,15 @@ CREATE_DONE_RU = "Создание успешно"
 CREATE_FAILED_RU = "Создание с ошибкой"
 AVAILABILITY_DONE_RU = "Доступность успешно"
 AVAILABILITY_FAILED_RU = "Доступность с ошибкой"
+MAPPER_LOG_PATH = Path(__file__).resolve().parents[3] / "logs" / "product_mapper_flow.log"
+MAPPER_LOGGER = logging.getLogger("product_mapper_flow")
+if not MAPPER_LOGGER.handlers:
+    MAPPER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _handler = logging.FileHandler(MAPPER_LOG_PATH, encoding="utf-8")
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    MAPPER_LOGGER.setLevel(logging.INFO)
+    MAPPER_LOGGER.addHandler(_handler)
+    MAPPER_LOGGER.propagate = False
 
 
 def _product_to_dict(product: Product) -> dict[str, Any]:
@@ -1587,6 +1605,205 @@ async def get_otto_product(
 ):
     """Fetch one product directly from OTTO by SKU."""
     return await product_service.get_product(sku)
+
+
+@router.post(
+    "/tasks/create-from-factory", response_model=ProductFactoryCreateResponseDTO
+)
+async def create_product_task_from_factory(
+    payload: ProductFactoryCreateRequestDTO,
+    afterbuy: AfterbuyService = Depends(get_afterbuy_login),
+    product_service: ProductService = Depends(get_product_service),
+):
+    from app.mapper.product_mapper import ProductMapper
+
+    run_id = payload.run_id or str(uuid4())
+    stage = "start"
+
+    def _error_payload(
+        *,
+        status_code: int,
+        detail: str,
+        upstream_body: str | None = None,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "success": False,
+                "stage": stage,
+                "detail": detail,
+                "run_id": run_id,
+                "controller": payload.controller.value,
+                "factory_id": payload.factory_id,
+                "upstream_body": upstream_body,
+            },
+        )
+
+    issues: list[str] = []
+    try:
+        MAPPER_LOGGER.info(
+            "[run_id=%s] start create-from-factory controller=%s factory_id=%s",
+            run_id,
+            payload.controller.value,
+            payload.factory_id,
+        )
+
+        stage = "fetch_afterbuy_products"
+        source = await afterbuy.get_products_by_factory_id(
+            payload.controller, int(payload.factory_id)
+        )
+        source_items = [
+            item.model_dump(mode="json", exclude_none=True) for item in source.products
+        ]
+        MAPPER_LOGGER.info(
+            "[run_id=%s] afterbuy products fetched count=%s",
+            run_id,
+            len(source_items),
+        )
+
+        stage = "mapper_payload_deploy"
+        mapper = ProductMapper(
+            products=source_items,
+            controller=payload.controller.value,
+            otto_client=product_service.client,
+        )
+        mapped_result = await mapper.payload_deploy(run_id=run_id)
+        mapped_items = (
+            mapped_result.get("items", []) if isinstance(mapped_result, dict) else []
+        )
+        mapper_issues = (
+            mapped_result.get("issues", []) if isinstance(mapped_result, dict) else []
+        )
+        for item in mapper_issues:
+            issues.append(f"mapper index={item.get('index')}: {item.get('message')}")
+        MAPPER_LOGGER.info(
+            "[run_id=%s] mapper complete mapped=%s mapper_issues=%s",
+            run_id,
+            len(mapped_items),
+            len(mapper_issues),
+        )
+
+        stage = "normalize_products"
+        products_payload: list[ProductPayload] = []
+        for index, source_item in enumerate(source_items):
+            try:
+                ean = source_item.get("EAN") or source_item.get("ean")
+                MAPPER_LOGGER.info(
+                    "[run_id=%s] normalize start index=%s ean=%s",
+                    run_id,
+                    index,
+                    ean,
+                )
+                seo_html = build_seo_description(source_item, max_chars=2000)
+                normalized = build_normalized_product(source_item, seo_html)
+
+                if index < len(mapped_items) and isinstance(mapped_items[index], dict):
+                    mapped_item = mapped_items[index]
+                    product_description = normalized.get("productDescription")
+                    if isinstance(product_description, dict):
+                        if mapped_item.get("category"):
+                            product_description["category"] = mapped_item["category"]
+                        if mapped_item.get("description"):
+                            product_description["description"] = mapped_item["description"]
+                        if mapped_item.get("bulletPoints"):
+                            product_description["bulletPoints"] = mapped_item["bulletPoints"]
+                        if mapped_item.get("attributes"):
+                            product_description["attributes"] = mapped_item["attributes"]
+
+                products_payload.append(ProductPayload.model_validate(normalized))
+                MAPPER_LOGGER.info(
+                    "[run_id=%s] normalize done index=%s ean=%s sku=%s",
+                    run_id,
+                    index,
+                    ean,
+                    normalized.get("sku"),
+                )
+            except Exception as exc:
+                msg = f"normalize index={index} failed: {exc}"
+                issues.append(msg)
+                MAPPER_LOGGER.exception("[run_id=%s] %s", run_id, msg)
+
+        MAPPER_LOGGER.info(
+            "[run_id=%s] payload built payload_items=%s skipped=%s",
+            run_id,
+            len(products_payload),
+            len(source_items) - len(products_payload),
+        )
+        if not products_payload:
+            MAPPER_LOGGER.error("[run_id=%s] no payload items ready; stopping", run_id)
+            return ProductFactoryCreateResponseDTO(
+                success=False,
+                run_id=run_id,
+                controller=payload.controller,
+                factory_id=payload.factory_id,
+                source_items=len(source_items),
+                mapped_items=len(mapped_items),
+                payload_items=0,
+                issues=issues or ["No valid products after normalization"],
+                process_id=None,
+                process_state="FAILED",
+            )
+
+        stage = "otto_create_products"
+        create_payload = CreateProductRequest(
+            controller=payload.controller,
+            products=products_payload,
+        )
+        create_result = await product_service.create_or_update_products(create_payload)
+        process_id = _extract_process_id(create_result)
+        process_state = (
+            (create_result.state or "").upper() if create_result.state else None
+        )
+        MAPPER_LOGGER.info(
+            "[run_id=%s] otto create done process_id=%s state=%s message=%s",
+            run_id,
+            process_id,
+            process_state,
+            create_result.message,
+        )
+
+        return ProductFactoryCreateResponseDTO(
+            success=True,
+            run_id=run_id,
+            controller=payload.controller,
+            factory_id=payload.factory_id,
+            source_items=len(source_items),
+            mapped_items=len(mapped_items),
+            payload_items=len(products_payload),
+            issues=issues,
+            process_id=process_id,
+            process_state=process_state,
+        )
+    except ValueError as exc:
+        MAPPER_LOGGER.exception(
+            "[run_id=%s] create-from-factory value error at stage=%s", run_id, stage
+        )
+        return _error_payload(status_code=400, detail=str(exc))
+    except httpx.HTTPStatusError as exc:
+        upstream_text = ""
+        try:
+            upstream_text = exc.response.text
+        except Exception:
+            upstream_text = None  # type: ignore[assignment]
+        MAPPER_LOGGER.exception(
+            "[run_id=%s] create-from-factory upstream http error at stage=%s status=%s",
+            run_id,
+            stage,
+            exc.response.status_code if exc.response else "unknown",
+        )
+        return _error_payload(
+            status_code=exc.response.status_code if exc.response else 502,
+            detail=f"Upstream HTTP error at stage '{stage}': {exc}",
+            upstream_body=upstream_text,
+        )
+    except Exception as exc:
+        MAPPER_LOGGER.exception(
+            "[run_id=%s] create-from-factory unexpected error at stage=%s", run_id, stage
+        )
+        return _error_payload(
+            status_code=500,
+            detail=f"Unhandled error at stage '{stage}': {exc}",
+        )
 
 
 @router.delete("delete-by-url/product", response_model=DeleteProductResponse)

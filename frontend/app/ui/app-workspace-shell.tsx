@@ -10,7 +10,7 @@ import { CurrentUser } from "../hooks/use-current-user";
 
 type AppWorkspaceShellProps = {
   currentUser: CurrentUser | null;
-  activeHref: "/" | "/creator" | "/manual-creator" | "/tasks" | "/imports" | "/invitations";
+  activeHref: "/" | "/creator" | "/tasks" | "/imports";
   sectionLabel: string;
   title: string;
   description: string;
@@ -31,12 +31,10 @@ export function AppWorkspaceShell({
   const navItems = [
     { href: "/", label: "Каталог", shortLabel: "К" },
     { href: "/creator", label: "Создание товара", shortLabel: "+" },
-    { href: "/manual-creator", label: "Ручное создание", shortLabel: "R" },
     ...(currentUser?.role === "SEO"
       ? [
           { href: "/tasks", label: "Задачи", shortLabel: "T" },
           { href: "/imports", label: "Data Operations", shortLabel: "D" },
-          { href: "/invitations", label: "Приглашения", shortLabel: "П" },
         ]
       : []),
   ];

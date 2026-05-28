@@ -2,16 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import ValidationError
 
 from app.core.user_auth import UserAuth
-from app.dependencies import get_current_user, get_user_auth, require_role
-from app.schemas.enums import RoleEnum
+from app.dependencies import get_current_user, get_user_auth
 from app.schemas.tokenDTO import TokenDTO
 from app.schemas.userDTO import (
     AdminUserCreateDTO,
     AdminUserCreateResponseDTO,
-    EmployeeInviteRequestDTO,
-    EmployeeInviteResponseDTO,
-    UserInvitationDeleteResponseDTO,
-    UserInvitationListResponseDTO,
     UserDTO,
     UserLoginDTO,
     UserRegisterDTO,
@@ -65,51 +60,6 @@ async def login(
 async def me(current_user: UserDTO = Depends(get_current_user)) -> UserDTO:
     """Return the currently authenticated user."""
     return current_user
-
-
-@router.post("/invite-employee", response_model=EmployeeInviteResponseDTO)
-async def invite_employee(
-    payload: EmployeeInviteRequestDTO,
-    current_user: UserDTO = Depends(require_role([RoleEnum.SEO])),
-    auth_service: UserAuth = Depends(get_user_auth),
-) -> EmployeeInviteResponseDTO:
-    """Send a Gmail invitation link for employee-only registration."""
-    return await auth_service.invite_employee(
-        payload,
-        invited_by_user_id=current_user.id,
-    )
-
-
-@router.get("/invitations", response_model=UserInvitationListResponseDTO)
-async def list_invitations(
-    current_user: UserDTO = Depends(require_role([RoleEnum.SEO])),
-    auth_service: UserAuth = Depends(get_user_auth),
-) -> UserInvitationListResponseDTO:
-    return await auth_service.list_invitations(invited_by_user_id=current_user.id)
-
-
-@router.delete(
-    "/invitations/{invitation_id}", response_model=UserInvitationDeleteResponseDTO
-)
-async def delete_invitation(
-    invitation_id: int,
-    current_user: UserDTO = Depends(require_role([RoleEnum.SEO])),
-    auth_service: UserAuth = Depends(get_user_auth),
-) -> UserInvitationDeleteResponseDTO:
-    return await auth_service.delete_invitation(
-        invitation_id=invitation_id,
-        invited_by_user_id=current_user.id,
-    )
-
-
-@router.delete("/invitations", response_model=UserInvitationDeleteResponseDTO)
-async def delete_pending_invitations(
-    current_user: UserDTO = Depends(require_role([RoleEnum.SEO])),
-    auth_service: UserAuth = Depends(get_user_auth),
-) -> UserInvitationDeleteResponseDTO:
-    return await auth_service.delete_pending_invitations(
-        invited_by_user_id=current_user.id,
-    )
 
 
 @router.post("/admin-create-user", response_model=AdminUserCreateResponseDTO)

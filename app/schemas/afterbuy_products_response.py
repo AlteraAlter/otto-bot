@@ -3,7 +3,6 @@ from typing import Any, Optional
 from app.schemas.afterbuy_enums import Kind
 
 
-
 class ProductBase(BaseModel):
     Artikelbeschreibung: str | None = None
     Description: str | None = None
@@ -21,16 +20,16 @@ class ProductBase(BaseModel):
 class ProductFetchResponse(BaseModel):
     products: list[ProductBase]
 
+
 class FactoryBase(BaseModel):
     account: str
     kind: Kind
     id: Optional[str] = None
     name: Optional[str] = None
     items_count: int
-    
+
     model_config = ConfigDict(extra="ignore")
 
 
 class FactoriesFetchResponse(BaseModel):
     factory: list[FactoryBase]
-    

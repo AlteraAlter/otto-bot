@@ -7,8 +7,7 @@ class FactoryBase(BaseModel):
     kind: str
     id: str
     item_count: int
-    
-    
+
 
 class FactoryRequest(BaseModel):
     pass
