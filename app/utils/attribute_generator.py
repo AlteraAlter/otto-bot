@@ -65,27 +65,25 @@ class AttributeGenerator:
                                 "items": {
                                     "type": "object",
                                     "properties": {
-                                        "name": {
-                                            "type": "string"
-                                        },
+                                        "name": {"type": "string"},
                                         "value": {
-                                            "anyOf":[
+                                            "anyOf": [
                                                 {"type": "string"},
-                                                {"type": "array", "items": {"type": "string"}},
-                                                {"type": "null"}
+                                                {
+                                                    "type": "array",
+                                                    "items": {"type": "string"},
+                                                },
+                                                {"type": "null"},
                                             ]
-                                        }
+                                        },
                                     },
-                                    "required": [
-                                        "name",
-                                        "value"
-                                    ],
-                                    "additionalProperties": False
-                                }
+                                    "required": ["name", "value"],
+                                    "additionalProperties": False,
+                                },
                             }
                         },
                         "required": ["attributes"],
-                        "additionalProperties": False
+                        "additionalProperties": False,
                     },
                 }
             },
@@ -102,11 +100,10 @@ class AttributeGenerator:
         )
 
         return json.loads(response.output_text)
-    
-    
+
+
 async def main():
-    data = json.loads(
-                """
+    data = json.loads("""
                 [
                     {
                         "additionalRequirements": [
@@ -3566,55 +3563,59 @@ async def main():
                         ]
                     }
                 ]
-                """
-    )
+                """)
     pr = {
         "Artikelbeschreibung": "Schwarzer Polsterstuhl Designer Holzfüße Esszimmerstuhl Holzgestell Neu",
-        'Breite': '59 cm',
-        'Farbe': 'Schwarz',
-        'Höhe': '93 cm',
-        'Länge': '55 cm',
-        'Marke': 'JV Möbel',
-        'Produktart': 'Esszimmerstuhl',
-        'Zimmer': 'Esszimmer',
-        'Gestellmaterial': 'Holz',
-        'Anzahl der Teile': '1',
-        'Stil': 'Modern',
-        'Montage erforderlich': 'Ja',
-        'Abteilung': 'Erwachsene',
-        'Montagezustand': 'Montage erforderlich',
-        'Holzton': 'Mitteldunkles Holz',
-        'Herstellernummer': 'JVM4067282593664',
-        'Innen-/Außenbereich': 'Innenbereich',
-        'Zusätzlich benötigte Teile': 'Nein',
-        'Polsterstoff': 'Stoff',
-        'Muster': 'Einfarbig',
-        'Herstellergarantie': '2 Jahre',
-        'Personalisiert': 'Nein',
-        'EAN': '4067282593664',
-        'Maße Stuhl': 'ca: 55 x 59 x 93 cm'
+        "Breite": "59 cm",
+        "Farbe": "Schwarz",
+        "Höhe": "93 cm",
+        "Länge": "55 cm",
+        "Marke": "JV Möbel",
+        "Produktart": "Esszimmerstuhl",
+        "Zimmer": "Esszimmer",
+        "Gestellmaterial": "Holz",
+        "Anzahl der Teile": "1",
+        "Stil": "Modern",
+        "Montage erforderlich": "Ja",
+        "Abteilung": "Erwachsene",
+        "Montagezustand": "Montage erforderlich",
+        "Holzton": "Mitteldunkles Holz",
+        "Herstellernummer": "JVM4067282593664",
+        "Innen-/Außenbereich": "Innenbereich",
+        "Zusätzlich benötigte Teile": "Nein",
+        "Polsterstoff": "Stoff",
+        "Muster": "Einfarbig",
+        "Herstellergarantie": "2 Jahre",
+        "Personalisiert": "Nein",
+        "EAN": "4067282593664",
+        "Maße Stuhl": "ca: 55 x 59 x 93 cm",
     }
-    
+
     pm = ProductMapper([], "")
     gpt = GPTHelper(settings.gpt_key)
     ag = AttributeGenerator(gpt.client)
     res = await ag.generate(
         category="Esszimmerstuhl",
         source_attributes=pr,
-        bullet_points=['Zeitlose Eleganz in Schwarz passt zu vielen Einrichtungsstilen', 'Stabiles Holzgestell sorgt für sicheren Halt beim Sitzen', 'Bequemer Sitzkomfort dank weichem Stoffbezug', 'Vielseitig kombinierbar zu vielen Stilrichtungen'],
+        bullet_points=[
+            "Zeitlose Eleganz in Schwarz passt zu vielen Einrichtungsstilen",
+            "Stabiles Holzgestell sorgt für sicheren Halt beim Sitzen",
+            "Bequemer Sitzkomfort dank weichem Stoffbezug",
+            "Vielseitig kombinierbar zu vielen Stilrichtungen",
+        ],
         otto_attributes=pm.prepare_attrs(data),
-        exclude_attributes=pm.direct_map_attrs(pr)
-    )   
+        exclude_attributes=pm.direct_map_attrs(pr),
+    )
     return res
 
-    
+
 if __name__ == "__main__":
     import json
     from ..mapper.product_mapper import ProductMapper
     from .gpt_helper import GPTHelper
     from ..core.configs import settings
     import asyncio
-    
+
     res = asyncio.run(main())
-    
+
     print(res)

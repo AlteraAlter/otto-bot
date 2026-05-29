@@ -39,7 +39,7 @@ class MediaAsset(BaseModel):
     """Image or media resource attached to a product."""
 
     type: str = "IMAGE"
-    filename: str
+    location: str
 
 
 class MaxOrderQuantity(BaseModel):

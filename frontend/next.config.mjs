@@ -3,7 +3,7 @@ const nextConfig = {
   reactStrictMode: true,
   allowedDevOrigins: ["127.0.0.1", "localhost"],
   experimental: {
-    middlewareClientMaxBodySize: "200mb",
+    proxyClientMaxBodySize: "200mb",
   },
 };
 

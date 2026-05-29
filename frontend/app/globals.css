@@ -3,6 +3,9 @@
 @tailwind utilities;
 
 :root {
+  --font-manrope: "Segoe UI", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-outfit: "Trebuchet MS", "Segoe UI", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-space-grotesk: "Arial Narrow", "Segoe UI", "Noto Sans", Arial, sans-serif;
   --bg: #eef3fb;
   --surface: #ffffff;
   --surface-muted: #f6f8fc;
@@ -3064,7 +3067,11 @@ a:focus-visible {
 
 .creator-editor {
   margin-top: 20px;
-  padding: 20px;
+  padding: 12px;
+  border-radius: 12px;
+  background: #ffffff;
+  border: 1px solid #e7edf5;
+  box-shadow: 0 10px 24px rgba(20, 33, 61, 0.05);
 }
 
 .creator-editor-head {
@@ -3077,15 +3084,68 @@ a:focus-visible {
 .creator-editor h2,
 .creator-editor h3 {
   margin: 0;
-  font-size: 20px;
+  font-size: 14px;
   font-family: var(--font-outfit), sans-serif;
 }
 
 .creator-editor p {
-  margin: 10px 0 0;
+  margin: 8px 0 0;
   color: var(--muted);
-  font-size: 14px;
-  line-height: 1.6;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.creator-mode-switch {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: minmax(120px, 160px) minmax(240px, 1fr);
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid #e7edf5;
+  border-radius: 12px;
+  background: #f9fbff;
+}
+
+.creator-mode-switch label {
+  display: grid;
+  gap: 3px;
+  color: #5f6f86;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.creator-mode-switch select {
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid #dfe7f2;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #13233b;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.creator-mode-switch .primary-btn {
+  grid-column: 1 / -1;
+  min-height: 34px;
+  border-radius: 8px;
+  box-shadow: none;
+  font-size: 12px;
+}
+
+.creator-editor .helper-banner {
+  margin-top: 8px;
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.creator-editor .issues-list {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: #8a3a32;
+  font-size: 12px;
 }
 
 .creator-tree-layout,
@@ -3619,4 +3679,309 @@ a:focus-visible {
   border-radius: 999px;
   animation: imports-spin 900ms linear infinite;
   margin-right: 8px;
+}
+
+.saas-products-layout {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(460px, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.saas-products-table-wrap {
+  border: 1px solid #e7edf5;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 10px 24px rgba(20, 33, 61, 0.05);
+  overflow: hidden;
+}
+
+.saas-products-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.saas-products-table th {
+  background: #fafcff;
+  color: #6b778c;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+  padding: 7px 8px;
+  border-bottom: 1px solid #eef3f9;
+}
+
+.saas-products-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid #f1f4f8;
+  vertical-align: middle;
+}
+
+.saas-products-table tr {
+  transition: background-color 160ms ease;
+  cursor: pointer;
+}
+
+.saas-products-table tr:hover {
+  background: #f8fbff;
+}
+
+.saas-products-table tr.is-selected {
+  background: #eef5ff;
+}
+
+.saas-product-thumb {
+  width: 60px;
+  height: 60px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid #e2e9f3;
+  display: block;
+  background: #f4f7fb;
+}
+
+.saas-product-thumb-empty {
+  display: grid;
+  place-items: center;
+  color: #90a0b6;
+  font-size: 12px;
+}
+
+.saas-cell-input {
+  width: 100%;
+  min-height: 28px;
+  border: 1px solid #e4eaf3;
+  border-radius: 7px;
+  background: #ffffff;
+  padding: 0 10px;
+  color: #172233;
+  font-size: 11px;
+}
+
+.saas-cell-input:focus {
+  outline: none;
+  border-color: #bfd3ff;
+  box-shadow: 0 0 0 3px rgba(36, 87, 245, 0.08);
+}
+
+.saas-editor-panel {
+  border: 1px solid #d5e2f3;
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at top right, rgba(224, 236, 255, 0.55), transparent 35%),
+    linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+  box-shadow: 0 22px 54px rgba(18, 32, 61, 0.12);
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+  animation: saas-editor-slide-in 220ms ease;
+  position: sticky;
+  top: 16px;
+}
+
+.saas-editor-panel h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #10213a;
+}
+
+.saas-editor-panel p {
+  margin: 0;
+  color: #5f718f;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.saas-editor-image-wrap {
+  border: 1px solid #d9e5f5;
+  border-radius: 12px;
+  background: #f4f8ff;
+  padding: 8px;
+}
+
+.saas-editor-image {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  border-radius: 10px;
+  border: 1px solid #cfdff2;
+  object-fit: cover;
+  background: #eef3fa;
+}
+
+.saas-editor-image-empty {
+  display: grid;
+  place-items: center;
+  color: #95a4ba;
+  font-size: 13px;
+}
+
+.saas-editor-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.saas-editor-grid label {
+  display: grid;
+  gap: 5px;
+  color: #586577;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.saas-editor-grid input,
+.saas-editor-grid textarea {
+  width: 100%;
+  border: 1px solid #dbe6f4;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #142033;
+  font-size: 13px;
+  padding: 9px 10px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65);
+}
+
+.saas-editor-grid textarea {
+  min-height: 140px;
+}
+
+.saas-editor-grid textarea {
+  resize: vertical;
+  min-height: 140px;
+}
+
+.saas-editor-grid label:last-child {
+  grid-column: 1 / -1;
+}
+
+.saas-editor-grid input:focus,
+.saas-editor-grid textarea:focus {
+  outline: none;
+  border-color: #b6ccf6;
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12);
+}
+
+.saas-editor-panel .primary-btn,
+.saas-editor-panel .secondary-btn {
+  min-height: 42px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.creator-runtime-panel {
+  margin-top: 10px;
+  border: 1px solid #dbe6f7;
+  border-radius: 14px;
+  background: #f7faff;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.creator-runtime-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.creator-runtime-row span {
+  color: #64748b;
+}
+
+.creator-runtime-row strong {
+  color: #0f274d;
+}
+
+.otto-summary-grid {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.otto-summary-grid div {
+  border: 1px solid #dbe6f5;
+  border-radius: 10px;
+  background: #f8fbff;
+  padding: 8px;
+  display: grid;
+  gap: 4px;
+}
+
+.otto-summary-grid span {
+  color: #6c7a90;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.otto-summary-grid strong {
+  color: #122643;
+  font-size: 14px;
+}
+
+.otto-errors-table-wrap {
+  margin-top: 10px;
+  border: 1px solid #e0e8f4;
+  border-radius: 12px;
+  overflow: auto;
+  background: #ffffff;
+}
+
+.otto-errors-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 760px;
+}
+
+.otto-errors-table th {
+  padding: 8px;
+  text-align: left;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #61708a;
+  background: #f7faff;
+  border-bottom: 1px solid #e8eff8;
+}
+
+.otto-errors-table td {
+  padding: 8px;
+  border-bottom: 1px solid #eef3f9;
+  font-size: 12px;
+  color: #1a2a42;
+  vertical-align: top;
+}
+
+@keyframes saas-editor-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@media (max-width: 980px) {
+  .saas-products-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .saas-editor-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .otto-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }

@@ -1,5 +1,7 @@
 import xml.etree.ElementTree as ET
 import logging
+import asyncio
+import httpx
 
 from app.utils.category_classifier import CategoryClassifier
 from app.utils.bullet_point_generator import BulletPointGenerator
@@ -42,30 +44,30 @@ class ProductMapper:
         self.otto_client = otto_client
         self.logger = logging.getLogger("product_mapper_flow")
 
-    async def payload_deploy(self, run_id: str | None = None):
-        result: list[dict] = []
+    async def payload_deploy(self):
+        result: list[dict | None] = [None] * len(self.products)
         issues: list[dict] = []
+        semaphore = asyncio.Semaphore(10)
 
-        for index, product in enumerate(self.products):
+        async def _map_one(index: int, product: dict) -> None:
             ean = product.get("EAN") or product.get("ean")
             try:
                 self.logger.info(
-                    "[run_id=%s] mapper item_start index=%s ean=%s",
-                    run_id,
+                    "step=mapper_item_start index=%s ean=%s",
                     index,
                     ean,
                 )
-                result.append(await self.clean_data(product, run_id=run_id))
+                async with semaphore:
+                    mapped = await self.clean_data(product)
+                result[index] = mapped
                 self.logger.info(
-                    "[run_id=%s] mapper item_done index=%s ean=%s",
-                    run_id,
+                    "step=mapper_item_done index=%s ean=%s",
                     index,
                     ean,
                 )
             except Exception as exc:
                 self.logger.exception(
-                    "[run_id=%s] mapper item_failed index=%s ean=%s error=%s",
-                    run_id,
+                    "step=mapper_item_failed index=%s ean=%s error=%s",
                     index,
                     ean,
                     exc,
@@ -77,12 +79,16 @@ class ProductMapper:
                     }
                 )
 
+        await asyncio.gather(
+            *[_map_one(index, product) for index, product in enumerate(self.products)]
+        )
+
         return {
-            "items": result,
+            "items": [item for item in result if isinstance(item, dict)],
             "issues": issues,
         }
 
-    async def clean_data(self, product, run_id: str | None = None):
+    async def clean_data(self, product):
         ean = product.get("EAN") or product.get("ean")
 
         result = {
@@ -110,85 +116,94 @@ class ProductMapper:
 
             result[name] = values[0] if len(values) == 1 else values
 
-        self.logger.info("[run_id=%s] category generation start ean=%s", run_id, ean)
+        self.logger.info("step=category_generation_start ean=%s", ean)
         result["category"] = await self.get_category(result)
         self.logger.info(
-            "[run_id=%s] category generation done ean=%s category=%s",
-            run_id,
+            "step=category_generation_done ean=%s category=%s",
             ean,
             result.get("category"),
         )
         result["bulletPoints"] = await self.get_bullet_points(result)
         self.logger.info(
-            "[run_id=%s] bullet points done ean=%s count=%s",
-            run_id,
+            "step=bullet_points_done ean=%s count=%s",
             ean,
             len(result.get("bulletPoints", []) or []),
         )
 
-        self.logger.info("[run_id=%s] description generation start ean=%s", run_id, ean)
+        self.logger.info("step=description_generation_start ean=%s", ean)
         description = await self.description_generator.generate(
             product, bullet_points=result["bulletPoints"]
         )
         result["description"] = description
-        self.logger.info("[run_id=%s] description generation done ean=%s", run_id, ean)
+        self.logger.info("step=description_generation_done ean=%s", ean)
 
         direct_map = self.direct_map_attrs(product)
         result["directMappedAttributes"] = direct_map
         self.logger.info(
-            "[run_id=%s] direct attrs mapped ean=%s count=%s",
-            run_id,
+            "step=direct_attrs_mapped ean=%s count=%s",
             ean,
             len(direct_map),
         )
 
         generated_attrs: list[dict] = []
         if self.otto_client and result.get("category"):
-            categories_payload = CategoryQuery(
-                category=result["category"], page=0, limit=100
-            ).to_payload()
-            category_attributes = await self.otto_client.get_categories(
-                categories_payload, controller=self.controller
-            )
-            cleaned_otto_attrs = self.prepare_attrs(category_attributes)
-            self.logger.info(
-                "[run_id=%s] otto attrs fetched ean=%s category=%s count=%s",
-                run_id,
-                ean,
-                result.get("category"),
-                len(cleaned_otto_attrs),
-            )
-            generated = await self.attribute_generator.generate(
-                category=result["category"],
-                source_attributes=result,
-                bullet_points=result["bulletPoints"],
-                otto_attributes=cleaned_otto_attrs,
-                exclude_attributes=direct_map,
-            )
-            if isinstance(generated, dict):
-                generated_attrs = generated.get("attributes", []) or []
-            self.logger.info(
-                "[run_id=%s] generated attrs done ean=%s count=%s",
-                run_id,
-                ean,
-                len(generated_attrs),
-            )
+            try:
+                categories_payload = CategoryQuery(
+                    category=result["category"], page=0, limit=100
+                ).to_payload()
+                category_attributes = await self.otto_client.get_categories(
+                    categories_payload, controller=self.controller
+                )
+                cleaned_otto_attrs = self.prepare_attrs(category_attributes)
+                self.logger.info(
+                    "step=otto_attrs_fetched ean=%s category=%s count=%s",
+                    ean,
+                    result.get("category"),
+                    len(cleaned_otto_attrs),
+                )
+                generated = await self.attribute_generator.generate(
+                    category=result["category"],
+                    source_attributes=result,
+                    bullet_points=result["bulletPoints"],
+                    otto_attributes=cleaned_otto_attrs,
+                    exclude_attributes=direct_map,
+                )
+                if isinstance(generated, dict):
+                    generated_attrs = generated.get("attributes", []) or []
+                self.logger.info(
+                    "step=generated_attrs_done ean=%s count=%s",
+                    ean,
+                    len(generated_attrs),
+                )
+            except httpx.HTTPStatusError as exc:
+                self.logger.warning(
+                    "step=otto_attrs_fetch_failed_fallback_direct_only ean=%s category=%s status=%s",
+                    ean,
+                    result.get("category"),
+                    exc.response.status_code if exc.response else "unknown",
+                )
+                generated_attrs = []
+            except Exception as exc:
+                self.logger.warning(
+                    "step=otto_attrs_generation_failed_fallback_direct_only ean=%s category=%s error=%s",
+                    ean,
+                    result.get("category"),
+                    exc,
+                )
+                generated_attrs = []
 
         result["attributes"] = [*direct_map, *generated_attrs]
         self.logger.info(
-            "[run_id=%s] merged attrs ready ean=%s total=%s",
-            run_id,
+            "step=merged_attrs_ready ean=%s total=%s",
             ean,
             len(result["attributes"]),
         )
 
         return result
 
-
     async def get_category(self, product: dict):
         response = await self.classifier.classify(product)
         return response.get("category")
-
 
     async def get_bullet_points(self, product: dict):
         product["bulletPoints"] = [
@@ -203,8 +218,7 @@ class ProductMapper:
                 return product["bulletPoints"]
             return [*product["bulletPoints"], *generated]
         return product["bulletPoints"]
-    
-    
+
     def direct_map_attrs(self, product: dict) -> list[dict]:
         direct_map = {
             "Breite": self.clean_dimension(product.get("Breite", None)),
@@ -216,19 +230,19 @@ class ProductMapper:
         return [
             {
                 "name": name,
-                "value": value,
+                "values": [str(value).strip()],
+                "additional": True,
             }
             for name, value in direct_map.items()
             if value is not None
         ]
-    
+
     def clean_dimension(self, value: str | None):
         if not value:
             return None
 
         return value.replace(" cm", "").strip()
-    
-    
+
     def prepare_attrs(self, category_attributes: list[dict]):
         attrs = []
 
@@ -245,7 +259,7 @@ class ProductMapper:
 
             if "name" not in item or "type" not in item:
                 continue
-            if item.get("relevance") in ("HIGH", "MEDIUM", "LOW"):
+            if item.get("relevance") == "HIGH":
                 result.append(
                     {
                         "name": item["name"],
@@ -258,5 +272,5 @@ class ProductMapper:
                         "exampleValues": item.get("exampleValues", []),
                     }
                 )
-        
+
         return result

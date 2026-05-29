@@ -10,6 +10,7 @@ Write/import workflows remain under `/v1/products/...`.
 import asyncio
 from datetime import UTC, date, datetime
 from io import BytesIO
+import json
 import logging
 from pathlib import Path
 import re
@@ -131,7 +132,9 @@ CREATE_DONE_RU = "Создание успешно"
 CREATE_FAILED_RU = "Создание с ошибкой"
 AVAILABILITY_DONE_RU = "Доступность успешно"
 AVAILABILITY_FAILED_RU = "Доступность с ошибкой"
-MAPPER_LOG_PATH = Path(__file__).resolve().parents[3] / "logs" / "product_mapper_flow.log"
+MAPPER_LOG_PATH = (
+    Path(__file__).resolve().parents[3] / "logs" / "product_mapper_flow.log"
+)
 MAPPER_LOGGER = logging.getLogger("product_mapper_flow")
 if not MAPPER_LOGGER.handlers:
     MAPPER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -140,6 +143,463 @@ if not MAPPER_LOGGER.handlers:
     MAPPER_LOGGER.setLevel(logging.INFO)
     MAPPER_LOGGER.addHandler(_handler)
     MAPPER_LOGGER.propagate = False
+
+PREPARED_UPLOAD_LOG_PATH = (
+    Path(__file__).resolve().parents[3] / "logs" / "prepared_upload_payloads.log"
+)
+PREPARED_UPLOAD_LOGGER = logging.getLogger("prepared_upload_payloads")
+if not PREPARED_UPLOAD_LOGGER.handlers:
+    PREPARED_UPLOAD_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _prepared_handler = logging.FileHandler(PREPARED_UPLOAD_LOG_PATH, encoding="utf-8")
+    _prepared_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    )
+    PREPARED_UPLOAD_LOGGER.setLevel(logging.INFO)
+    PREPARED_UPLOAD_LOGGER.addHandler(_prepared_handler)
+    PREPARED_UPLOAD_LOGGER.propagate = False
+
+FACTORY_PREPARE_TASKS: dict[str, dict[str, Any]] = {}
+FACTORY_HEARTBEAT_INTERVAL_SEC = 5
+FACTORY_STUCK_THRESHOLD_SEC = 45
+FACTORY_FETCH_TIMEOUT_SEC = 120
+FACTORY_MAP_TIMEOUT_SEC = 1800
+FACTORY_NORMALIZE_TIMEOUT_SEC = 20
+FACTORY_OTTO_UPDATE_TASK_MAX_POLLS = 60
+FACTORY_OTTO_UPDATE_TASK_FALLBACK_SLEEP_SEC = 5
+
+
+def _reset_log_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+
+
+def _flush_logger(logger: logging.Logger) -> None:
+    for handler in logger.handlers:
+        try:
+            handler.flush()
+        except Exception:
+            continue
+
+
+def _shape_attributes_for_schema(attributes: Any) -> list[dict[str, Any]]:
+    if not isinstance(attributes, list):
+        return []
+    shaped: list[dict[str, Any]] = []
+    for item in attributes:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if "values" in item and isinstance(item.get("values"), list):
+            values = [str(v).strip() for v in item.get("values", []) if str(v).strip()]
+        else:
+            raw_value = item.get("value")
+            if isinstance(raw_value, list):
+                values = [str(v).strip() for v in raw_value if str(v).strip()]
+            elif raw_value is None:
+                values = []
+            else:
+                text = str(raw_value).strip()
+                values = [text] if text else []
+        if not values:
+            continue
+        shaped.append(
+            {
+                "name": name,
+                "values": values,
+                "additional": bool(item.get("additional", True)),
+            }
+        )
+    return shaped
+
+
+def _shape_media_assets_for_schema(assets: Any) -> list[dict[str, Any]]:
+    if not isinstance(assets, list):
+        return []
+    shaped: list[dict[str, Any]] = []
+    for item in assets:
+        if not isinstance(item, dict):
+            continue
+        asset_type = item.get("type") or "IMAGE"
+        location = item.get("location") or item.get("filename")
+        if not isinstance(location, str) or not location.strip():
+            continue
+        shaped.append({"type": str(asset_type), "location": location.strip()})
+    return shaped
+
+
+def _pick_text(*values: Any) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _ensure_product_identity(
+    *,
+    normalized: dict[str, Any],
+    source_item: dict[str, Any],
+    mapped_item: dict[str, Any] | None,
+    index: int,
+) -> None:
+    source_ean = _pick_text(source_item.get("EAN"), source_item.get("ean"))
+    if not source_ean:
+        fallback = _pick_text(
+            normalized.get("ean"),
+            normalized.get("sku"),
+            normalized.get("productReference"),
+            (mapped_item or {}).get("EAN"),
+            (mapped_item or {}).get("ean"),
+            f"AUTO-EAN-{index + 1}",
+        )
+        source_ean = fallback
+
+    normalized["ean"] = source_ean
+    normalized["sku"] = source_ean
+    normalized["productReference"] = source_ean
+
+
+def _save_prepared_payloads_snapshot(
+    *,
+    payloads: list[ProductPayload],
+    controller: Controller,
+    factory_id: str,
+) -> Path:
+    temp_dir = Path(__file__).resolve().parents[3] / "temp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    file_path = (
+        temp_dir
+        / f"processed_products_{controller.value.lower()}_{factory_id}_{stamp}.json"
+    )
+    serialized = [item.model_dump(mode="json", exclude_none=True) for item in payloads]
+    file_path.write_text(
+        json.dumps(serialized, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return file_path
+
+
+def _save_final_edited_payloads_snapshot(
+    *,
+    payloads: list[dict[str, Any]],
+    controller: Controller,
+    factory_id: str,
+    process_id: str,
+) -> Path:
+    temp_dir = Path(__file__).resolve().parents[3] / "temp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    file_path = (
+        temp_dir
+        / f"processed_products_final_{controller.value.lower()}_{factory_id}_{process_id}_{stamp}.json"
+    )
+    file_path.write_text(
+        json.dumps(payloads, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return file_path
+
+
+async def _build_factory_prepared_products(
+    *,
+    payload: ProductFactoryCreateRequestDTO,
+    afterbuy: AfterbuyService,
+    product_service: ProductService,
+) -> tuple[list[ProductPayload], int, int, list[str]]:
+    from app.mapper.product_mapper import ProductMapper
+
+    issues: list[str] = []
+    _reset_log_file(MAPPER_LOG_PATH)
+    _reset_log_file(PREPARED_UPLOAD_LOG_PATH)
+    MAPPER_LOGGER.info(
+        "step=start_create_from_factory controller=%s factory_id=%s",
+        payload.controller.value,
+        payload.factory_id,
+    )
+
+    async def _run_step_with_timeout(
+        *,
+        step_name: str,
+        timeout_sec: int,
+        fn,
+    ):
+        MAPPER_LOGGER.info("step=%s_start timeout_sec=%s", step_name, timeout_sec)
+        try:
+            result = await asyncio.wait_for(fn(), timeout=timeout_sec)
+            MAPPER_LOGGER.info("step=%s_done", step_name)
+            return result
+        except asyncio.TimeoutError as exc:
+            MAPPER_LOGGER.error(
+                "step=%s_timeout timeout_sec=%s", step_name, timeout_sec
+            )
+            raise RuntimeError(
+                f"Step '{step_name}' exceeded timeout ({timeout_sec}s)"
+            ) from exc
+
+    source = await _run_step_with_timeout(
+        step_name="fetch_afterbuy_products",
+        timeout_sec=FACTORY_FETCH_TIMEOUT_SEC,
+        fn=lambda: afterbuy.get_products_by_factory_id(
+            payload.controller, int(payload.factory_id)
+        ),
+    )
+    source_items = [
+        item.model_dump(mode="json", exclude_none=True) for item in source.products
+    ]
+    source_items = source_items[:5]
+    MAPPER_LOGGER.info("step=fetch_afterbuy_products count=%s", len(source_items))
+    PREPARED_UPLOAD_LOGGER.info(
+        "step=fetch_afterbuy_products result=%s",
+        json.dumps(
+            {"count": len(source_items), "sample": source_items[:2]}, ensure_ascii=False
+        ),
+    )
+    _flush_logger(PREPARED_UPLOAD_LOGGER)
+
+    mapper = ProductMapper(
+        products=source_items,
+        controller=payload.controller.value,
+        otto_client=product_service.client,
+    )
+    mapped_result = await _run_step_with_timeout(
+        step_name="map_products",
+        timeout_sec=FACTORY_MAP_TIMEOUT_SEC,
+        fn=mapper.payload_deploy,
+    )
+    mapped_items = (
+        mapped_result.get("items", []) if isinstance(mapped_result, dict) else []
+    )
+    mapper_issues = (
+        mapped_result.get("issues", []) if isinstance(mapped_result, dict) else []
+    )
+    for item in mapper_issues:
+        issues.append(f"mapper index={item.get('index')}: {item.get('message')}")
+    MAPPER_LOGGER.info(
+        "step=mapper_payload_deploy mapped=%s mapper_issues=%s",
+        len(mapped_items),
+        len(mapper_issues),
+    )
+    PREPARED_UPLOAD_LOGGER.info(
+        "step=mapper_payload_deploy result=%s",
+        json.dumps(
+            {
+                "mapped_items": len(mapped_items),
+                "issues_count": len(mapper_issues),
+                "issues": mapper_issues,
+                "sample": mapped_items[:2],
+            },
+            ensure_ascii=False,
+        ),
+    )
+    _flush_logger(PREPARED_UPLOAD_LOGGER)
+
+    products_payload: list[ProductPayload] = []
+    for index, source_item in enumerate(source_items):
+        try:
+            ean = source_item.get("EAN") or source_item.get("ean")
+            MAPPER_LOGGER.info("step=normalize_start index=%s ean=%s", index, ean)
+            seo_html = build_seo_description(source_item, max_chars=2000)
+            normalized = await asyncio.wait_for(
+                asyncio.to_thread(build_normalized_product, source_item, seo_html),
+                timeout=FACTORY_NORMALIZE_TIMEOUT_SEC,
+            )
+            PREPARED_UPLOAD_LOGGER.info(
+                "step=normalize_preview index=%s body=%s",
+                index,
+                json.dumps(normalized, ensure_ascii=False),
+            )
+            _flush_logger(PREPARED_UPLOAD_LOGGER)
+
+            mapped_item = None
+            if index < len(mapped_items) and isinstance(mapped_items[index], dict):
+                mapped_item = mapped_items[index]
+                product_description = normalized.get("productDescription")
+                if isinstance(product_description, dict):
+                    if mapped_item.get("category"):
+                        product_description["category"] = mapped_item["category"]
+                    if mapped_item.get("description"):
+                        product_description["description"] = mapped_item["description"]
+                    if mapped_item.get("bulletPoints"):
+                        product_description["bulletPoints"] = mapped_item[
+                            "bulletPoints"
+                        ]
+                    if mapped_item.get("attributes"):
+                        product_description["attributes"] = (
+                            _shape_attributes_for_schema(mapped_item["attributes"])
+                        )
+            _ensure_product_identity(
+                normalized=normalized,
+                source_item=source_item,
+                mapped_item=mapped_item,
+                index=index,
+            )
+            if isinstance(normalized.get("mediaAssets"), list):
+                normalized["mediaAssets"] = _shape_media_assets_for_schema(
+                    normalized["mediaAssets"]
+                )
+
+            PREPARED_UPLOAD_LOGGER.info(
+                "step=final_product_body_candidate index=%s body=%s",
+                index,
+                json.dumps(normalized, ensure_ascii=False),
+            )
+            _flush_logger(PREPARED_UPLOAD_LOGGER)
+
+            products_payload.append(ProductPayload.model_validate(normalized))
+            MAPPER_LOGGER.info(
+                "step=normalize_done index=%s ean=%s sku=%s",
+                index,
+                ean,
+                normalized.get("sku"),
+            )
+        except Exception as exc:
+            msg = f"normalize index={index} failed: {exc}"
+            issues.append(msg)
+            MAPPER_LOGGER.exception("step=normalize_error message=%s", msg)
+            PREPARED_UPLOAD_LOGGER.info(
+                "step=normalize_error index=%s error=%s",
+                index,
+                json.dumps(
+                    {"message": str(exc), "source_item": source_item},
+                    ensure_ascii=False,
+                ),
+            )
+            _flush_logger(PREPARED_UPLOAD_LOGGER)
+
+    MAPPER_LOGGER.info(
+        "step=payload_built payload_items=%s skipped=%s",
+        len(products_payload),
+        len(source_items) - len(products_payload),
+    )
+    PREPARED_UPLOAD_LOGGER.info(
+        "step=payload_summary result=%s",
+        json.dumps(
+            {
+                "payload_items": len(products_payload),
+                "skipped_items": len(source_items) - len(products_payload),
+                "issues": issues,
+            },
+            ensure_ascii=False,
+        ),
+    )
+    _flush_logger(PREPARED_UPLOAD_LOGGER)
+    return products_payload, len(source_items), len(mapped_items), issues
+
+
+async def _run_factory_prepare_task(
+    *,
+    process_id: str,
+    payload: ProductFactoryCreateRequestDTO,
+    afterbuy: AfterbuyService,
+    product_service: ProductService,
+) -> None:
+    started_at = datetime.now(UTC)
+    task = FACTORY_PREPARE_TASKS.get(process_id) or {}
+    task.update(
+        {
+            "status": "IN_PROGRESS",
+            "started_at": started_at.isoformat(),
+            "updated_at": started_at.isoformat(),
+            "heartbeat_at": started_at.isoformat(),
+            "heartbeat_count": 0,
+            "current_step": "prepare_initializing",
+            "current_step_started_at": started_at.isoformat(),
+            "stuck": False,
+            "stuck_message": None,
+        }
+    )
+    FACTORY_PREPARE_TASKS[process_id] = task
+
+    heartbeat_stop = asyncio.Event()
+
+    async def _heartbeat_loop() -> None:
+        while not heartbeat_stop.is_set():
+            now = datetime.now(UTC)
+            current = FACTORY_PREPARE_TASKS.get(process_id)
+            if not current:
+                await asyncio.sleep(FACTORY_HEARTBEAT_INTERVAL_SEC)
+                continue
+            current["heartbeat_count"] = int(current.get("heartbeat_count", 0)) + 1
+            current["heartbeat_at"] = now.isoformat()
+            current["updated_at"] = now.isoformat()
+            MAPPER_LOGGER.info(
+                "step=heartbeat process_id=%s current_step=%s heartbeat_count=%s",
+                process_id,
+                current.get("current_step"),
+                current["heartbeat_count"],
+            )
+            await asyncio.sleep(FACTORY_HEARTBEAT_INTERVAL_SEC)
+
+    heartbeat_task = asyncio.create_task(_heartbeat_loop())
+
+    def _set_step(step: str) -> None:
+        now = datetime.now(UTC)
+        current = FACTORY_PREPARE_TASKS.get(process_id) or {}
+        current["current_step"] = step
+        current["current_step_started_at"] = now.isoformat()
+        current["updated_at"] = now.isoformat()
+        FACTORY_PREPARE_TASKS[process_id] = current
+        MAPPER_LOGGER.info(
+            "step=task_step_change process_id=%s current_step=%s", process_id, step
+        )
+
+    try:
+        _set_step("building_prepared_products")
+        products_payload, source_count, mapped_count, issues = (
+            await _build_factory_prepared_products(
+                payload=payload,
+                afterbuy=afterbuy,
+                product_service=product_service,
+            )
+        )
+        _set_step("saving_snapshot")
+        snapshot_path = _save_prepared_payloads_snapshot(
+            payloads=products_payload,
+            controller=payload.controller,
+            factory_id=payload.factory_id,
+        )
+        FACTORY_PREPARE_TASKS[process_id] = {
+            "status": "DONE",
+            "controller": payload.controller.value,
+            "factory_id": payload.factory_id,
+            "source_items": source_count,
+            "mapped_items": mapped_count,
+            "payload_items": len(products_payload),
+            "issues": issues,
+            "products": [
+                item.model_dump(mode="json", exclude_none=True)
+                for item in products_payload
+            ],
+            "snapshot_path": snapshot_path.as_posix(),
+            "finished_at": datetime.now(UTC).isoformat(),
+            "heartbeat_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+    except Exception as exc:
+        MAPPER_LOGGER.exception(
+            "step=factory_prepare_task_failed process_id=%s error=%s", process_id, exc
+        )
+        FACTORY_PREPARE_TASKS[process_id] = {
+            "status": "FAILED",
+            "controller": payload.controller.value,
+            "factory_id": payload.factory_id,
+            "issues": [str(exc)],
+            "products": [],
+            "finished_at": datetime.now(UTC).isoformat(),
+            "heartbeat_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+    finally:
+        heartbeat_stop.set()
+        try:
+            await heartbeat_task
+        except Exception:
+            pass
 
 
 def _product_to_dict(product: Product) -> dict[str, Any]:
@@ -1238,6 +1698,13 @@ async def create_products_from_prepared(
             ).model_dump(),
         )
 
+    for source_index, prepared_payload in validated_payloads:
+        PREPARED_UPLOAD_LOGGER.info(
+            "prepared_upload_payload index=%s body=%s",
+            source_index,
+            json.dumps(prepared_payload, ensure_ascii=False),
+        )
+
     created_items, create_issues = await creation_service.create_products(
         validated_payloads
     )
@@ -1612,198 +2079,217 @@ async def get_otto_product(
 )
 async def create_product_task_from_factory(
     payload: ProductFactoryCreateRequestDTO,
+    background_tasks: BackgroundTasks,
     afterbuy: AfterbuyService = Depends(get_afterbuy_login),
     product_service: ProductService = Depends(get_product_service),
 ):
-    from app.mapper.product_mapper import ProductMapper
-
     run_id = payload.run_id or str(uuid4())
-    stage = "start"
+    FACTORY_PREPARE_TASKS[run_id] = {
+        "status": "IN_PROGRESS",
+        "controller": payload.controller.value,
+        "factory_id": payload.factory_id,
+        "source_items": 0,
+        "mapped_items": 0,
+        "payload_items": 0,
+        "issues": [],
+        "products": [],
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
 
-    def _error_payload(
-        *,
-        status_code: int,
-        detail: str,
-        upstream_body: str | None = None,
-    ) -> JSONResponse:
+    background_tasks.add_task(
+        _run_factory_prepare_task,
+        process_id=run_id,
+        payload=payload,
+        afterbuy=afterbuy,
+        product_service=product_service,
+    )
+
+    return ProductFactoryCreateResponseDTO(
+        success=True,
+        run_id=run_id,
+        controller=payload.controller,
+        factory_id=payload.factory_id,
+        source_items=0,
+        mapped_items=0,
+        payload_items=0,
+        issues=[],
+        process_id=run_id,
+        process_state="IN_PROGRESS",
+    )
+
+
+@router.get("/tasks/create-from-factory/{process_id}")
+async def get_factory_prepare_task(process_id: str):
+    task = FACTORY_PREPARE_TASKS.get(process_id)
+    if task is None:
         return JSONResponse(
-            status_code=status_code,
+            status_code=status.HTTP_404_NOT_FOUND,
             content={
                 "success": False,
-                "stage": stage,
-                "detail": detail,
-                "run_id": run_id,
-                "controller": payload.controller.value,
-                "factory_id": payload.factory_id,
-                "upstream_body": upstream_body,
+                "message": "Task not found",
+                "process_id": process_id,
             },
         )
-
-    issues: list[str] = []
-    try:
-        MAPPER_LOGGER.info(
-            "[run_id=%s] start create-from-factory controller=%s factory_id=%s",
-            run_id,
-            payload.controller.value,
-            payload.factory_id,
+    heartbeat_at_text = task.get("heartbeat_at")
+    step_started_at_text = task.get("current_step_started_at")
+    now = datetime.now(UTC)
+    heartbeat_lag_sec: float | None = None
+    step_elapsed_sec: float | None = None
+    is_stuck = False
+    if isinstance(heartbeat_at_text, str):
+        try:
+            heartbeat_lag_sec = (
+                now - datetime.fromisoformat(heartbeat_at_text)
+            ).total_seconds()
+        except ValueError:
+            heartbeat_lag_sec = None
+    if isinstance(step_started_at_text, str):
+        try:
+            step_elapsed_sec = (
+                now - datetime.fromisoformat(step_started_at_text)
+            ).total_seconds()
+        except ValueError:
+            step_elapsed_sec = None
+    if (
+        task.get("status") == "IN_PROGRESS"
+        and isinstance(heartbeat_lag_sec, float)
+        and heartbeat_lag_sec > FACTORY_STUCK_THRESHOLD_SEC
+    ):
+        is_stuck = True
+        task["stuck"] = True
+        task["stuck_message"] = (
+            f"Step '{task.get('current_step')}' has no heartbeat for "
+            f"{int(heartbeat_lag_sec)}s"
+        )
+        MAPPER_LOGGER.warning(
+            "step=task_stuck_detected process_id=%s current_step=%s heartbeat_lag_sec=%s",
+            process_id,
+            task.get("current_step"),
+            int(heartbeat_lag_sec),
         )
 
-        stage = "fetch_afterbuy_products"
-        source = await afterbuy.get_products_by_factory_id(
-            payload.controller, int(payload.factory_id)
+    return {
+        "success": True,
+        "process_id": process_id,
+        "process_state": task.get("status"),
+        "heartbeat_lag_sec": heartbeat_lag_sec,
+        "step_elapsed_sec": step_elapsed_sec,
+        "stuck": is_stuck or bool(task.get("stuck")),
+        "stuck_message": task.get("stuck_message"),
+        **task,
+    }
+
+
+@router.post("/tasks/create-from-factory/{process_id}/submit")
+async def submit_factory_prepared_products(
+    process_id: str,
+    payload: dict[str, Any],
+    product_service: ProductService = Depends(get_product_service),
+):
+    task = FACTORY_PREPARE_TASKS.get(process_id)
+    if task is None:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "success": False,
+                "message": "Task not found",
+                "process_id": process_id,
+            },
         )
-        source_items = [
-            item.model_dump(mode="json", exclude_none=True) for item in source.products
-        ]
-        MAPPER_LOGGER.info(
-            "[run_id=%s] afterbuy products fetched count=%s",
-            run_id,
-            len(source_items),
+    products = payload.get("products")
+    if not isinstance(products, list) or not products:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"success": False, "message": "products must be a non-empty array"},
         )
 
-        stage = "mapper_payload_deploy"
-        mapper = ProductMapper(
-            products=source_items,
-            controller=payload.controller.value,
-            otto_client=product_service.client,
-        )
-        mapped_result = await mapper.payload_deploy(run_id=run_id)
-        mapped_items = (
-            mapped_result.get("items", []) if isinstance(mapped_result, dict) else []
-        )
-        mapper_issues = (
-            mapped_result.get("issues", []) if isinstance(mapped_result, dict) else []
-        )
-        for item in mapper_issues:
-            issues.append(f"mapper index={item.get('index')}: {item.get('message')}")
-        MAPPER_LOGGER.info(
-            "[run_id=%s] mapper complete mapped=%s mapper_issues=%s",
-            run_id,
-            len(mapped_items),
-            len(mapper_issues),
-        )
-
-        stage = "normalize_products"
-        products_payload: list[ProductPayload] = []
-        for index, source_item in enumerate(source_items):
-            try:
-                ean = source_item.get("EAN") or source_item.get("ean")
-                MAPPER_LOGGER.info(
-                    "[run_id=%s] normalize start index=%s ean=%s",
-                    run_id,
-                    index,
-                    ean,
-                )
-                seo_html = build_seo_description(source_item, max_chars=2000)
-                normalized = build_normalized_product(source_item, seo_html)
-
-                if index < len(mapped_items) and isinstance(mapped_items[index], dict):
-                    mapped_item = mapped_items[index]
-                    product_description = normalized.get("productDescription")
-                    if isinstance(product_description, dict):
-                        if mapped_item.get("category"):
-                            product_description["category"] = mapped_item["category"]
-                        if mapped_item.get("description"):
-                            product_description["description"] = mapped_item["description"]
-                        if mapped_item.get("bulletPoints"):
-                            product_description["bulletPoints"] = mapped_item["bulletPoints"]
-                        if mapped_item.get("attributes"):
-                            product_description["attributes"] = mapped_item["attributes"]
-
-                products_payload.append(ProductPayload.model_validate(normalized))
-                MAPPER_LOGGER.info(
-                    "[run_id=%s] normalize done index=%s ean=%s sku=%s",
-                    run_id,
-                    index,
-                    ean,
-                    normalized.get("sku"),
-                )
-            except Exception as exc:
-                msg = f"normalize index={index} failed: {exc}"
-                issues.append(msg)
-                MAPPER_LOGGER.exception("[run_id=%s] %s", run_id, msg)
-
-        MAPPER_LOGGER.info(
-            "[run_id=%s] payload built payload_items=%s skipped=%s",
-            run_id,
-            len(products_payload),
-            len(source_items) - len(products_payload),
-        )
-        if not products_payload:
-            MAPPER_LOGGER.error("[run_id=%s] no payload items ready; stopping", run_id)
-            return ProductFactoryCreateResponseDTO(
-                success=False,
-                run_id=run_id,
-                controller=payload.controller,
-                factory_id=payload.factory_id,
-                source_items=len(source_items),
-                mapped_items=len(mapped_items),
-                payload_items=0,
-                issues=issues or ["No valid products after normalization"],
-                process_id=None,
-                process_state="FAILED",
+    validated: list[dict[str, Any]] = []
+    validated_models: list[ProductPayload] = []
+    for index, item in enumerate(products):
+        try:
+            model = ProductPayload.model_validate(item)
+            validated_models.append(model)
+            validated.append(model.model_dump(mode="json", exclude_none=True))
+        except Exception as exc:
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={
+                    "success": False,
+                    "message": f"Invalid product at index {index}: {exc}",
+                    "index": index,
+                },
             )
 
-        stage = "otto_create_products"
-        create_payload = CreateProductRequest(
-            controller=payload.controller,
-            products=products_payload,
-        )
-        create_result = await product_service.create_or_update_products(create_payload)
-        process_id = _extract_process_id(create_result)
-        process_state = (
-            (create_result.state or "").upper() if create_result.state else None
-        )
-        MAPPER_LOGGER.info(
-            "[run_id=%s] otto create done process_id=%s state=%s message=%s",
-            run_id,
-            process_id,
-            process_state,
-            create_result.message,
-        )
+    controller = Controller(str(task.get("controller", "jv")).lower())
+    factory_id = str(task.get("factory_id", "unknown"))
+    file_path = _save_final_edited_payloads_snapshot(
+        payloads=validated,
+        controller=controller,
+        factory_id=factory_id,
+        process_id=process_id,
+    )
+    task["final_snapshot_path"] = file_path.as_posix()
+    task["final_products_count"] = len(validated)
+    task["updated_at"] = datetime.now(UTC).isoformat()
 
-        return ProductFactoryCreateResponseDTO(
-            success=True,
-            run_id=run_id,
-            controller=payload.controller,
-            factory_id=payload.factory_id,
-            source_items=len(source_items),
-            mapped_items=len(mapped_items),
-            payload_items=len(products_payload),
-            issues=issues,
-            process_id=process_id,
-            process_state=process_state,
-        )
-    except ValueError as exc:
-        MAPPER_LOGGER.exception(
-            "[run_id=%s] create-from-factory value error at stage=%s", run_id, stage
-        )
-        return _error_payload(status_code=400, detail=str(exc))
-    except httpx.HTTPStatusError as exc:
-        upstream_text = ""
-        try:
-            upstream_text = exc.response.text
-        except Exception:
-            upstream_text = None  # type: ignore[assignment]
-        MAPPER_LOGGER.exception(
-            "[run_id=%s] create-from-factory upstream http error at stage=%s status=%s",
-            run_id,
-            stage,
-            exc.response.status_code if exc.response else "unknown",
-        )
-        return _error_payload(
-            status_code=exc.response.status_code if exc.response else 502,
-            detail=f"Upstream HTTP error at stage '{stage}': {exc}",
-            upstream_body=upstream_text,
-        )
-    except Exception as exc:
-        MAPPER_LOGGER.exception(
-            "[run_id=%s] create-from-factory unexpected error at stage=%s", run_id, stage
-        )
-        return _error_payload(
-            status_code=500,
-            detail=f"Unhandled error at stage '{stage}': {exc}",
-        )
+    create_payload = CreateProductRequest(
+        controller=controller,
+        products=validated_models,
+    )
+    create_result = await product_service.create_or_update_products(create_payload)
+    otto_process_id = _extract_process_id(create_result)
+    otto_state = (create_result.state or "").lower()
+    update_result: dict[str, Any] = {}
+    failed_result: dict[str, Any] | None = None
+
+    if otto_process_id:
+        for _ in range(FACTORY_OTTO_UPDATE_TASK_MAX_POLLS):
+            update_result = await product_service.update_tasks(
+                otto_process_id, controller=controller
+            )
+            otto_state = str(update_result.get("state", "")).lower()
+            if otto_state in {"done", "failed", "error"}:
+                break
+
+            ping_after_value = update_result.get("pingAfter")
+            sleep_seconds = FACTORY_OTTO_UPDATE_TASK_FALLBACK_SLEEP_SEC
+            if isinstance(ping_after_value, str):
+                try:
+                    ping_after = datetime.fromisoformat(
+                        ping_after_value.replace("Z", "+00:00")
+                    )
+                    now = datetime.now(UTC)
+                    delta = (ping_after - now).total_seconds()
+                    sleep_seconds = max(
+                        1,
+                        min(FACTORY_OTTO_UPDATE_TASK_FALLBACK_SLEEP_SEC, int(delta) if delta > 0 else 1),
+                    )
+                except ValueError:
+                    sleep_seconds = FACTORY_OTTO_UPDATE_TASK_FALLBACK_SLEEP_SEC
+            await asyncio.sleep(sleep_seconds)
+
+        failed_count = int(update_result.get("failed") or 0)
+        if failed_count > 0:
+            failed_result = await product_service.failed_tasks(
+                otto_process_id, controller=controller
+            )
+
+    task["otto_process_id"] = otto_process_id
+    task["otto_update_result"] = update_result
+    task["otto_failed_result"] = failed_result
+    task["updated_at"] = datetime.now(UTC).isoformat()
+    task["status"] = "DONE" if int((update_result or {}).get("failed") or 0) == 0 else "FAILED"
+
+    return {
+        "success": True,
+        "process_id": process_id,
+        "saved_path": file_path.as_posix(),
+        "products_count": len(validated),
+        "otto_process_id": otto_process_id,
+        "otto_create_state": otto_state,
+        "otto_update_result": update_result,
+        "otto_failed_result": failed_result,
+    }
 
 
 @router.delete("delete-by-url/product", response_model=DeleteProductResponse)
