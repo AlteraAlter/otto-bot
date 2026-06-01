@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, Box, Check, ChevronLeft, ChevronRight, Copy, Funnel, MoreHorizontal, Package, RefreshCw, Search, Trash2, X } from "lucide-react";
+import { AlertCircle, Box, Check, ChevronLeft, ChevronRight, Copy, Funnel, Package, RefreshCw, Search, Trash2, X } from "lucide-react";
 
 import { readApiErrorMessage, readJsonResponse } from "../lib/api";
 import { useCurrentUser } from "../hooks/use-current-user";
@@ -74,6 +74,16 @@ type ParsedSkuError = {
 
 type EditorTab = "general" | "attributes" | "json";
 type AttributeEditField = "values";
+const SHIPPING_PROFILE_LABELS: Record<string, string> = {
+  "786c6468-3baf-52e0-88b5-13757eb7f873": "4-8 недель",
+  "360835cf-4962-59bb-ae66-78e8a41c8948": "6-10 недель",
+  "28e3b4f8-12aa-5994-a7e9-26027baede55": "2-4 недели",
+  "ad6009b9-a82f-5284-ac64-5627575655ac": "Express Chesterfield",
+  "571dd076-4e59-5216-a86f-3e5f30319e9c": "Express Production",
+  "935a75b0-ac88-55a8-98df-8556306f1386": "8-12 недель",
+  "b4139e65-603f-52f7-9b99-393cf6b2461f": "Доступно сразу",
+  "83feaefc-c110-5b39-af53-49344b77ae89": "Сборка/занос, сразу",
+};
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
@@ -160,24 +170,46 @@ function readAttributeGroup(name: string): "Основные характери�
 }
 
 function parseShippingProfiles(payload: unknown): ShippingProfileOption[] {
-  if (Array.isArray(payload)) {
-    return payload
-      .map((item) => asRecord(item))
-      .map((item) => ({ id: String(item.id ?? ""), name: String(item.name ?? item.id ?? "") }))
-      .filter((item) => Boolean(item.id));
-  }
-  const record = asRecord(payload);
-  const nested = Array.isArray(record.shippingProfiles)
-    ? record.shippingProfiles
-    : Array.isArray(record.items)
-      ? record.items
-      : Array.isArray(record.data)
-        ? record.data
-        : [];
-  return nested
+  const rawList = Array.isArray(payload)
+    ? payload
+    : (() => {
+      const record = asRecord(payload);
+      if (Array.isArray(record.shippingProfiles)) return record.shippingProfiles;
+      if (Array.isArray(record.items)) return record.items;
+      if (Array.isArray(record.data)) return record.data;
+      if (Array.isArray(record.results)) return record.results;
+      return [];
+    })();
+
+  const parsed = rawList
     .map((item) => asRecord(item))
-    .map((item) => ({ id: String(item.id ?? ""), name: String(item.name ?? item.id ?? "") }))
+    .map((item) => {
+      const id = String(
+        item.id ??
+        item.shippingProfileID ??
+        item.shippingProfileId ??
+        item.profileId ??
+        "",
+      );
+      const name = String(
+        item.name ??
+        item.title ??
+        item.profileName ??
+        item.label ??
+        SHIPPING_PROFILE_LABELS[id] ??
+        id,
+      );
+      return { id, name };
+    })
     .filter((item) => Boolean(item.id));
+
+  const unique = new Map<string, ShippingProfileOption>();
+  for (const item of parsed) unique.set(item.id, item);
+  return Array.from(unique.values());
+}
+
+function productShippingProfileId(product: Record<string, unknown>): string {
+  return String(product.shippingProfileID ?? "");
 }
 
 export default function CreatorPage() {
@@ -186,9 +218,9 @@ export default function CreatorPage() {
   const [fabrics, setFabrics] = useState<FabricOption[]>([]);
   const [shippingProfiles, setShippingProfiles] = useState<ShippingProfileOption[]>([]);
   const [selectedFabricId, setSelectedFabricId] = useState<string>("");
-  const [selectedShippingProfileId, setSelectedShippingProfileId] = useState<string>("");
   const [state, setState] = useState<UploadState>("idle");
   const [isLoadingFabrics, setIsLoadingFabrics] = useState(false);
+  const [isRefreshingFabrics, setIsRefreshingFabrics] = useState(false);
   const [message, setMessage] = useState("Выберите fabric и нажмите «Выставить».");
   const [issues, setIssues] = useState<string[]>([]);
   const [processId, setProcessId] = useState<string>("");
@@ -212,7 +244,6 @@ export default function CreatorPage() {
   const [showAllErrorCards, setShowAllErrorCards] = useState(false);
   const [tableQuery, setTableQuery] = useState("");
   const [isFilterOpen, setIsFilterOpen] = useState(false);
-  const [isActionsOpen, setIsActionsOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [priceFrom, setPriceFrom] = useState("");
@@ -237,7 +268,6 @@ export default function CreatorPage() {
       const draft = JSON.parse(raw) as Record<string, unknown>;
       setController((draft.controller as ControllerOption) ?? "jv");
       setSelectedFabricId(String(draft.selectedFabricId ?? ""));
-      setSelectedShippingProfileId(String(draft.selectedShippingProfileId ?? ""));
       setState((draft.state as UploadState) ?? "idle");
       setUiMessage(String(draft.message ?? "Выберите fabric и нажмите «Выставить»."));
       setIssues(Array.isArray(draft.issues) ? (draft.issues as string[]) : []);
@@ -274,7 +304,6 @@ export default function CreatorPage() {
     const draft = {
       controller,
       selectedFabricId,
-      selectedShippingProfileId,
       state,
       message,
       issues,
@@ -296,7 +325,6 @@ export default function CreatorPage() {
     hydratedDraft,
     controller,
     selectedFabricId,
-    selectedShippingProfileId,
     state,
     message,
     issues,
@@ -314,35 +342,56 @@ export default function CreatorPage() {
     lastSubmitTotal,
   ]);
 
-  useEffect(() => {
-    let active = true;
-    async function loadFabrics() {
-      setIsLoadingFabrics(true);
-      try {
-        const response = await fetch(`/api/products/fabrics?controller=${encodeURIComponent(controller)}`, { method: "GET", cache: "no-store" });
-        const parsed = await readJsonResponse<FabricListResponse>(response);
-        if (!active) return;
-        if (!response.ok) {
-          setFabrics([]);
-          setSelectedFabricId("");
-          setUiMessage(readApiErrorMessage(parsed, "Не удалось загрузить fabrics", response.status));
-          return;
-        }
-        const items = Array.isArray(parsed?.factory) ? parsed.factory : [];
-        setFabrics(items);
-        setSelectedFabricId(items[0]?.id ?? "");
-      } catch {
-        if (!active) return;
+  async function loadFabrics(options?: { silent?: boolean }) {
+    const silent = Boolean(options?.silent);
+    if (!silent) setIsLoadingFabrics(true);
+    try {
+      const response = await fetch(`/api/products/fabrics?controller=${encodeURIComponent(controller)}`, { method: "GET", cache: "no-store" });
+      const parsed = await readJsonResponse<FabricListResponse>(response);
+      if (!response.ok) {
         setFabrics([]);
         setSelectedFabricId("");
-        setUiMessage("Ошибка загрузки списка fabrics.");
-      } finally {
-        if (active) setIsLoadingFabrics(false);
+        setUiMessage(readApiErrorMessage(parsed, "Не удалось загрузить fabrics", response.status));
+        return;
       }
+      const items = Array.isArray(parsed?.factory) ? parsed.factory : [];
+      setFabrics(items);
+      setSelectedFabricId((prev) => (prev && items.some((item) => item.id === prev) ? prev : (items[0]?.id ?? "")));
+    } catch {
+      setFabrics([]);
+      setSelectedFabricId("");
+      setUiMessage("Ошибка загрузки списка fabrics.");
+    } finally {
+      if (!silent) setIsLoadingFabrics(false);
     }
+  }
+
+  useEffect(() => {
     void loadFabrics();
-    return () => { active = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controller]);
+
+  async function refreshFabrics() {
+    setIsRefreshingFabrics(true);
+    setUiMessage("Обновляю factories: очищаю таблицу и загружаю заново...");
+    try {
+      const response = await fetch("/api/products/fabrics/refresh", {
+        method: "POST",
+        cache: "no-store",
+      });
+      const parsed = await readJsonResponse<unknown>(response);
+      if (!response.ok) {
+        setUiMessage(readApiErrorMessage(parsed, "Не удалось обновить factories", response.status));
+        return;
+      }
+      await loadFabrics({ silent: true });
+      setUiMessage("Список fabrics обновлен.");
+    } catch (caughtError) {
+      setUiMessage(caughtError instanceof Error ? `Ошибка обновления fabrics: ${caughtError.message}` : "Ошибка обновления fabrics.");
+    } finally {
+      setIsRefreshingFabrics(false);
+    }
+  }
 
   useEffect(() => {
     let active = true;
@@ -356,21 +405,31 @@ export default function CreatorPage() {
         if (!active) return;
         if (!response.ok) {
           setShippingProfiles([]);
-          setSelectedShippingProfileId("");
           return;
         }
         const items = parseShippingProfiles(parsed);
         setShippingProfiles(items);
-        setSelectedShippingProfileId((prev) => (prev && items.some((item) => item.id === prev) ? prev : (items[0]?.id ?? "")));
       } catch {
         if (!active) return;
         setShippingProfiles([]);
-        setSelectedShippingProfileId("");
       }
     }
     void loadShippingProfiles();
     return () => { active = false; };
   }, [controller]);
+
+  useEffect(() => {
+    if (shippingProfiles.length === 0 || products.length === 0) return;
+    const defaultProfileId = shippingProfiles[0]?.id ?? "";
+    if (!defaultProfileId) return;
+    setProducts((prev) =>
+      prev.map((raw) => {
+        const product = asRecord(raw);
+        if (productShippingProfileId(product)) return product;
+        return { ...product, shippingProfileID: defaultProfileId };
+      }),
+    );
+  }, [shippingProfiles, products.length]);
 
   useEffect(() => {
     if (!processId || processState !== "IN_PROGRESS") return;
@@ -405,6 +464,8 @@ export default function CreatorPage() {
     const description = asRecord(product.productDescription);
     const pricing = asRecord(product.pricing);
     const standardPrice = asRecord(pricing.standardPrice);
+    const profileId = productShippingProfileId(asRecord(product));
+    const profileName = shippingProfiles.find((item) => item.id === profileId)?.name ?? "";
     const rowErrors = ottoErrors.filter((error) => error.variation === String(product.sku ?? "")).length;
     const rowStatus =
       tableStatusPhase === "pending"
@@ -419,6 +480,8 @@ export default function CreatorPage() {
       image: firstImage(product),
       sku: String(product.sku ?? ""),
       category: String(description.category ?? ""),
+      shippingProfileId: profileId,
+      shippingProfileName: profileName,
       ean: String(product.ean ?? ""),
       productReference: String(product.productReference ?? ""),
       price: String(standardPrice.amount ?? ""),
@@ -426,7 +489,7 @@ export default function CreatorPage() {
       errors: rowErrors,
       status: rowStatus as "passed" | "failed" | "processing" | "pending",
     };
-  }), [products, ottoErrors, tableStatusPhase]);
+  }), [products, ottoErrors, tableStatusPhase, shippingProfiles]);
 
   const categories = useMemo(
     () => Array.from(new Set(rows.map((row) => row.category).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
@@ -448,7 +511,7 @@ export default function CreatorPage() {
       if (to !== null && Number.isFinite(priceValue) && priceValue > to) return false;
 
       if (!query) return true;
-      return [row.sku, row.category, row.productReference, row.productLine, row.ean]
+      return [row.sku, row.category, row.shippingProfileName, row.productReference, row.productLine, row.ean]
         .join(" ")
         .toLowerCase()
         .includes(query);
@@ -591,28 +654,18 @@ export default function CreatorPage() {
     }
   }
 
-  async function refreshProcessState() {
-    if (!processId) return;
-    const response = await fetch(`/api/products/create-from-fabric/${processId}`, { method: "GET", cache: "no-store" });
-    const parsed = await readJsonResponse<PrepareStatusResponse>(response);
-    if (!response.ok || parsed?.success === false) return;
-    const nextState = parsed?.process_state ?? processState;
-    setProcessState(nextState);
-    setIssues(Array.isArray(parsed?.issues) ? parsed.issues : []);
-    setCurrentStep(String(parsed?.current_step ?? currentStep));
-    setStepElapsed(Number(parsed?.step_elapsed_sec ?? stepElapsed));
-    setHeartbeatLag(Number(parsed?.heartbeat_lag_sec ?? heartbeatLag));
-    setStuckMessage(parsed?.stuck ? String(parsed?.stuck_message ?? "Процесс завис") : "");
-    if (nextState === "DONE") {
-      const rows = Array.isArray(parsed?.products) ? parsed.products : [];
-      if (rows.length > 0) setProducts(rows);
-    }
-  }
-
   function updateSelected(path: string[], value: string) {
     setProducts((prev) => {
       const next = [...prev];
       next[selectedIndex] = updateProductField(asRecord(next[selectedIndex]), path, value);
+      return next;
+    });
+  }
+
+  function updateRowShippingProfile(rowIndex: number, profileId: string) {
+    setProducts((prev) => {
+      const next = [...prev];
+      next[rowIndex] = { ...asRecord(next[rowIndex]), shippingProfileID: profileId };
       return next;
     });
   }
@@ -722,11 +775,6 @@ export default function CreatorPage() {
 
   async function submitEditedProducts() {
     if (!processId || products.length === 0) return;
-    if (!selectedShippingProfileId) {
-      setState("error");
-      setUiMessage("Выберите профиль доставки перед загрузкой.");
-      return;
-    }
     setState("loading");
     setUiMessage("Загрузить: отправляю все продукты в OTTO...");
     setOttoSummary(null);
@@ -753,6 +801,7 @@ export default function CreatorPage() {
       const update = asRecord(parsed?.otto_update_result);
       const failed = asRecord(parsed?.otto_failed_result);
       const failedCount = Number(update.failed ?? 0);
+      const succeededCount = Number(update.succeeded ?? 0);
       const ottoPid = String(parsed?.otto_process_id ?? "");
       setOttoProcessId(ottoPid);
       setOttoSummary({
@@ -788,13 +837,24 @@ export default function CreatorPage() {
         setUiMessage("Загрузка завершена с ошибками.");
         return;
       }
+      if (succeededCount < products.length) {
+        setState("error");
+        setIssues([`Создано меньше товаров, чем ожидалось: ${succeededCount} из ${products.length}`]);
+        setUiMessage("Availability не запущен: не все товары подтверждены как созданные.");
+        return;
+      }
 
       setUiMessage("Товары созданы. Отправляю availability...");
       const availabilityResults = await Promise.allSettled(
         products.map(async (product) => {
-          const sku = String(asRecord(product).sku ?? "").trim();
+          const record = asRecord(product);
+          const sku = String(record.sku ?? "").trim();
+          const shippingProfileID = productShippingProfileId(record);
           if (!sku) {
             throw new Error("missing sku");
+          }
+          if (!shippingProfileID) {
+            throw new Error("missing shipping profile");
           }
           const availabilityResponse = await fetch("/api/products/create-availability", {
             method: "POST",
@@ -802,7 +862,7 @@ export default function CreatorPage() {
             body: JSON.stringify({
               sku,
               quantity: "20",
-              shippingProfileID: selectedShippingProfileId,
+              shippingProfileID,
               controller,
             }),
             cache: "no-store",
@@ -898,13 +958,17 @@ export default function CreatorPage() {
                   {fabrics.length === 0 ? <option value="">{isLoadingFabrics ? "Загрузка fabrics..." : "Нет fabrics"}</option> : fabrics.map((item) => <option key={item.id} value={item.id}>{item.name ?? item.id} ({item.items_count ?? 0})</option>)}
                 </select>
               </label>
-              <label>Профиль доставки
-                <select value={selectedShippingProfileId} onChange={(event) => setSelectedShippingProfileId(event.target.value)} disabled={state === "loading" || shippingProfiles.length === 0}>
-                  {shippingProfiles.length === 0
-                    ? <option value="">Нет профилей</option>
-                    : shippingProfiles.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                </select>
-              </label>
+              <button
+                type="button"
+                className="creator-ref-refresh-btn"
+                onClick={() => void refreshFabrics()}
+                disabled={state === "loading" || isLoadingFabrics || isRefreshingFabrics}
+                title="Обновить список фабрик"
+                aria-label="Обновить список фабрик"
+              >
+                <RefreshCw size={14} className={isRefreshingFabrics ? "spin" : ""} />
+                {isRefreshingFabrics ? "Обновляю..." : "Обновить"}
+              </button>
             </div>
             <Button className="creator-ref-launch-btn" size="lg" type="button" onClick={handleCreate} disabled={state === "loading" || !selectedFabricId}>
               {state === "loading" ? "Запуск..." : "🚀 Выставить товары"}
@@ -920,10 +984,6 @@ export default function CreatorPage() {
           <article className="creator-ref-card creator-ref-card-main">
             <div className="creator-ref-main-head">
               <h2>Последняя загрузка</h2>
-              <button className="creator-ref-refresh-btn" type="button" onClick={() => void refreshProcessState()}>
-                <RefreshCw size={14} />
-                Обновить
-              </button>
             </div>
             <div className="creator-ref-status-line">
               <span className="creator-ref-status-label">Статус</span>
@@ -1038,7 +1098,11 @@ export default function CreatorPage() {
                 </div>
                 <div className="creator-table-popover-wrap">
                   <button className="creator-table-top-btn" type="button" onClick={() => setIsFilterOpen((prev) => !prev)}>
-                    <Funnel size={16} />
+                    <Funnel
+                      size={16}
+                      color="currentColor"
+                      fill={isFilterOpen ? "#111111" : "#ffffff"}
+                    />
                     Фильтр
                   </button>
                   {isFilterOpen ? (
@@ -1070,23 +1134,13 @@ export default function CreatorPage() {
                     </div>
                   ) : null}
                 </div>
-                <div className="creator-table-popover-wrap">
-                  <button className="creator-table-top-btn" type="button" onClick={() => setIsActionsOpen((prev) => !prev)}>
-                    <MoreHorizontal size={16} />
-                  </button>
-                  {isActionsOpen ? (
-                    <div className="creator-table-actions-popover">
-                      <button type="button" onClick={() => setPage(1)}>Обновить данные</button>
-                    </div>
-                  ) : null}
-                </div>
               </div>
             </div>
 
             <div className="creator-products-grid-head">
               <span>Preview</span>
               <span>SKU</span>
-              <span>Category</span>
+              <span>Delivery Profile</span>
               <span className="is-right">Price</span>
               <span className="creator-status-head">Status</span>
             </div>
@@ -1126,8 +1180,16 @@ export default function CreatorPage() {
                       {copiedSkuIndex === row.index ? <em>Скопировано</em> : null}
                     </button>
                   </span>
-                  <span className="creator-products-category" title={row.category || "-"}>
-                    {row.category || "-"}
+                  <span className="creator-products-delivery" title={row.shippingProfileName || "-"}>
+                    <select
+                      value={row.shippingProfileId}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={(event) => updateRowShippingProfile(row.index, event.target.value)}
+                      disabled={state === "loading" || shippingProfiles.length === 0}
+                    >
+                      {shippingProfiles.length === 0 ? <option value="">Нет профилей</option> : null}
+                      {shippingProfiles.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                    </select>
                   </span>
                   <span className="creator-products-price">{row.price || "-"}</span>
                   <span className="creator-products-status">

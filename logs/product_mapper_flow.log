@@ -1,91 +1,124 @@
-2026-06-01 09:24:43,384 INFO step=start_create_from_factory controller=jv factory_id=499170
-2026-06-01 09:24:43,384 INFO step=fetch_afterbuy_products_start timeout_sec=120
-2026-06-01 09:24:43,417 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=1
-2026-06-01 09:24:43,536 INFO step=fetch_afterbuy_products_done
-2026-06-01 09:24:43,536 INFO step=fetch_afterbuy_products count=5
-2026-06-01 09:24:43,540 INFO step=map_products_start timeout_sec=1800
-2026-06-01 09:24:43,541 INFO step=mapper_item_start index=0 ean=None
-2026-06-01 09:24:43,541 INFO step=category_generation_start ean=None
-2026-06-01 09:24:44,048 INFO step=mapper_item_start index=1 ean=None
-2026-06-01 09:24:44,048 INFO step=category_generation_start ean=None
-2026-06-01 09:24:44,049 INFO step=mapper_item_start index=2 ean=None
-2026-06-01 09:24:44,049 INFO step=category_generation_start ean=None
-2026-06-01 09:24:44,050 INFO step=mapper_item_start index=3 ean=None
-2026-06-01 09:24:44,050 INFO step=category_generation_start ean=None
-2026-06-01 09:24:44,052 INFO step=mapper_item_start index=4 ean=None
-2026-06-01 09:24:44,052 INFO step=category_generation_start ean=None
-2026-06-01 09:24:47,326 INFO step=category_generation_done ean=None category=Wohnlandschaft
-2026-06-01 09:24:47,494 INFO step=category_generation_done ean=None category=Ecksofa
-2026-06-01 09:24:48,156 INFO step=category_generation_done ean=None category=Wohnlandschaft
-2026-06-01 09:24:48,417 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=2
-2026-06-01 09:24:50,141 INFO step=category_generation_done ean=None category=Wohnlandschaft
-2026-06-01 09:24:50,902 INFO step=category_generation_done ean=None category=Ecksofa
-2026-06-01 09:24:53,417 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=3
-2026-06-01 09:24:58,417 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=4
-2026-06-01 09:25:03,253 INFO step=bullet_points_done ean=None count=5
-2026-06-01 09:25:03,253 INFO step=description_generation_start ean=None
-2026-06-01 09:25:03,417 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=5
-2026-06-01 09:25:03,723 INFO step=bullet_points_done ean=None count=5
-2026-06-01 09:25:03,723 INFO step=description_generation_start ean=None
-2026-06-01 09:25:03,791 INFO step=bullet_points_done ean=None count=5
-2026-06-01 09:25:03,791 INFO step=description_generation_start ean=None
-2026-06-01 09:25:05,362 INFO step=bullet_points_done ean=None count=5
-2026-06-01 09:25:05,363 INFO step=description_generation_start ean=None
-2026-06-01 09:25:08,418 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=6
-2026-06-01 09:25:10,484 INFO step=bullet_points_done ean=None count=5
-2026-06-01 09:25:10,484 INFO step=description_generation_start ean=None
-2026-06-01 09:25:13,419 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=7
-2026-06-01 09:25:18,420 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=8
-2026-06-01 09:25:23,421 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=9
-2026-06-01 09:25:26,249 INFO step=description_generation_done ean=None
-2026-06-01 09:25:26,249 INFO step=direct_attrs_mapped ean=None count=0
-2026-06-01 09:25:26,446 INFO step=otto_attrs_fetched ean=None category=Wohnlandschaft count=18
-2026-06-01 09:25:27,108 INFO step=description_generation_done ean=None
-2026-06-01 09:25:27,108 INFO step=direct_attrs_mapped ean=None count=0
-2026-06-01 09:25:27,202 INFO step=otto_attrs_fetched ean=None category=Wohnlandschaft count=18
-2026-06-01 09:25:27,610 INFO step=description_generation_done ean=None
-2026-06-01 09:25:27,610 INFO step=direct_attrs_mapped ean=None count=0
-2026-06-01 09:25:27,718 INFO step=otto_attrs_fetched ean=None category=Ecksofa count=18
-2026-06-01 09:25:28,421 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=10
-2026-06-01 09:25:33,421 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=11
-2026-06-01 09:25:35,419 INFO step=description_generation_done ean=None
-2026-06-01 09:25:35,419 INFO step=direct_attrs_mapped ean=None count=0
-2026-06-01 09:25:35,518 INFO step=otto_attrs_fetched ean=None category=Ecksofa count=18
-2026-06-01 09:25:38,422 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=12
-2026-06-01 09:25:40,785 INFO step=description_generation_done ean=None
-2026-06-01 09:25:40,785 INFO step=direct_attrs_mapped ean=None count=0
-2026-06-01 09:25:40,897 INFO step=otto_attrs_fetched ean=None category=Wohnlandschaft count=18
-2026-06-01 09:25:43,422 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=13
-2026-06-01 09:25:48,422 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=14
-2026-06-01 09:25:50,594 INFO step=generated_attrs_done ean=None count=11
-2026-06-01 09:25:50,594 INFO step=merged_attrs_ready ean=None total=11
-2026-06-01 09:25:50,594 INFO step=mapper_item_done index=4 ean=None
-2026-06-01 09:25:52,823 INFO step=generated_attrs_done ean=None count=11
-2026-06-01 09:25:52,823 INFO step=merged_attrs_ready ean=None total=11
-2026-06-01 09:25:52,823 INFO step=mapper_item_done index=2 ean=None
-2026-06-01 09:25:53,422 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=15
-2026-06-01 09:25:55,323 INFO step=generated_attrs_done ean=None count=10
-2026-06-01 09:25:55,323 INFO step=merged_attrs_ready ean=None total=10
-2026-06-01 09:25:55,323 INFO step=mapper_item_done index=0 ean=None
-2026-06-01 09:25:58,423 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=16
-2026-06-01 09:26:02,070 INFO step=generated_attrs_done ean=None count=12
-2026-06-01 09:26:02,070 INFO step=merged_attrs_ready ean=None total=12
-2026-06-01 09:26:02,070 INFO step=mapper_item_done index=3 ean=None
-2026-06-01 09:26:03,424 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=17
-2026-06-01 09:26:07,635 INFO step=generated_attrs_done ean=None count=12
-2026-06-01 09:26:07,636 INFO step=merged_attrs_ready ean=None total=12
-2026-06-01 09:26:07,636 INFO step=mapper_item_done index=1 ean=None
-2026-06-01 09:26:07,636 INFO step=map_products_done
-2026-06-01 09:26:07,636 INFO step=mapper_payload_deploy mapped=5 mapper_issues=0
-2026-06-01 09:26:07,636 INFO step=normalize_start index=0 ean=None
-2026-06-01 09:26:07,642 INFO step=normalize_done index=0 ean=None sku=4062292581243
-2026-06-01 09:26:07,642 INFO step=normalize_start index=1 ean=None
-2026-06-01 09:26:07,643 INFO step=normalize_done index=1 ean=None sku=4062292581236
-2026-06-01 09:26:07,644 INFO step=normalize_start index=2 ean=None
-2026-06-01 09:26:07,645 INFO step=normalize_done index=2 ean=None sku=4062292581212
-2026-06-01 09:26:07,646 INFO step=normalize_start index=3 ean=None
-2026-06-01 09:26:07,647 INFO step=normalize_done index=3 ean=None sku=4062292581205
-2026-06-01 09:26:07,647 INFO step=normalize_start index=4 ean=None
-2026-06-01 09:26:07,649 INFO step=normalize_done index=4 ean=None sku=4062292581199
-2026-06-01 09:26:07,649 INFO step=payload_built payload_items=5 skipped=0
-2026-06-01 09:26:07,649 INFO step=task_step_change process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=saving_snapshot
+2026-06-01 10:31:43,747 INFO step=start_create_from_factory controller=jv factory_id=503969
+2026-06-01 10:31:43,747 INFO step=fetch_afterbuy_products_start timeout_sec=120
+2026-06-01 10:31:43,753 INFO step=heartbeat process_id=4a222a4f-f75d-46c1-a8f7-2c1ca3dbfdb0 current_step=building_prepared_products heartbeat_count=1
+2026-06-01 10:31:43,850 INFO step=fetch_afterbuy_products_done
+2026-06-01 10:31:43,850 INFO step=fetch_afterbuy_products count=5
+2026-06-01 10:31:43,855 INFO step=map_products_start timeout_sec=1800
+2026-06-01 10:31:43,855 INFO step=mapper_item_start index=0 ean=None
+2026-06-01 10:31:43,859 INFO step=category_generation_start ean=None
+2026-06-01 10:31:44,273 INFO step=mapper_item_start index=1 ean=None
+2026-06-01 10:31:44,273 INFO step=category_generation_start ean=None
+2026-06-01 10:31:44,274 INFO step=mapper_item_start index=2 ean=None
+2026-06-01 10:31:44,275 INFO step=category_generation_start ean=None
+2026-06-01 10:31:44,276 INFO step=mapper_item_start index=3 ean=None
+2026-06-01 10:31:44,276 INFO step=category_generation_start ean=None
+2026-06-01 10:31:44,278 INFO step=mapper_item_start index=4 ean=None
+2026-06-01 10:31:44,278 INFO step=category_generation_start ean=None
+2026-06-01 10:31:47,806 INFO step=category_generation_done ean=None category=Schlafzimmer-Set
+2026-06-01 10:31:48,753 INFO step=heartbeat process_id=4a222a4f-f75d-46c1-a8f7-2c1ca3dbfdb0 current_step=building_prepared_products heartbeat_count=2
+2026-06-01 10:31:48,772 ERROR step=mapper_item_failed index=2 ean=None error=Возвращена неправильная категория: Kinderzimmer-Set
+Traceback (most recent call last):
+  File "/app/app/mapper/product_mapper.py", line 61, in _map_one
+    mapped = await self.clean_data(product)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/app/mapper/product_mapper.py", line 120, in clean_data
+    result["category"] = await self.get_category(result)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/app/mapper/product_mapper.py", line 205, in get_category
+    response = await self.classifier.classify(product)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/app/utils/category_classifier.py", line 67, in classify
+    raise ValueError(f"Возвращена неправильная категория: {data['category']}")
+ValueError: Возвращена неправильная категория: Kinderzimmer-Set
+2026-06-01 10:31:50,120 INFO step=category_generation_done ean=None category=Schlafzimmer-Set
+2026-06-01 10:31:52,367 ERROR step=mapper_item_failed index=0 ean=None error=Возвращена неправильная категория: Kinderzimmer-Set
+Traceback (most recent call last):
+  File "/app/app/mapper/product_mapper.py", line 61, in _map_one
+    mapped = await self.clean_data(product)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/app/mapper/product_mapper.py", line 120, in clean_data
+    result["category"] = await self.get_category(result)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/app/mapper/product_mapper.py", line 205, in get_category
+    response = await self.classifier.classify(product)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/app/utils/category_classifier.py", line 67, in classify
+    raise ValueError(f"Возвращена неправильная категория: {data['category']}")
+ValueError: Возвращена неправильная категория: Kinderzimmer-Set
+2026-06-01 10:31:53,754 INFO step=heartbeat process_id=4a222a4f-f75d-46c1-a8f7-2c1ca3dbfdb0 current_step=building_prepared_products heartbeat_count=3
+2026-06-01 10:31:58,393 INFO step=category_generation_done ean=None category=Kinderbett
+2026-06-01 10:31:58,753 INFO step=heartbeat process_id=4a222a4f-f75d-46c1-a8f7-2c1ca3dbfdb0 current_step=building_prepared_products heartbeat_count=4
+2026-06-01 10:32:01,134 INFO step=bullet_points_done ean=None count=5
+2026-06-01 10:32:01,134 INFO step=description_generation_start ean=None
+2026-06-01 10:32:03,702 INFO step=bullet_points_done ean=None count=5
+2026-06-01 10:32:03,702 INFO step=description_generation_start ean=None
+2026-06-01 10:32:03,754 INFO step=heartbeat process_id=4a222a4f-f75d-46c1-a8f7-2c1ca3dbfdb0 current_step=building_prepared_products heartbeat_count=5
+2026-06-01 10:32:06,543 INFO step=bullet_points_done ean=None count=5
+2026-06-01 10:32:06,543 INFO step=description_generation_start ean=None
+2026-06-01 10:32:08,755 INFO step=heartbeat process_id=4a222a4f-f75d-46c1-a8f7-2c1ca3dbfdb0 current_step=building_prepared_products heartbeat_count=6
+2026-06-01 10:32:13,756 INFO step=heartbeat process_id=4a222a4f-f75d-46c1-a8f7-2c1ca3dbfdb0 current_step=building_prepared_products heartbeat_count=7
+2026-06-01 10:32:17,996 INFO step=description_generation_done ean=None
+2026-06-01 10:32:17,996 INFO step=direct_attrs_mapped ean=None count=0
+2026-06-01 10:32:18,108 INFO step=otto_attrs_fetched ean=None category=Kinderbett count=24
+2026-06-01 10:32:18,757 INFO step=heartbeat process_id=4a222a4f-f75d-46c1-a8f7-2c1ca3dbfdb0 current_step=building_prepared_products heartbeat_count=8
+2026-06-01 10:32:23,756 INFO step=heartbeat process_id=4a222a4f-f75d-46c1-a8f7-2c1ca3dbfdb0 current_step=building_prepared_products heartbeat_count=9
+2026-06-01 10:32:28,033 INFO step=description_generation_done ean=None
+2026-06-01 10:32:28,033 INFO step=direct_attrs_mapped ean=None count=0
+2026-06-01 10:32:28,100 WARNING step=otto_attrs_fetch_failed_fallback_direct_only ean=None category=Schlafzimmer-Set status=404
+2026-06-01 10:32:28,100 INFO step=merged_attrs_ready ean=None total=0
+2026-06-01 10:32:28,100 INFO step=mapper_item_done index=1 ean=None
+2026-06-01 10:32:28,757 INFO step=heartbeat process_id=4a222a4f-f75d-46c1-a8f7-2c1ca3dbfdb0 current_step=building_prepared_products heartbeat_count=10
+2026-06-01 10:32:29,726 INFO step=description_generation_done ean=None
+2026-06-01 10:32:29,726 INFO step=direct_attrs_mapped ean=None count=0
+2026-06-01 10:32:29,791 WARNING step=otto_attrs_fetch_failed_fallback_direct_only ean=None category=Schlafzimmer-Set status=404
+2026-06-01 10:32:29,791 INFO step=merged_attrs_ready ean=None total=0
+2026-06-01 10:32:29,791 INFO step=mapper_item_done index=4 ean=None
+2026-06-01 10:32:33,758 INFO step=heartbeat process_id=4a222a4f-f75d-46c1-a8f7-2c1ca3dbfdb0 current_step=building_prepared_products heartbeat_count=11
+2026-06-01 10:32:38,758 INFO step=heartbeat process_id=4a222a4f-f75d-46c1-a8f7-2c1ca3dbfdb0 current_step=building_prepared_products heartbeat_count=12
+2026-06-01 10:32:43,758 INFO step=heartbeat process_id=4a222a4f-f75d-46c1-a8f7-2c1ca3dbfdb0 current_step=building_prepared_products heartbeat_count=13
+2026-06-01 10:32:48,759 INFO step=heartbeat process_id=4a222a4f-f75d-46c1-a8f7-2c1ca3dbfdb0 current_step=building_prepared_products heartbeat_count=14
+2026-06-01 10:32:52,462 INFO step=generated_attrs_done ean=None count=12
+2026-06-01 10:32:52,462 INFO step=merged_attrs_ready ean=None total=12
+2026-06-01 10:32:52,462 INFO step=mapper_item_done index=3 ean=None
+2026-06-01 10:32:52,462 INFO step=map_products_done
+2026-06-01 10:32:52,463 INFO step=mapper_payload_deploy mapped=3 mapper_issues=2
+2026-06-01 10:32:52,463 INFO step=normalize_start index=0 ean=None
+2026-06-01 10:32:52,466 INFO step=normalize_done index=0 ean=None sku=4071489024418
+2026-06-01 10:32:52,466 INFO step=normalize_start index=1 ean=None
+2026-06-01 10:32:52,468 INFO step=normalize_done index=1 ean=None sku=4071489021059
+2026-06-01 10:32:52,468 INFO step=normalize_start index=2 ean=None
+2026-06-01 10:32:52,469 INFO step=normalize_done index=2 ean=None sku=4071489019872
+2026-06-01 10:32:52,469 INFO step=normalize_start index=3 ean=None
+2026-06-01 10:32:52,470 ERROR step=normalize_error message=normalize index=3 failed: 1 validation error for Product
+productDescription.bulletPoints
+  Field required [type=missing, input_value={'category': 'Betten', 'b..., 'additional': False}]}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+Traceback (most recent call last):
+  File "/app/app/api/routes/products.py", line 453, in _build_factory_prepared_products
+    products_payload.append(ProductPayload.model_validate(normalized))
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/pydantic/main.py", line 716, in model_validate
+    return cls.__pydantic_validator__.validate_python(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 1 validation error for Product
+productDescription.bulletPoints
+  Field required [type=missing, input_value={'category': 'Betten', 'b..., 'additional': False}]}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+2026-06-01 10:32:52,471 INFO step=normalize_start index=4 ean=None
+2026-06-01 10:32:52,472 ERROR step=normalize_error message=normalize index=4 failed: 1 validation error for Product
+productDescription.bulletPoints
+  Field required [type=missing, input_value={'category': 'Betten', 'b..., 'additional': False}]}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+Traceback (most recent call last):
+  File "/app/app/api/routes/products.py", line 453, in _build_factory_prepared_products
+    products_payload.append(ProductPayload.model_validate(normalized))
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/pydantic/main.py", line 716, in model_validate
+    return cls.__pydantic_validator__.validate_python(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 1 validation error for Product
+productDescription.bulletPoints
+  Field required [type=missing, input_value={'category': 'Betten', 'b..., 'additional': False}]}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+2026-06-01 10:32:52,473 INFO step=payload_built payload_items=3 skipped=2
+2026-06-01 10:32:52,473 INFO step=task_step_change process_id=4a222a4f-f75d-46c1-a8f7-2c1ca3dbfdb0 current_step=saving_snapshot

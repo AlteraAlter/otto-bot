@@ -215,6 +215,36 @@ a:focus-visible {
   grid-template-columns: 96px minmax(0, 1fr);
 }
 
+.app-shell.app-shell-compact-nav {
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+
+.app-shell.app-shell-compact-nav.sidebar-collapsed {
+  grid-template-columns: 80px minmax(0, 1fr);
+}
+
+.app-shell.app-shell-compact-nav .sidebar {
+  padding: 16px 12px;
+  gap: 14px;
+}
+
+.app-shell.app-shell-compact-nav .nav-item {
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.app-shell.app-shell-compact-nav .nav-item-short {
+  width: 22px;
+  height: 22px;
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.app-shell.app-shell-compact-nav .workspace {
+  padding-left: 22px;
+  padding-right: 22px;
+}
+
 .sidebar {
   display: grid;
   grid-template-rows: auto auto 1fr;
@@ -4022,6 +4052,19 @@ a:focus-visible {
   gap: 6px;
 }
 
+.spin {
+  animation: creator-spin 0.9s linear infinite;
+}
+
+@keyframes creator-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .creator-ref-card-subtitle {
   margin: 0 0 16px;
   font-size: 15px;
@@ -4572,7 +4615,7 @@ a:focus-visible {
 
 .creator-products-grid-head {
   display: grid;
-  grid-template-columns: 72px minmax(240px, 1fr) minmax(96px, 128px) 90px 120px;
+  grid-template-columns: 72px minmax(160px, 220px) minmax(240px, 1fr) 90px 120px;
   column-gap: 12px;
   align-items: center;
   min-height: 48px;
@@ -4596,7 +4639,7 @@ a:focus-visible {
 .creator-products-row {
   position: relative;
   display: grid;
-  grid-template-columns: 72px minmax(240px, 1fr) minmax(96px, 128px) 90px 120px;
+  grid-template-columns: 72px minmax(160px, 220px) minmax(240px, 1fr) 90px 120px;
   column-gap: 12px;
   align-items: center;
   min-height: 72px;
@@ -4705,10 +4748,13 @@ a:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .creator-products-sku strong {
   font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .creator-products-sku button {
@@ -4738,6 +4784,21 @@ a:focus-visible {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.creator-products-delivery {
+  min-width: 0;
+}
+
+.creator-products-delivery select {
+  width: 100%;
+  min-width: 180px;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--card);
+  padding: 0 10px;
+  font-size: 13px;
 }
 
 .creator-products-price {

@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete
 
 # Scheme
 from app.clients.afterbuy_client import (
@@ -71,6 +71,7 @@ class AfterbuyService:
             factory for factory in response.factory if factory.items_count > 0
         ]
         if save:
+            await db.execute(delete(Factories))
             factory_orm_object = [
                 Factories(
                     factory_id=item.id,
