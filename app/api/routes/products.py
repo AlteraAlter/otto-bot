@@ -2187,15 +2187,6 @@ async def submit_factory_prepared_products(
     product_service: ProductService = Depends(get_product_service),
 ):
     task = FACTORY_PREPARE_TASKS.get(process_id)
-    if task is None:
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={
-                "success": False,
-                "message": "Task not found",
-                "process_id": process_id,
-            },
-        )
     products = payload.get("products")
     if not isinstance(products, list) or not products:
         return JSONResponse(
@@ -2220,14 +2211,40 @@ async def submit_factory_prepared_products(
                 },
             )
 
-    controller = Controller(str(task.get("controller", "jv")).lower())
-    factory_id = str(task.get("factory_id", "unknown"))
+    controller_value = str(
+        (task or {}).get("controller")
+        or payload.get("controller")
+        or "jv"
+    ).lower()
+    try:
+        controller = Controller(controller_value)
+    except ValueError:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={
+                "success": False,
+                "message": f"Invalid controller: {controller_value}",
+                "process_id": process_id,
+            },
+        )
+
+    factory_id = str((task or {}).get("factory_id") or payload.get("factory_id") or "unknown")
     file_path = _save_final_edited_payloads_snapshot(
         payloads=validated,
         controller=controller,
         factory_id=factory_id,
         process_id=process_id,
     )
+    if task is None:
+        task = {
+            "process_id": process_id,
+            "controller": controller.value,
+            "factory_id": factory_id,
+            "status": "IN_PROGRESS",
+            "products": validated,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        FACTORY_PREPARE_TASKS[process_id] = task
     task["final_snapshot_path"] = file_path.as_posix()
     task["final_products_count"] = len(validated)
     task["updated_at"] = datetime.now(UTC).isoformat()

@@ -14,6 +14,7 @@ type AppWorkspaceShellProps = {
   sectionLabel: string;
   title: string;
   description: string;
+  compactSidebar?: boolean;
   children: ReactNode;
 };
 
@@ -23,6 +24,7 @@ export function AppWorkspaceShell({
   sectionLabel,
   title,
   description,
+  compactSidebar = false,
   children,
 }: AppWorkspaceShellProps) {
   const router = useRouter();
@@ -47,7 +49,11 @@ export function AppWorkspaceShell({
 
   return (
     <main className="otto-page">
-      <section className={`app-shell ${isSidebarCollapsed ? "sidebar-collapsed" : ""}`.trim()}>
+      <section
+        className={`app-shell ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
+          compactSidebar ? "app-shell-compact-nav" : ""
+        }`.trim()}
+      >
         <aside className={`sidebar ${isSidebarCollapsed ? "collapsed" : ""}`.trim()}>
           <div className="sidebar-header">
             <div className="sidebar-brand-block">

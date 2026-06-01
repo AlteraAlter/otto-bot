@@ -1,85 +1,91 @@
-2026-05-29 11:57:30,343 INFO step=start_create_from_factory controller=jv factory_id=503923
-2026-05-29 11:57:30,343 INFO step=fetch_afterbuy_products_start timeout_sec=120
-2026-05-29 11:57:30,385 INFO step=heartbeat process_id=daac674b-37a5-4109-ae30-46375570d061 current_step=building_prepared_products heartbeat_count=1
-2026-05-29 11:57:30,765 INFO step=fetch_afterbuy_products_done
-2026-05-29 11:57:30,768 INFO step=fetch_afterbuy_products count=5
-2026-05-29 11:57:30,772 INFO step=map_products_start timeout_sec=1800
-2026-05-29 11:57:30,773 INFO step=mapper_item_start index=0 ean=None
-2026-05-29 11:57:30,773 INFO step=category_generation_start ean=None
-2026-05-29 11:57:31,224 INFO step=mapper_item_start index=1 ean=None
-2026-05-29 11:57:31,224 INFO step=category_generation_start ean=None
-2026-05-29 11:57:31,225 INFO step=mapper_item_start index=2 ean=None
-2026-05-29 11:57:31,225 INFO step=category_generation_start ean=None
-2026-05-29 11:57:31,226 INFO step=mapper_item_start index=3 ean=None
-2026-05-29 11:57:31,227 INFO step=category_generation_start ean=None
-2026-05-29 11:57:31,228 INFO step=mapper_item_start index=4 ean=None
-2026-05-29 11:57:31,229 INFO step=category_generation_start ean=None
-2026-05-29 11:57:33,390 INFO step=category_generation_done ean=None category=Esstisch
-2026-05-29 11:57:33,405 INFO step=category_generation_done ean=None category=Sessel
-2026-05-29 11:57:35,385 INFO step=heartbeat process_id=daac674b-37a5-4109-ae30-46375570d061 current_step=building_prepared_products heartbeat_count=2
-2026-05-29 11:57:36,222 INFO step=category_generation_done ean=None category=3-Sitzer
-2026-05-29 11:57:36,250 INFO step=category_generation_done ean=None category=3-Sitzer
-2026-05-29 11:57:36,307 INFO step=category_generation_done ean=None category=4-Sitzer
-2026-05-29 11:57:40,386 INFO step=heartbeat process_id=daac674b-37a5-4109-ae30-46375570d061 current_step=building_prepared_products heartbeat_count=3
-2026-05-29 11:57:45,386 INFO step=heartbeat process_id=daac674b-37a5-4109-ae30-46375570d061 current_step=building_prepared_products heartbeat_count=4
-2026-05-29 11:57:48,006 INFO step=bullet_points_done ean=None count=5
-2026-05-29 11:57:48,006 INFO step=description_generation_start ean=None
-2026-05-29 11:57:49,471 INFO step=bullet_points_done ean=None count=5
-2026-05-29 11:57:49,471 INFO step=description_generation_start ean=None
-2026-05-29 11:57:50,280 INFO step=bullet_points_done ean=None count=5
-2026-05-29 11:57:50,280 INFO step=description_generation_start ean=None
-2026-05-29 11:57:50,387 INFO step=heartbeat process_id=daac674b-37a5-4109-ae30-46375570d061 current_step=building_prepared_products heartbeat_count=5
-2026-05-29 11:57:51,054 INFO step=bullet_points_done ean=None count=5
-2026-05-29 11:57:51,054 INFO step=description_generation_start ean=None
-2026-05-29 11:57:53,519 INFO step=bullet_points_done ean=None count=5
-2026-05-29 11:57:53,520 INFO step=description_generation_start ean=None
-2026-05-29 11:57:55,386 INFO step=heartbeat process_id=daac674b-37a5-4109-ae30-46375570d061 current_step=building_prepared_products heartbeat_count=6
-2026-05-29 11:58:00,386 INFO step=heartbeat process_id=daac674b-37a5-4109-ae30-46375570d061 current_step=building_prepared_products heartbeat_count=7
-2026-05-29 11:58:05,387 INFO step=heartbeat process_id=daac674b-37a5-4109-ae30-46375570d061 current_step=building_prepared_products heartbeat_count=8
-2026-05-29 11:58:07,763 INFO step=description_generation_done ean=None
-2026-05-29 11:58:07,763 INFO step=direct_attrs_mapped ean=None count=0
-2026-05-29 11:58:07,917 WARNING step=otto_attrs_fetch_failed_fallback_direct_only ean=None category=4-Sitzer status=404
-2026-05-29 11:58:07,918 INFO step=merged_attrs_ready ean=None total=0
-2026-05-29 11:58:07,918 INFO step=mapper_item_done index=4 ean=None
-2026-05-29 11:58:08,928 INFO step=description_generation_done ean=None
-2026-05-29 11:58:08,928 INFO step=direct_attrs_mapped ean=None count=0
-2026-05-29 11:58:09,024 INFO step=otto_attrs_fetched ean=None category=Esstisch count=31
-2026-05-29 11:58:10,387 INFO step=heartbeat process_id=daac674b-37a5-4109-ae30-46375570d061 current_step=building_prepared_products heartbeat_count=9
-2026-05-29 11:58:10,660 INFO step=description_generation_done ean=None
-2026-05-29 11:58:10,661 INFO step=direct_attrs_mapped ean=None count=0
-2026-05-29 11:58:10,728 WARNING step=otto_attrs_fetch_failed_fallback_direct_only ean=None category=3-Sitzer status=404
-2026-05-29 11:58:10,728 INFO step=merged_attrs_ready ean=None total=0
-2026-05-29 11:58:10,728 INFO step=mapper_item_done index=2 ean=None
-2026-05-29 11:58:12,915 INFO step=description_generation_done ean=None
-2026-05-29 11:58:12,915 INFO step=direct_attrs_mapped ean=None count=0
-2026-05-29 11:58:13,001 WARNING step=otto_attrs_fetch_failed_fallback_direct_only ean=None category=3-Sitzer status=404
-2026-05-29 11:58:13,001 INFO step=merged_attrs_ready ean=None total=0
-2026-05-29 11:58:13,001 INFO step=mapper_item_done index=3 ean=None
-2026-05-29 11:58:14,122 INFO step=description_generation_done ean=None
-2026-05-29 11:58:14,123 INFO step=direct_attrs_mapped ean=None count=0
-2026-05-29 11:58:14,221 INFO step=otto_attrs_fetched ean=None category=Sessel count=18
-2026-05-29 11:58:15,387 INFO step=heartbeat process_id=daac674b-37a5-4109-ae30-46375570d061 current_step=building_prepared_products heartbeat_count=10
-2026-05-29 11:58:20,387 INFO step=heartbeat process_id=daac674b-37a5-4109-ae30-46375570d061 current_step=building_prepared_products heartbeat_count=11
-2026-05-29 11:58:25,388 INFO step=heartbeat process_id=daac674b-37a5-4109-ae30-46375570d061 current_step=building_prepared_products heartbeat_count=12
-2026-05-29 11:58:30,389 INFO step=heartbeat process_id=daac674b-37a5-4109-ae30-46375570d061 current_step=building_prepared_products heartbeat_count=13
-2026-05-29 11:58:34,220 INFO step=generated_attrs_done ean=None count=11
-2026-05-29 11:58:34,220 INFO step=merged_attrs_ready ean=None total=11
-2026-05-29 11:58:34,220 INFO step=mapper_item_done index=1 ean=None
-2026-05-29 11:58:35,390 INFO step=heartbeat process_id=daac674b-37a5-4109-ae30-46375570d061 current_step=building_prepared_products heartbeat_count=14
-2026-05-29 11:58:38,281 INFO step=generated_attrs_done ean=None count=12
-2026-05-29 11:58:38,281 INFO step=merged_attrs_ready ean=None total=12
-2026-05-29 11:58:38,281 INFO step=mapper_item_done index=0 ean=None
-2026-05-29 11:58:38,282 INFO step=map_products_done
-2026-05-29 11:58:38,282 INFO step=mapper_payload_deploy mapped=5 mapper_issues=0
-2026-05-29 11:58:38,282 INFO step=normalize_start index=0 ean=None
-2026-05-29 11:58:38,287 INFO step=normalize_done index=0 ean=None sku=4070863678629
-2026-05-29 11:58:38,287 INFO step=normalize_start index=1 ean=None
-2026-05-29 11:58:38,290 INFO step=normalize_done index=1 ean=None sku=4071489011364
-2026-05-29 11:58:38,290 INFO step=normalize_start index=2 ean=None
-2026-05-29 11:58:38,292 INFO step=normalize_done index=2 ean=None sku=4071489011326
-2026-05-29 11:58:38,292 INFO step=normalize_start index=3 ean=None
-2026-05-29 11:58:38,294 INFO step=normalize_done index=3 ean=None sku=4071489011319
-2026-05-29 11:58:38,294 INFO step=normalize_start index=4 ean=None
-2026-05-29 11:58:38,295 INFO step=normalize_done index=4 ean=None sku=4071489011296
-2026-05-29 11:58:38,295 INFO step=payload_built payload_items=5 skipped=0
-2026-05-29 11:58:38,297 INFO step=task_step_change process_id=daac674b-37a5-4109-ae30-46375570d061 current_step=saving_snapshot
+2026-06-01 09:24:43,384 INFO step=start_create_from_factory controller=jv factory_id=499170
+2026-06-01 09:24:43,384 INFO step=fetch_afterbuy_products_start timeout_sec=120
+2026-06-01 09:24:43,417 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=1
+2026-06-01 09:24:43,536 INFO step=fetch_afterbuy_products_done
+2026-06-01 09:24:43,536 INFO step=fetch_afterbuy_products count=5
+2026-06-01 09:24:43,540 INFO step=map_products_start timeout_sec=1800
+2026-06-01 09:24:43,541 INFO step=mapper_item_start index=0 ean=None
+2026-06-01 09:24:43,541 INFO step=category_generation_start ean=None
+2026-06-01 09:24:44,048 INFO step=mapper_item_start index=1 ean=None
+2026-06-01 09:24:44,048 INFO step=category_generation_start ean=None
+2026-06-01 09:24:44,049 INFO step=mapper_item_start index=2 ean=None
+2026-06-01 09:24:44,049 INFO step=category_generation_start ean=None
+2026-06-01 09:24:44,050 INFO step=mapper_item_start index=3 ean=None
+2026-06-01 09:24:44,050 INFO step=category_generation_start ean=None
+2026-06-01 09:24:44,052 INFO step=mapper_item_start index=4 ean=None
+2026-06-01 09:24:44,052 INFO step=category_generation_start ean=None
+2026-06-01 09:24:47,326 INFO step=category_generation_done ean=None category=Wohnlandschaft
+2026-06-01 09:24:47,494 INFO step=category_generation_done ean=None category=Ecksofa
+2026-06-01 09:24:48,156 INFO step=category_generation_done ean=None category=Wohnlandschaft
+2026-06-01 09:24:48,417 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=2
+2026-06-01 09:24:50,141 INFO step=category_generation_done ean=None category=Wohnlandschaft
+2026-06-01 09:24:50,902 INFO step=category_generation_done ean=None category=Ecksofa
+2026-06-01 09:24:53,417 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=3
+2026-06-01 09:24:58,417 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=4
+2026-06-01 09:25:03,253 INFO step=bullet_points_done ean=None count=5
+2026-06-01 09:25:03,253 INFO step=description_generation_start ean=None
+2026-06-01 09:25:03,417 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=5
+2026-06-01 09:25:03,723 INFO step=bullet_points_done ean=None count=5
+2026-06-01 09:25:03,723 INFO step=description_generation_start ean=None
+2026-06-01 09:25:03,791 INFO step=bullet_points_done ean=None count=5
+2026-06-01 09:25:03,791 INFO step=description_generation_start ean=None
+2026-06-01 09:25:05,362 INFO step=bullet_points_done ean=None count=5
+2026-06-01 09:25:05,363 INFO step=description_generation_start ean=None
+2026-06-01 09:25:08,418 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=6
+2026-06-01 09:25:10,484 INFO step=bullet_points_done ean=None count=5
+2026-06-01 09:25:10,484 INFO step=description_generation_start ean=None
+2026-06-01 09:25:13,419 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=7
+2026-06-01 09:25:18,420 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=8
+2026-06-01 09:25:23,421 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=9
+2026-06-01 09:25:26,249 INFO step=description_generation_done ean=None
+2026-06-01 09:25:26,249 INFO step=direct_attrs_mapped ean=None count=0
+2026-06-01 09:25:26,446 INFO step=otto_attrs_fetched ean=None category=Wohnlandschaft count=18
+2026-06-01 09:25:27,108 INFO step=description_generation_done ean=None
+2026-06-01 09:25:27,108 INFO step=direct_attrs_mapped ean=None count=0
+2026-06-01 09:25:27,202 INFO step=otto_attrs_fetched ean=None category=Wohnlandschaft count=18
+2026-06-01 09:25:27,610 INFO step=description_generation_done ean=None
+2026-06-01 09:25:27,610 INFO step=direct_attrs_mapped ean=None count=0
+2026-06-01 09:25:27,718 INFO step=otto_attrs_fetched ean=None category=Ecksofa count=18
+2026-06-01 09:25:28,421 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=10
+2026-06-01 09:25:33,421 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=11
+2026-06-01 09:25:35,419 INFO step=description_generation_done ean=None
+2026-06-01 09:25:35,419 INFO step=direct_attrs_mapped ean=None count=0
+2026-06-01 09:25:35,518 INFO step=otto_attrs_fetched ean=None category=Ecksofa count=18
+2026-06-01 09:25:38,422 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=12
+2026-06-01 09:25:40,785 INFO step=description_generation_done ean=None
+2026-06-01 09:25:40,785 INFO step=direct_attrs_mapped ean=None count=0
+2026-06-01 09:25:40,897 INFO step=otto_attrs_fetched ean=None category=Wohnlandschaft count=18
+2026-06-01 09:25:43,422 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=13
+2026-06-01 09:25:48,422 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=14
+2026-06-01 09:25:50,594 INFO step=generated_attrs_done ean=None count=11
+2026-06-01 09:25:50,594 INFO step=merged_attrs_ready ean=None total=11
+2026-06-01 09:25:50,594 INFO step=mapper_item_done index=4 ean=None
+2026-06-01 09:25:52,823 INFO step=generated_attrs_done ean=None count=11
+2026-06-01 09:25:52,823 INFO step=merged_attrs_ready ean=None total=11
+2026-06-01 09:25:52,823 INFO step=mapper_item_done index=2 ean=None
+2026-06-01 09:25:53,422 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=15
+2026-06-01 09:25:55,323 INFO step=generated_attrs_done ean=None count=10
+2026-06-01 09:25:55,323 INFO step=merged_attrs_ready ean=None total=10
+2026-06-01 09:25:55,323 INFO step=mapper_item_done index=0 ean=None
+2026-06-01 09:25:58,423 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=16
+2026-06-01 09:26:02,070 INFO step=generated_attrs_done ean=None count=12
+2026-06-01 09:26:02,070 INFO step=merged_attrs_ready ean=None total=12
+2026-06-01 09:26:02,070 INFO step=mapper_item_done index=3 ean=None
+2026-06-01 09:26:03,424 INFO step=heartbeat process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=building_prepared_products heartbeat_count=17
+2026-06-01 09:26:07,635 INFO step=generated_attrs_done ean=None count=12
+2026-06-01 09:26:07,636 INFO step=merged_attrs_ready ean=None total=12
+2026-06-01 09:26:07,636 INFO step=mapper_item_done index=1 ean=None
+2026-06-01 09:26:07,636 INFO step=map_products_done
+2026-06-01 09:26:07,636 INFO step=mapper_payload_deploy mapped=5 mapper_issues=0
+2026-06-01 09:26:07,636 INFO step=normalize_start index=0 ean=None
+2026-06-01 09:26:07,642 INFO step=normalize_done index=0 ean=None sku=4062292581243
+2026-06-01 09:26:07,642 INFO step=normalize_start index=1 ean=None
+2026-06-01 09:26:07,643 INFO step=normalize_done index=1 ean=None sku=4062292581236
+2026-06-01 09:26:07,644 INFO step=normalize_start index=2 ean=None
+2026-06-01 09:26:07,645 INFO step=normalize_done index=2 ean=None sku=4062292581212
+2026-06-01 09:26:07,646 INFO step=normalize_start index=3 ean=None
+2026-06-01 09:26:07,647 INFO step=normalize_done index=3 ean=None sku=4062292581205
+2026-06-01 09:26:07,647 INFO step=normalize_start index=4 ean=None
+2026-06-01 09:26:07,649 INFO step=normalize_done index=4 ean=None sku=4062292581199
+2026-06-01 09:26:07,649 INFO step=payload_built payload_items=5 skipped=0
+2026-06-01 09:26:07,649 INFO step=task_step_change process_id=d6256ad3-0c0b-4516-9b75-ae78f210c274 current_step=saving_snapshot
