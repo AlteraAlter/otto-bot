@@ -59,7 +59,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: otto-bot-worker
-    command: ["celery", "-A", "app.celery_app.celery_app", "worker", "--loglevel=info"]
+    command: ["celery", "-A", "app.celery_app.celery_app", "worker", "--loglevel=info", "--concurrency=${CELERY_WORKER_CONCURRENCY:-2}"]
     env_file:
       - .env
     environment:
@@ -68,6 +68,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-2}
       FRONTEND_APP_URL: http://localhost
     depends_on:
       postgres:

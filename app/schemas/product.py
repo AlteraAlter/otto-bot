@@ -155,6 +155,8 @@ class Product(BaseModel):
     productReference: str
     sku: str
     ean: Optional[str] = None
+    aiCategory: Optional[str] = None
+    aiCategoryConfidence: int = 0
     productDescription: ProductDescription
     pricing: Pricing
     mediaAssets: List[MediaAsset]

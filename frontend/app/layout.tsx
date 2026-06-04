@@ -3,7 +3,11 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "OTTO — Панель товаров",
-  description: "Управление товарами и статусами OTTO"
+  description: "Управление товарами и статусами OTTO",
+  icons: {
+    icon: "/icon.svg",
+    shortcut: "/icon.svg",
+  },
 };
 
 export default function RootLayout({

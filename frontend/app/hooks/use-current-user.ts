@@ -17,11 +17,52 @@ type UseCurrentUserOptions = {
   redirectToLogin?: boolean;
 };
 
+const CURRENT_USER_CACHE_KEY = "otto_current_user_cache_v1";
+let cachedCurrentUser: CurrentUser | null | undefined;
+
+function readCachedCurrentUser(): CurrentUser | null {
+  if (cachedCurrentUser !== undefined) {
+    return cachedCurrentUser;
+  }
+
+  if (typeof window === "undefined") {
+    cachedCurrentUser = null;
+    return cachedCurrentUser;
+  }
+
+  try {
+    const raw = window.sessionStorage.getItem(CURRENT_USER_CACHE_KEY);
+    cachedCurrentUser = raw ? (JSON.parse(raw) as CurrentUser) : null;
+  } catch {
+    cachedCurrentUser = null;
+  }
+
+  return cachedCurrentUser;
+}
+
+function writeCachedCurrentUser(user: CurrentUser | null) {
+  cachedCurrentUser = user;
+
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    if (user) {
+      window.sessionStorage.setItem(CURRENT_USER_CACHE_KEY, JSON.stringify(user));
+    } else {
+      window.sessionStorage.removeItem(CURRENT_USER_CACHE_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
 export function useCurrentUser(options: UseCurrentUserOptions = {}) {
   const { redirectToLogin = true } = options;
   const router = useRouter();
-  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(() => readCachedCurrentUser());
+  const [isLoading, setIsLoading] = useState(() => readCachedCurrentUser() === null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -38,6 +79,7 @@ export function useCurrentUser(options: UseCurrentUserOptions = {}) {
 
         if (!response.ok) {
           if (response.status === 401 && redirectToLogin) {
+            writeCachedCurrentUser(null);
             router.replace("/login?expired=1");
             router.refresh();
             return;
@@ -51,10 +93,16 @@ export function useCurrentUser(options: UseCurrentUserOptions = {}) {
           return;
         }
 
+        writeCachedCurrentUser(payload);
         setCurrentUser(payload);
+        setError(null);
       } catch (caughtError) {
         if (!active) {
           return;
+        }
+
+        if (redirectToLogin && caughtError instanceof Error && caughtError.name !== "AbortError") {
+          writeCachedCurrentUser(null);
         }
 
         setError(

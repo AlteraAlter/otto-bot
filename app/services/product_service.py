@@ -94,9 +94,13 @@ class ProductService:
             otto_payload, controller=payload.controller
         )
 
-    async def update_status(self, payload: dict):
+    async def update_status(
+        self,
+        payload: dict,
+        controller: Controller = Controller.JV,
+    ):
         """Update active flags/status for one or more products in OTTO."""
-        return await self.client.update_status(payload)
+        return await self.client.update_status(payload, controller=controller)
 
     async def get_categories(
         self, payload: dict, controller: Controller = Controller.JV

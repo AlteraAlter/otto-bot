@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ReactNode, useState } from "react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Home, ListTodo, LogOut, Menu, Package2, RefreshCw, X } from "lucide-react";
+import { ReactNode, useEffect, useState } from "react";
+
+import { OttoLogo } from "@/components/otto-logo";
 
 import { CurrentUser } from "../hooks/use-current-user";
 
@@ -23,20 +24,18 @@ export function AppWorkspaceShell({
   activeHref,
   sectionLabel,
   title,
-  description,
-  compactSidebar = false,
   children,
 }: AppWorkspaceShellProps) {
   const router = useRouter();
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
 
   const navItems = [
-    { href: "/", label: "Каталог", shortLabel: "К" },
-    { href: "/creator", label: "Создание товара", shortLabel: "+" },
+    { href: "/", label: "Каталог", icon: Home },
+    { href: "/creator", label: "Создание товара", icon: Package2 },
     ...(currentUser?.role === "SEO"
       ? [
-          { href: "/tasks", label: "Задачи", shortLabel: "T" },
-          { href: "/imports", label: "Data Operations", shortLabel: "D" },
+          { href: "/tasks", label: "Задачи", icon: ListTodo },
+          { href: "/imports", label: "Data Operations", icon: RefreshCw },
         ]
       : []),
   ];
@@ -47,86 +46,141 @@ export function AppWorkspaceShell({
     router.refresh();
   }
 
+  useEffect(() => {
+    setIsMobileNavOpen(false);
+  }, [activeHref]);
+
+  useEffect(() => {
+    if (!isMobileNavOpen) return;
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = originalOverflow;
+    };
+  }, [isMobileNavOpen]);
+
   return (
     <main className="otto-page">
-      <section
-        className={`app-shell ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
-          compactSidebar ? "app-shell-compact-nav" : ""
-        }`.trim()}
-      >
-        <aside className={`sidebar ${isSidebarCollapsed ? "collapsed" : ""}`.trim()}>
-          <div className="sidebar-header">
-            <div className="sidebar-brand-block">
-              <div className="brand-mark" aria-hidden="true">
-                O
-              </div>
-              <div className="sidebar-brand-copy">
-                <p className="brand">OTTO Контроль</p>
-                <p className="brand-subtitle">
-                  {currentUser?.email ? currentUser.email : "Workspace"}
-                </p>
-              </div>
+      <section className="app-shell workspace-navbar-shell">
+        <header className="workspace-navbar" aria-label="Основная навигация">
+          <div className="workspace-brand-panel">
+            <div className="workspace-brand-mark" aria-hidden="true">
+              <OttoLogo className="workspace-brand-logo" title="OTTO Контроль" />
             </div>
-            <button
-              aria-label={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-              className="sidebar-toggle"
-              onClick={() => setIsSidebarCollapsed((current) => !current)}
-              type="button"
-            >
-              {isSidebarCollapsed ? "›" : "‹"}
-            </button>
+            <div className="workspace-brand-copy">
+              <p className="workspace-brand-title">OTTO Контроль</p>
+            </div>
           </div>
 
-          <nav className="side-nav">
-            {navItems.map((item) =>
-              item.href === activeHref ? (
-                <button key={item.href} className="nav-item active" title={item.label} type="button">
-                  <span className="nav-item-short" aria-hidden="true">
-                    {item.shortLabel}
+          <button
+            className="workspace-mobile-toggle"
+            type="button"
+            onClick={() => setIsMobileNavOpen((prev) => !prev)}
+            aria-label={isMobileNavOpen ? "Закрыть меню" : "Открыть меню"}
+            aria-expanded={isMobileNavOpen}
+          >
+            {isMobileNavOpen ? <X size={20} strokeWidth={2.2} /> : <Menu size={20} strokeWidth={2.2} />}
+          </button>
+
+          <span className="workspace-navbar-divider" aria-hidden="true" />
+
+          <nav className="workspace-nav-links">
+            {navItems.map((item) => {
+              const Icon = item.icon;
+              const isActive = item.href === activeHref;
+
+              if (isActive) {
+                return (
+                  <span key={item.href} className="workspace-nav-link is-active" aria-current="page">
+                    <Icon size={18} strokeWidth={2} aria-hidden="true" />
+                    <span>{item.label}</span>
                   </span>
-                  <span className="nav-item-label">{item.label}</span>
-                </button>
-              ) : (
-                <Link key={item.href} className="nav-item" href={item.href} title={item.label}>
-                  <span className="nav-item-short" aria-hidden="true">
-                    {item.shortLabel}
-                  </span>
-                  <span className="nav-item-label">{item.label}</span>
+                );
+              }
+
+              return (
+                <Link key={item.href} className="workspace-nav-link" href={item.href}>
+                  <Icon size={18} strokeWidth={2} aria-hidden="true" />
+                  <span>{item.label}</span>
                 </Link>
-              ),
-            )}
+              );
+            })}
           </nav>
 
-          <div className="side-note">
-            <Badge className="sync-pill" variant="secondary">
-              {currentUser?.role ?? "USER"}
-            </Badge>
-            <p>Unified navigation for catalog work, creation flows, imports, and internal tasks.</p>
+          <div className="workspace-navbar-side">
+            <div className="workspace-user-pill">
+              <span className="workspace-user-email">{currentUser?.email ?? "workspace@example.com"}</span>
+              <span className="workspace-user-role">{currentUser?.role ?? "USER"}</span>
+            </div>
+
+            <span className="workspace-navbar-divider" aria-hidden="true" />
+
+            <button className="workspace-logout-btn" onClick={handleLogout} type="button">
+              <LogOut size={18} strokeWidth={2} aria-hidden="true" />
+              <span>Выйти</span>
+            </button>
           </div>
-        </aside>
+        </header>
 
-        <section className="workspace">
-          <header className="topbar">
-            <div className="topbar-copy">
-              <p className="page-section-label">{sectionLabel}</p>
-              <h1>{title}</h1>
-              <p>{description}</p>
-            </div>
-            <div className="topbar-actions">
-              <div className="user-context-mini">
-                <div className="user-context-mini-head">
-                  <strong>{currentUser?.email ?? "Профиль"}</strong>
-                  <Badge className="sync-pill" variant="secondary">
-                    {currentUser?.role ?? "USER"}
-                  </Badge>
+        {isMobileNavOpen ? (
+          <div className="workspace-mobile-menu-backdrop" onClick={() => setIsMobileNavOpen(false)}>
+            <aside
+              className="workspace-mobile-menu"
+              aria-label="Мобильная навигация"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="workspace-mobile-menu-head">
+                <div className="workspace-brand-panel">
+                  <div className="workspace-brand-mark" aria-hidden="true">
+                    <OttoLogo className="workspace-brand-logo" title="OTTO Контроль" />
+                  </div>
+                  <div className="workspace-brand-copy">
+                    <p className="workspace-brand-title">OTTO Контроль</p>
+                  </div>
                 </div>
+                <button
+                  className="workspace-mobile-close"
+                  type="button"
+                  onClick={() => setIsMobileNavOpen(false)}
+                  aria-label="Закрыть меню"
+                >
+                  <X size={18} strokeWidth={2.2} />
+                </button>
               </div>
-              <Button className="secondary-btn" onClick={handleLogout} type="button" variant="secondary">
-                Выйти
-              </Button>
-            </div>
-          </header>
 
+              <div className="workspace-mobile-user">
+                <strong>{currentUser?.email ?? "workspace@example.com"}</strong>
+                <span>{currentUser?.role ?? "USER"}</span>
+              </div>
+
+              <nav className="workspace-mobile-nav-links">
+                {navItems.map((item) => {
+                  const Icon = item.icon;
+                  const isActive = item.href === activeHref;
+
+                  return (
+                    <Link
+                      key={item.href}
+                      className={`workspace-mobile-nav-link ${isActive ? "is-active" : ""}`}
+                      href={item.href}
+                      onClick={() => setIsMobileNavOpen(false)}
+                    >
+                      <Icon size={18} strokeWidth={2} aria-hidden="true" />
+                      <span>{item.label}</span>
+                    </Link>
+                  );
+                })}
+              </nav>
+
+              <button className="workspace-mobile-logout" onClick={handleLogout} type="button">
+                <LogOut size={18} strokeWidth={2} aria-hidden="true" />
+                <span>Выйти</span>
+              </button>
+            </aside>
+          </div>
+        ) : null}
+
+        <section className="workspace workspace-content" aria-label={`${sectionLabel}: ${title}`}>
           {children}
         </section>
       </section>

@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     redis_url: str = "redis://127.0.0.1:6379/0"
     celery_broker_url: str = "redis://127.0.0.1:6379/0"
     celery_result_backend: str = "redis://127.0.0.1:6379/1"
+    celery_worker_concurrency: int = 2
+    factory_product_concurrency: int = 10
+    factory_ai_enrich_item_timeout_seconds: int = 300
 
     gpt_key: str
 

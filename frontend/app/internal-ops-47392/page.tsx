@@ -6,6 +6,7 @@ import { FormEvent, useState } from "react";
 import { useCurrentUser } from "../hooks/use-current-user";
 import { readApiErrorMessage } from "../lib/api";
 import { AuthShell } from "../ui/auth-shell";
+import { PageLoadingShell } from "../ui/page-loading-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -79,14 +80,7 @@ export default function InternalOpsPage() {
   }
 
   if (isLoading) {
-    return (
-      <AuthShell
-        title="Проверяем доступ"
-        description="Загружаем данные текущего пользователя."
-      >
-        <p className="helper-banner info">Пожалуйста, подождите...</p>
-      </AuthShell>
-    );
+    return <PageLoadingShell contentMode="form" />;
   }
 
   const isSeoUser = currentUser?.role === "SEO";

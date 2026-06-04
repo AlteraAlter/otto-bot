@@ -1,5 +1,6 @@
 import { ReactNode } from "react";
 import { Card } from "@/components/ui/card";
+import { OttoLogo } from "@/components/otto-logo";
 
 type AuthShellProps = {
   title: string;
@@ -21,7 +22,10 @@ export function AuthShell({
       <main className="login-page">
         <Card className="login-shell login-shell-compact">
           <div className="login-compact-head">
-            <p className="brand">OTTO Контроль</p>
+            <div className="brand-lockup">
+              <OttoLogo className="brand-logo" title="OTTO Контроль" />
+              <p className="brand">OTTO Контроль</p>
+            </div>
           </div>
           <div className="login-card">{children}</div>
         </Card>
@@ -33,7 +37,10 @@ export function AuthShell({
     <main className="login-page">
       <Card className="login-shell">
         <div className="login-hero">
-          <p className="brand">OTTO Контроль</p>
+          <div className="brand-lockup">
+            <OttoLogo className="brand-logo" title="OTTO Контроль" />
+            <p className="brand">OTTO Контроль</p>
+          </div>
           <p className="brand-subtitle">Product workspace</p>
           <h1>{title}</h1>
           <p className="login-copy">{description}</p>

@@ -1,14 +1,12 @@
-import { NextResponse } from "next/server";
-
 import {
   getAuthorizedHeaders,
   toClientResponse,
   withBackendPath,
-} from "../../../../../lib/auth";
+} from "../../../../lib/auth";
 
 export async function POST(request: Request) {
   const body = await request.text();
-  const response = await fetch(withBackendPath("/v1/products/tasks/create"), {
+  const response = await fetch(withBackendPath("/v1/products/deactivate-by-ean"), {
     method: "POST",
     headers: await getAuthorizedHeaders({
       "content-type": "application/json",
@@ -19,4 +17,3 @@ export async function POST(request: Request) {
 
   return toClientResponse(response);
 }
-

@@ -11,11 +11,11 @@ from app.database import Base, DATABASE_URL
 import app.models.products
 import app.models.product_attributes
 import app.models.product_import_tasks
-import app.models.product_creation_tasks
 import app.models.jv_lister
 import app.models.users
 import app.models.user_roles
 import app.models.factories
+import app.models.factory_task_states
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

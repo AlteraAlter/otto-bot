@@ -5,6 +5,7 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import { useCurrentUser } from "../hooks/use-current-user";
 import { readApiErrorMessage, readJsonResponse } from "../lib/api";
 import { AppWorkspaceShell } from "../ui/app-workspace-shell";
+import { PageLoadingShell } from "../ui/page-loading-shell";
 
 type TaskStatus = "queued" | "running" | "completed" | "failed";
 type JobType = "afterbuy" | "xlsx";
@@ -253,15 +254,7 @@ export default function ProductImportsPage() {
   }
 
   if (isLoading) {
-    return (
-      <main className="otto-page">
-        <section className="app-shell">
-          <section className="workspace">
-            <p className="helper-banner info">Please wait...</p>
-          </section>
-        </section>
-      </main>
-    );
+    return <PageLoadingShell contentMode="dashboard" />;
   }
 
   const accessMessage =

@@ -28,6 +28,18 @@ class OttoClient:
         self.auth = auth
         self.base_url = base_url
         self.timeout = timeout
+        self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return a reusable HTTP client so concurrent requests share connections."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the reusable HTTP client when the application lifecycle supports it."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
 
     async def _header(self, controller: Controller | str = Controller.JV):
         """Build authenticated headers required by OTTO endpoints."""
@@ -74,14 +86,13 @@ class OttoClient:
         controller: Controller | str = Controller.JV,
     ) -> httpx.Response:
         """Execute an authenticated HTTP request and return the raw response."""
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            return await client.request(
-                method,
-                f"{self.base_url}{path}",
-                headers=await self._header(controller),
-                params=params,
-                json=json,
-            )
+        return await self._get_client().request(
+            method,
+            f"{self.base_url}{path}",
+            headers=await self._header(controller),
+            params=params,
+            json=json,
+        )
 
     async def _request(
         self,
@@ -114,12 +125,17 @@ class OttoClient:
         )
         return response.status_code, self._parse_response(response)
 
-    async def update_status(self, payload: dict):
+    async def update_status(
+        self,
+        payload: dict,
+        controller: Controller | str = Controller.JV,
+    ):
         """POST active status changes for products."""
         return await self._request(
             "POST",
             "/v5/products/active-status",
             json=payload,
+            controller=controller,
         )
 
     async def get_product(self, sku: str) -> ProductResponse:

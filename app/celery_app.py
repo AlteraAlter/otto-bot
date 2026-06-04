@@ -8,6 +8,7 @@ celery_app = Celery(
     "otto_bot",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
+    include=["app.tasks"],
 )
 
 celery_app.conf.update(

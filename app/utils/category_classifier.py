@@ -24,11 +24,14 @@ class CategoryClassifier:
         - Category MUST exist in provided category list.
         - Never invent categories.
         - Analyze title, description and attributes.
+        - Return confidence for how certain you are about the category.
+        - Confidence MUST be a number between 0 and 100.
         - Return valid JSON only.
         
         Format:
         {
-            "category": "..."
+            "category": "...",
+            "confidence": 96
         }
         """
 
@@ -49,8 +52,15 @@ class CategoryClassifier:
                     "name": "category_response",
                     "schema": {
                         "type": "object",
-                        "properties": {"category": {"type": "string"}},
-                        "required": ["category"],
+                        "properties": {
+                            "category": {"type": "string"},
+                            "confidence": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 100,
+                            },
+                        },
+                        "required": ["category", "confidence"],
                         "additionalProperties": False,
                     },
                 }
@@ -65,6 +75,16 @@ class CategoryClassifier:
 
         if data["category"] not in self.categories:
             raise ValueError(f"Возвращена неправильная категория: {data['category']}")
+        raw_confidence = data.get("confidence", 0)
+        if isinstance(raw_confidence, str):
+            try:
+                raw_confidence = float(raw_confidence)
+            except ValueError:
+                raw_confidence = 0
+        confidence = float(raw_confidence) if isinstance(raw_confidence, (int, float)) else 0
+        if 0 <= confidence <= 1:
+            confidence *= 100
+        data["confidence"] = max(0, min(100, int(round(confidence))))
         return data
 
 

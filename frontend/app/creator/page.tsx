@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, Box, Check, ChevronLeft, ChevronRight, Copy, Funnel, Package, RefreshCw, Search, Trash2, X } from "lucide-react";
+import { AlertCircle, Box, Check, CheckCircle2, ChevronLeft, ChevronRight, Copy, Funnel, Package, Pencil, RefreshCw, Search, Trash2, TriangleAlert, X } from "lucide-react";
 
 import { readApiErrorMessage, readJsonResponse } from "../lib/api";
 import { useCurrentUser } from "../hooks/use-current-user";
 import { AppWorkspaceShell } from "../ui/app-workspace-shell";
+import { PageLoadingShell } from "../ui/page-loading-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -13,9 +14,11 @@ import { Card } from "@/components/ui/card";
 type UploadState = "idle" | "loading" | "success" | "error";
 type ControllerOption = "jv" | "xl";
 const CREATOR_DRAFT_KEY = "creator_process_draft_v1";
+const AVAILABILITY_CONCURRENCY = 10;
 
 type FabricOption = { id: string; name: string; items_count?: number };
 type FabricListResponse = { factory?: FabricOption[] };
+type CategoryListResponse = { success?: boolean; items?: string[] };
 type ShippingProfileOption = { id: string; name: string };
 type CreateFromFabricResponse = {
   success?: boolean;
@@ -37,6 +40,14 @@ type PrepareStatusResponse = {
   heartbeat_lag_sec?: number;
   stuck?: boolean;
   stuck_message?: string | null;
+  frontend_draft?: Record<string, unknown>;
+  products_count?: number;
+  otto_process_id?: string | null;
+  otto_create_state?: string;
+  otto_update_result?: Record<string, unknown>;
+  otto_failed_result?: Record<string, unknown> | null;
+  availability_errors?: OttoErrorRow[];
+  availability_failed?: number;
 };
 type SubmitPreparedResponse = {
   success?: boolean;
@@ -46,6 +57,14 @@ type SubmitPreparedResponse = {
   otto_create_state?: string;
   otto_update_result?: Record<string, unknown>;
   otto_failed_result?: Record<string, unknown> | null;
+  queued?: boolean;
+  process_state?: string;
+};
+type EnrichPreparedResponse = {
+  success?: boolean;
+  process_id?: string;
+  products_count?: number;
+  products?: Record<string, unknown>[];
 };
 type AvailabilitySubmitResponse = {
   update_quantity?: { success?: boolean; errors?: string };
@@ -58,12 +77,22 @@ type OttoSummary = {
   succeeded: number;
   failed: number;
 };
+type TaskProgress = {
+  total: number;
+  completed: number;
+  percent: number;
+};
 type OttoErrorRow = {
   variation: string;
   code: string;
   title: string;
   jsonPath: string;
 };
+type AiCategoryReview = {
+  category: string;
+  confidence: number;
+};
+type CategoryReviewStatus = "confirmed" | "requires_review" | "manually_changed" | "manually_confirmed";
 type ParsedSkuError = {
   sku: string;
   code: string;
@@ -74,6 +103,7 @@ type ParsedSkuError = {
 
 type EditorTab = "general" | "attributes" | "json";
 type AttributeEditField = "values";
+type WorkflowStep = "categories" | "details";
 const SHIPPING_PROFILE_LABELS: Record<string, string> = {
   "786c6468-3baf-52e0-88b5-13757eb7f873": "4-8 недель",
   "360835cf-4962-59bb-ae66-78e8a41c8948": "6-10 недель",
@@ -119,6 +149,31 @@ function buildPagination(currentPage: number, totalPages: number): Array<number 
   if (currentPage <= 3) return [1, 2, 3, "...", totalPages];
   if (currentPage >= totalPages - 2) return [1, "...", totalPages - 2, totalPages - 1, totalPages];
   return [1, "...", currentPage - 1, currentPage, currentPage + 1, "...", totalPages];
+}
+
+async function runWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length);
+  let cursor = 0;
+
+  async function consume() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      try {
+        results[index] = { status: "fulfilled", value: await worker(items[index], index) };
+      } catch (error) {
+        results[index] = { status: "rejected", reason: error };
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, () => consume());
+  await Promise.all(workers);
+  return results;
 }
 
 function normalizeSku(value: string): string {
@@ -212,11 +267,54 @@ function productShippingProfileId(product: Record<string, unknown>): string {
   return String(product.shippingProfileID ?? "");
 }
 
+function readAiCategoryReview(product: Record<string, unknown>): AiCategoryReview {
+  const description = asRecord(product.productDescription);
+  return {
+    category: String(
+      product.aiCategory ??
+      product.category ??
+      description.aiCategory ??
+      description.category ??
+      "",
+    ),
+    confidence: Number(
+      product.aiCategoryConfidence ??
+      product.categoryConfidence ??
+      product.confidence ??
+      description.aiCategoryConfidence ??
+      description.categoryConfidence ??
+      description.confidence ??
+      0,
+    ),
+  };
+}
+
+function mergeAiCategoryReview(
+  storedReview: AiCategoryReview | undefined,
+  product: Record<string, unknown>,
+): AiCategoryReview {
+  const productReview = readAiCategoryReview(product);
+  if (!storedReview) {
+    return productReview;
+  }
+
+  const storedCategory = String(storedReview.category ?? "").trim();
+  const productCategory = String(productReview.category ?? "").trim();
+  const storedConfidence = Number(storedReview.confidence ?? 0);
+  const productConfidence = Number(productReview.confidence ?? 0);
+
+  return {
+    category: storedCategory || productCategory,
+    confidence: productConfidence > 0 ? productConfidence : storedConfidence,
+  };
+}
+
 export default function CreatorPage() {
   const { currentUser, isLoading, error } = useCurrentUser();
   const [controller, setController] = useState<ControllerOption>("jv");
   const [fabrics, setFabrics] = useState<FabricOption[]>([]);
   const [shippingProfiles, setShippingProfiles] = useState<ShippingProfileOption[]>([]);
+  const [availableCategories, setAvailableCategories] = useState<string[]>([]);
   const [selectedFabricId, setSelectedFabricId] = useState<string>("");
   const [state, setState] = useState<UploadState>("idle");
   const [isLoadingFabrics, setIsLoadingFabrics] = useState(false);
@@ -226,7 +324,9 @@ export default function CreatorPage() {
   const [processId, setProcessId] = useState<string>("");
   const [processState, setProcessState] = useState<string>("IDLE");
   const [products, setProducts] = useState<Record<string, unknown>[]>([]);
+  const [aiCategoryByIndex, setAiCategoryByIndex] = useState<Record<number, AiCategoryReview>>({});
   const [selectedIndex, setSelectedIndex] = useState<number>(0);
+  const [workflowStep, setWorkflowStep] = useState<WorkflowStep>("categories");
   const [currentStep, setCurrentStep] = useState<string>("prepare_initializing");
   const [stepElapsed, setStepElapsed] = useState<number>(0);
   const [heartbeatLag, setHeartbeatLag] = useState<number>(0);
@@ -252,10 +352,174 @@ export default function CreatorPage() {
   const [pageSize, setPageSize] = useState(25);
   const [page, setPage] = useState(1);
   const [copiedSkuIndex, setCopiedSkuIndex] = useState<number | null>(null);
+  const [copiedRuntimeField, setCopiedRuntimeField] = useState<string | null>(null);
+  const [runtimeCopyErrorField, setRuntimeCopyErrorField] = useState<string | null>(null);
   const [tableStatusPhase, setTableStatusPhase] = useState<"pending" | "processing" | "result">("pending");
+  const [selectedCategoryRowIndexes, setSelectedCategoryRowIndexes] = useState<number[]>([]);
+  const [bulkCategoryValue, setBulkCategoryValue] = useState("");
+  const [confirmedCategoryRowIndexes, setConfirmedCategoryRowIndexes] = useState<number[]>([]);
+  const [taskProgress, setTaskProgress] = useState<TaskProgress>({ total: 0, completed: 0, percent: 0 });
+  const [realtimeMode, setRealtimeMode] = useState<"websocket" | "polling">("websocket");
 
   function setUiMessage(nextMessage: string) {
     setMessage(sanitizeUiMessage(nextMessage));
+  }
+
+  function isItemProgressStep(step: string) {
+    return step.startsWith("ai_enrichment") || step === "building_category_preview";
+  }
+
+  function applyFrontendDraft(parsed: PrepareStatusResponse, options?: { preserveWorkflowStep?: boolean }) {
+    const frontendDraft = asRecord((parsed as Record<string, unknown>)?.frontend_draft);
+    if (Object.keys(frontendDraft).length === 0) return;
+
+    const storedSelectedIndex = Number(frontendDraft.selectedIndex ?? 0);
+    const storedWorkflowStep = String(frontendDraft.workflowStep ?? "");
+    const storedAiCategoryByIndex = asRecord(frontendDraft.aiCategoryByIndex) as Record<number, AiCategoryReview>;
+    const storedConfirmedRows = Array.isArray(frontendDraft.confirmedCategoryRowIndexes)
+      ? (frontendDraft.confirmedCategoryRowIndexes as number[])
+      : [];
+    const storedOttoErrors = Array.isArray(frontendDraft.ottoErrors)
+      ? (frontendDraft.ottoErrors as OttoErrorRow[])
+      : [];
+    const storedSummary = asRecord(frontendDraft.ottoSummary);
+
+    setSelectedIndex(Number.isFinite(storedSelectedIndex) ? storedSelectedIndex : 0);
+    if (!options?.preserveWorkflowStep && (storedWorkflowStep === "categories" || storedWorkflowStep === "details")) {
+      setWorkflowStep(storedWorkflowStep);
+    }
+    if (Object.keys(storedAiCategoryByIndex).length > 0) {
+      setAiCategoryByIndex(storedAiCategoryByIndex);
+    }
+    setConfirmedCategoryRowIndexes(storedConfirmedRows);
+    setTableStatusPhase(
+      frontendDraft.tableStatusPhase === "processing" || frontendDraft.tableStatusPhase === "result"
+        ? frontendDraft.tableStatusPhase
+        : "pending",
+    );
+    setLastSubmitTotal(Number(frontendDraft.lastSubmitTotal ?? 0));
+    setOttoProcessId(String(frontendDraft.ottoProcessId ?? ""));
+    setOttoErrors(storedOttoErrors);
+    if (Object.keys(storedSummary).length > 0) {
+      setOttoSummary({
+        state: String(storedSummary.state ?? ""),
+        total: Number(storedSummary.total ?? 0),
+        progress: Number(storedSummary.progress ?? 0),
+        succeeded: Number(storedSummary.succeeded ?? 0),
+        failed: Number(storedSummary.failed ?? 0),
+      });
+    }
+  }
+
+  function applyProcessUpdate(parsed: PrepareStatusResponse) {
+    const nextState = parsed?.process_state ?? "IN_PROGRESS";
+    setProcessState(nextState);
+    setIssues(Array.isArray(parsed?.issues) ? parsed.issues : []);
+    setCurrentStep(String(parsed?.current_step ?? "in_progress"));
+    setStepElapsed(Number(parsed?.step_elapsed_sec ?? 0));
+    setHeartbeatLag(Number(parsed?.heartbeat_lag_sec ?? 0));
+    setStuckMessage(parsed?.stuck ? String(parsed?.stuck_message ?? "Процесс завис") : "");
+    setTaskProgress({
+      total: Number((parsed as Record<string, unknown>)?.progress_total ?? 0),
+      completed: Number((parsed as Record<string, unknown>)?.progress_completed ?? 0),
+      percent: Number((parsed as Record<string, unknown>)?.progress_percent ?? 0),
+    });
+
+    const currentStepName = String(parsed?.current_step ?? "");
+    if ((nextState === "DONE" || nextState === "FAILED") && (currentStepName === "otto_create_done" || currentStepName === "availability_done" || currentStepName === "otto_create_failed")) {
+      const update = asRecord(parsed?.otto_update_result);
+      const failed = asRecord(parsed?.otto_failed_result);
+      const failedCount = Number(update.failed ?? 0);
+      const succeededCount = Number(update.succeeded ?? 0);
+      const ottoPid = String(parsed?.otto_process_id ?? "");
+      const availabilityErrors = Array.isArray(parsed?.availability_errors) ? parsed.availability_errors : [];
+      setOttoProcessId(ottoPid);
+      setOttoSummary({
+        state: String(update.state ?? parsed?.otto_create_state ?? ""),
+        total: Number(update.total ?? parsed?.products_count ?? 0),
+        progress: Number(update.progress ?? 0),
+        succeeded: succeededCount,
+        failed: failedCount,
+      });
+
+      const resultErrors = Array.isArray(failed.results) ? failed.results : [];
+      const ottoErrorRows: OttoErrorRow[] = resultErrors.flatMap((entry) => {
+        const rec = asRecord(entry);
+        const variation = String(rec.variation ?? "unknown");
+        const errs = Array.isArray(rec.errors) ? rec.errors : [];
+        return errs.map((err) => {
+          const errRec = asRecord(err);
+          return {
+            variation,
+            code: String(errRec.code ?? "error"),
+            title: String(errRec.title ?? "Unknown error"),
+            jsonPath: String(errRec.jsonPath ?? ""),
+          };
+        });
+      });
+      const nextErrors = availabilityErrors.length > 0 ? availabilityErrors : ottoErrorRows;
+      setOttoErrors(nextErrors);
+      setTableStatusPhase("result");
+
+      if (nextState === "FAILED" || failedCount > 0 || nextErrors.length > 0) {
+        setState("error");
+        setIssues(nextErrors.length > 0 ? nextErrors.map((item) => `${item.variation}: ${item.code}`) : (Array.isArray(parsed?.issues) ? parsed.issues : [`OTTO process ${ottoPid || "-"} failed`]));
+        setUiMessage(currentStepName === "availability_done" ? "Availability завершен с ошибками." : "Загрузка завершена с ошибками.");
+        return;
+      }
+
+      setState("success");
+      setIssues([]);
+      setUiMessage(`Загружено товаров: ${parsed?.products_count ?? succeededCount}. Availability отправлен.`);
+      return;
+    }
+
+    if (nextState === "DONE") {
+      const rows = Array.isArray(parsed?.products) ? parsed.products : [];
+      setProducts(rows);
+      if (currentStepName === "ai_enrichment_done") {
+        applyFrontendDraft(parsed, { preserveWorkflowStep: true });
+        setState("success");
+        setSelectedIndex((current) => (current >= 0 && current < rows.length ? current : 0));
+        setWorkflowStep("details");
+        setTableStatusPhase("pending");
+        setUiMessage("AI-атрибуты и описания готовы. Проверьте товары перед финальной отправкой.");
+        return;
+      }
+
+      applyFrontendDraft(parsed);
+      setAiCategoryByIndex(
+        Object.fromEntries(
+          rows.map((product, index) => {
+            const record = asRecord(product);
+            return [
+              index,
+              readAiCategoryReview(record),
+            ];
+          }),
+        ),
+      );
+      if (!asRecord((parsed as Record<string, unknown>)?.frontend_draft).aiCategoryByIndex) {
+        setSelectedIndex(0);
+        setConfirmedCategoryRowIndexes([]);
+        setWorkflowStep("categories");
+        setTableStatusPhase("pending");
+      }
+      setState("success");
+      setUiMessage(`Подготовка завершена: source=${parsed?.source_items ?? 0}, mapped=${parsed?.mapped_items ?? 0}, payload=${parsed?.payload_items ?? rows.length}.`);
+    }
+    if (nextState === "FAILED") {
+      setState("error");
+      const failedStep = String(parsed?.current_step ?? "");
+      if (parsed?.stuck && (failedStep === "prepare_queued" || failedStep === "ai_enrichment_queued" || failedStep === "otto_create_queued")) {
+        setProcessState("IN_PROGRESS");
+        setState("loading");
+        setRealtimeMode("polling");
+        setUiMessage("Процесс ожидает worker. Продолжаю проверять статус...");
+        return;
+      }
+      setUiMessage(failedStep.startsWith("ai_enrichment") ? "Генерация товаров завершилась с ошибкой." : "Подготовка завершилась с ошибкой.");
+    }
   }
 
   useEffect(() => {
@@ -273,25 +537,11 @@ export default function CreatorPage() {
       setIssues(Array.isArray(draft.issues) ? (draft.issues as string[]) : []);
       setProcessId(String(draft.processId ?? ""));
       setProcessState(String(draft.processState ?? "IDLE"));
-      setProducts(Array.isArray(draft.products) ? (draft.products as Record<string, unknown>[]) : []);
-      setSelectedIndex(Number(draft.selectedIndex ?? 0));
+      setWorkflowStep((draft.workflowStep as WorkflowStep) ?? "categories");
       setCurrentStep(String(draft.currentStep ?? "prepare_initializing"));
       setStepElapsed(Number(draft.stepElapsed ?? 0));
       setHeartbeatLag(Number(draft.heartbeatLag ?? 0));
       setStuckMessage(String(draft.stuckMessage ?? ""));
-      setOttoProcessId(String(draft.ottoProcessId ?? ""));
-      const summary = asRecord(draft.ottoSummary);
-      if (Object.keys(summary).length > 0) {
-        setOttoSummary({
-          state: String(summary.state ?? ""),
-          total: Number(summary.total ?? 0),
-          progress: Number(summary.progress ?? 0),
-          succeeded: Number(summary.succeeded ?? 0),
-          failed: Number(summary.failed ?? 0),
-        });
-      }
-      setOttoErrors(Array.isArray(draft.ottoErrors) ? (draft.ottoErrors as OttoErrorRow[]) : []);
-      setLastSubmitTotal(Number(draft.lastSubmitTotal ?? 0));
     } catch {
       // ignore broken draft and continue with clean state
     } finally {
@@ -309,18 +559,17 @@ export default function CreatorPage() {
       issues,
       processId,
       processState,
-      products,
-      selectedIndex,
+      workflowStep,
       currentStep,
       stepElapsed,
       heartbeatLag,
       stuckMessage,
-      ottoProcessId,
-      ottoSummary,
-      ottoErrors,
-      lastSubmitTotal,
     };
-    window.localStorage.setItem(CREATOR_DRAFT_KEY, JSON.stringify(draft));
+    try {
+      window.localStorage.setItem(CREATOR_DRAFT_KEY, JSON.stringify(draft));
+    } catch {
+      // ignore storage failures and continue without browser draft persistence
+    }
   }, [
     hydratedDraft,
     controller,
@@ -330,16 +579,84 @@ export default function CreatorPage() {
     issues,
     processId,
     processState,
-    products,
-    selectedIndex,
+    workflowStep,
     currentStep,
     stepElapsed,
     heartbeatLag,
     stuckMessage,
+  ]);
+
+  useEffect(() => {
+    if (!hydratedDraft || !processId || products.length > 0) return;
+    let active = true;
+
+    async function restorePersistedTask() {
+      try {
+        const response = await fetch(`/api/products/create-from-fabric/${encodeURIComponent(processId)}`, {
+          method: "GET",
+          cache: "no-store",
+        });
+        const parsed = await readJsonResponse<PrepareStatusResponse>(response);
+        if (!active || !response.ok || !parsed || parsed.success === false) return;
+        applyProcessUpdate(parsed);
+      } catch {
+        // ignore restore failures and keep current draft state
+      }
+    }
+
+    void restorePersistedTask();
+    return () => {
+      active = false;
+    };
+  }, [hydratedDraft, processId, products.length]);
+
+  useEffect(() => {
+    if (!hydratedDraft || !processId || products.length === 0) return;
+    if (currentStep.startsWith("ai_enrichment") && currentStep !== "ai_enrichment_done" && currentStep !== "ai_enrichment_failed") {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void fetch(`/api/products/create-from-fabric/${encodeURIComponent(processId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          products,
+          current_step: currentStep,
+          frontend_draft: {
+            aiCategoryByIndex,
+            selectedIndex,
+            workflowStep,
+            confirmedCategoryRowIndexes,
+            ottoProcessId,
+            ottoSummary,
+            ottoErrors,
+            lastSubmitTotal,
+            tableStatusPhase,
+          },
+        }),
+        cache: "no-store",
+      }).catch(() => {
+        // keep working locally if draft sync fails temporarily
+      });
+    }, 900);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [
+    hydratedDraft,
+    processId,
+    products,
+    currentStep,
+    aiCategoryByIndex,
+    selectedIndex,
+    workflowStep,
+    confirmedCategoryRowIndexes,
     ottoProcessId,
     ottoSummary,
     ottoErrors,
     lastSubmitTotal,
+    tableStatusPhase,
   ]);
 
   async function loadFabrics(options?: { silent?: boolean }) {
@@ -357,6 +674,11 @@ export default function CreatorPage() {
       const items = Array.isArray(parsed?.factory) ? parsed.factory : [];
       setFabrics(items);
       setSelectedFabricId((prev) => (prev && items.some((item) => item.id === prev) ? prev : (items[0]?.id ?? "")));
+      setMessage((prev) =>
+        prev.includes("Ошибка загрузки списка fabrics")
+          ? "Выберите fabric и нажмите «Выставить»."
+          : prev,
+      );
     } catch {
       setFabrics([]);
       setSelectedFabricId("");
@@ -419,6 +741,32 @@ export default function CreatorPage() {
   }, [controller]);
 
   useEffect(() => {
+    let active = true;
+    async function loadCategories() {
+      try {
+        const response = await fetch("/api/products/available-categories", {
+          method: "GET",
+          cache: "no-store",
+        });
+        const parsed = await readJsonResponse<CategoryListResponse>(response);
+        if (!active || !response.ok) return;
+        setAvailableCategories(
+          Array.isArray(parsed?.items)
+            ? parsed.items.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+            : [],
+        );
+      } catch {
+        if (!active) return;
+        setAvailableCategories([]);
+      }
+    }
+    void loadCategories();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
     if (shippingProfiles.length === 0 || products.length === 0) return;
     const defaultProfileId = shippingProfiles[0]?.id ?? "";
     if (!defaultProfileId) return;
@@ -432,32 +780,53 @@ export default function CreatorPage() {
   }, [shippingProfiles, products.length]);
 
   useEffect(() => {
-    if (!processId || processState !== "IN_PROGRESS") return;
+    if (!processId || processState !== "IN_PROGRESS" || realtimeMode !== "polling") return;
     const timer = setInterval(async () => {
       const response = await fetch(`/api/products/create-from-fabric/${processId}`, { method: "GET", cache: "no-store" });
       const parsed = await readJsonResponse<PrepareStatusResponse>(response);
-      if (!response.ok || parsed?.success === false) return;
-      const nextState = parsed?.process_state ?? "IN_PROGRESS";
-      setProcessState(nextState);
-      setIssues(Array.isArray(parsed?.issues) ? parsed.issues : []);
-      setCurrentStep(String(parsed?.current_step ?? "in_progress"));
-      setStepElapsed(Number(parsed?.step_elapsed_sec ?? 0));
-      setHeartbeatLag(Number(parsed?.heartbeat_lag_sec ?? 0));
-      setStuckMessage(parsed?.stuck ? String(parsed?.stuck_message ?? "Процесс завис") : "");
-      if (nextState === "DONE") {
-        const rows = Array.isArray(parsed?.products) ? parsed.products : [];
-        setProducts(rows);
-        setSelectedIndex(0);
-        setTableStatusPhase("pending");
-        setState("success");
-        setUiMessage(`Подготовка завершена: source=${parsed?.source_items ?? 0}, mapped=${parsed?.mapped_items ?? 0}, payload=${parsed?.payload_items ?? rows.length}.`);
-      }
-      if (nextState === "FAILED") {
-        setState("error");
-        setUiMessage("Подготовка завершилась с ошибкой.");
-      }
+      if (!response.ok || !parsed || parsed?.success === false) return;
+      applyProcessUpdate(parsed);
     }, 1800);
     return () => clearInterval(timer);
+  }, [processId, processState, realtimeMode]);
+
+  useEffect(() => {
+    if (!processId || processState !== "IN_PROGRESS" || typeof window === "undefined") return;
+    setRealtimeMode("websocket");
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${protocol}//${window.location.host}/v1/products/tasks/create-from-factory/${encodeURIComponent(processId)}/ws`;
+    let closedByTerminalState = false;
+    let socket: WebSocket | null = null;
+    try {
+      socket = new WebSocket(wsUrl);
+      socket.onmessage = (event) => {
+        try {
+          const parsed = JSON.parse(String(event.data ?? "")) as PrepareStatusResponse;
+          if (parsed?.success === false) return;
+          applyProcessUpdate(parsed);
+          const nextState = parsed?.process_state ?? "IN_PROGRESS";
+          if (nextState === "DONE" || nextState === "FAILED") {
+            closedByTerminalState = true;
+          }
+        } catch {
+          // ignore malformed realtime payloads and keep fallback available
+        }
+      };
+      socket.onerror = () => {
+        setRealtimeMode("polling");
+      };
+      socket.onclose = () => {
+        if (!closedByTerminalState && processState === "IN_PROGRESS") {
+          setRealtimeMode("polling");
+        }
+      };
+    } catch {
+      setRealtimeMode("polling");
+    }
+
+    return () => {
+      if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+    };
   }, [processId, processState]);
 
   const rows = useMemo(() => products.map((product, index) => {
@@ -475,11 +844,28 @@ export default function CreatorPage() {
           : rowErrors > 0
             ? "failed"
             : "passed";
+    const title = String(
+      product.Artikelbeschreibung ??
+      product.TranslatedDescription ??
+      description.productLine ??
+      product.productReference ??
+      product.sku ??
+      `Товар ${index + 1}`,
+    );
+    const aiReview = mergeAiCategoryReview(
+      aiCategoryByIndex[index],
+      asRecord(product),
+    );
+    const aiCategory = String(aiReview.category ?? "");
+    const aiConfidence = Number(aiReview.confidence ?? 0);
     return {
       index,
       image: firstImage(product),
+      title,
       sku: String(product.sku ?? ""),
-      category: String(description.category ?? ""),
+      aiCategory,
+      aiConfidence,
+      selectedCategory: String(description.category ?? ""),
       shippingProfileId: profileId,
       shippingProfileName: profileName,
       ean: String(product.ean ?? ""),
@@ -489,39 +875,77 @@ export default function CreatorPage() {
       errors: rowErrors,
       status: rowStatus as "passed" | "failed" | "processing" | "pending",
     };
-  }), [products, ottoErrors, tableStatusPhase, shippingProfiles]);
+  }), [products, aiCategoryByIndex, ottoErrors, tableStatusPhase, shippingProfiles]);
 
   const categories = useMemo(
-    () => Array.from(new Set(rows.map((row) => row.category).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    () => Array.from(new Set(rows.map((row) => row.selectedCategory || row.aiCategory).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
     [rows],
   );
 
   const filteredRows = useMemo(() => {
     const query = tableQuery.trim().toLowerCase();
     return rows.filter((row) => {
-      if (statusFilter !== "all" && row.status !== statusFilter) return false;
-      if (categoryFilter !== "all" && row.category !== categoryFilter) return false;
-      if (errorFilter === "with_errors" && row.errors === 0) return false;
-      if (errorFilter === "only_success" && row.errors > 0) return false;
-
-      const priceValue = Number(row.price);
-      const from = priceFrom.trim() ? Number(priceFrom) : null;
-      const to = priceTo.trim() ? Number(priceTo) : null;
-      if (from !== null && Number.isFinite(priceValue) && priceValue < from) return false;
-      if (to !== null && Number.isFinite(priceValue) && priceValue > to) return false;
-
+      if (categoryFilter !== "all" && row.selectedCategory !== categoryFilter && row.aiCategory !== categoryFilter) return false;
       if (!query) return true;
-      return [row.sku, row.category, row.shippingProfileName, row.productReference, row.productLine, row.ean]
+      return [row.sku, row.aiCategory, row.selectedCategory, row.title, row.productReference, row.productLine, row.ean]
         .join(" ")
         .toLowerCase()
         .includes(query);
     });
-  }, [rows, tableQuery, statusFilter, categoryFilter, errorFilter, priceFrom, priceTo]);
+  }, [rows, tableQuery, categoryFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
   const safePage = Math.min(page, totalPages);
   const pagedRows = filteredRows.slice((safePage - 1) * pageSize, safePage * pageSize);
   const paginationItems = buildPagination(safePage, totalPages);
+  const selectedCategoryIndexSet = useMemo(() => new Set(selectedCategoryRowIndexes), [selectedCategoryRowIndexes]);
+  const confirmedCategoryIndexSet = useMemo(() => new Set(confirmedCategoryRowIndexes), [confirmedCategoryRowIndexes]);
+  const allFilteredRowsSelected = filteredRows.length > 0 && filteredRows.every((row) => selectedCategoryIndexSet.has(row.index));
+  const missingCategoryCount = rows.filter((row) => !row.selectedCategory.trim()).length;
+  const isCategoryStage = workflowStep === "categories" && products.length > 0;
+  const selectedConfirmableCount = useMemo(
+    () =>
+      selectedCategoryRowIndexes.filter((index) => {
+        const row = rows.find((item) => item.index === index);
+        return Boolean(row?.selectedCategory.trim());
+      }).length,
+    [rows, selectedCategoryRowIndexes],
+  );
+  const categoryRowStatuses = useMemo<Record<number, CategoryReviewStatus>>(
+    () =>
+      Object.fromEntries(
+        rows.map((row) => {
+          const manuallyChanged = row.selectedCategory.trim() !== row.aiCategory.trim();
+          const isConfirmed = confirmedCategoryIndexSet.has(row.index);
+          const status: CategoryReviewStatus = manuallyChanged
+            ? isConfirmed
+              ? "manually_confirmed"
+              : "manually_changed"
+            : isConfirmed
+              ? "confirmed"
+              : "requires_review";
+          return [row.index, status];
+        }),
+      ),
+    [rows, confirmedCategoryIndexSet],
+  );
+  const categoryKpis = useMemo(() => {
+    let confirmed = 0;
+    let requiresReview = 0;
+    let manuallyChanged = 0;
+    for (const row of rows) {
+      const status = categoryRowStatuses[row.index];
+      if (status === "confirmed" || status === "manually_confirmed") confirmed += 1;
+      if (status === "manually_changed") manuallyChanged += 1;
+      if (status === "requires_review") requiresReview += 1;
+    }
+    return {
+      total: rows.length,
+      confirmed,
+      requiresReview,
+      manuallyChanged,
+    };
+  }, [rows, categoryRowStatuses]);
 
   const selectedProduct = asRecord(products[selectedIndex]);
   const selectedSku = normalizeSku(String(selectedProduct.sku ?? ""));
@@ -617,10 +1041,10 @@ export default function CreatorPage() {
   }, [lastSubmitTotal, rows.length]);
   const kpiFailed = useMemo(() => {
     const summaryFailed = Number(ottoSummary?.failed ?? 0);
-    const errorsFailed = ottoErrors.length;
-    const candidate = Math.max(summaryFailed, errorsFailed, 0);
+    const failedProducts = errorCardsBySku.length;
+    const candidate = Math.max(summaryFailed, failedProducts, 0);
     return Math.min(kpiTotal, candidate);
-  }, [ottoSummary?.failed, ottoErrors.length, kpiTotal]);
+  }, [ottoSummary?.failed, errorCardsBySku.length, kpiTotal]);
   const kpiSucceeded = useMemo(() => Math.max(0, kpiTotal - kpiFailed), [kpiTotal, kpiFailed]);
   const visibleGenericIssues = useMemo(() => {
     if (issues.length === 0) return [];
@@ -645,12 +1069,32 @@ export default function CreatorPage() {
     setEditingDraft("");
   }, [selectedIndex]);
 
-  async function copyText(value: string) {
-    if (!value || value === "-") return;
+  async function copyText(value: string, field: string) {
+    if (!value || value === "-") {
+      setRuntimeCopyErrorField(field);
+      window.setTimeout(() => setRuntimeCopyErrorField((current) => (current === field ? null : current)), 1200);
+      return;
+    }
     try {
-      await navigator.clipboard.writeText(value);
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = value;
+        textarea.setAttribute("readonly", "true");
+        textarea.style.position = "absolute";
+        textarea.style.left = "-9999px";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      setCopiedRuntimeField(field);
+      setRuntimeCopyErrorField(null);
+      window.setTimeout(() => setCopiedRuntimeField((current) => (current === field ? null : current)), 1600);
     } catch {
-      // ignore clipboard failures
+      setRuntimeCopyErrorField(field);
+      window.setTimeout(() => setRuntimeCopyErrorField((current) => (current === field ? null : current)), 1200);
     }
   }
 
@@ -668,6 +1112,68 @@ export default function CreatorPage() {
       next[rowIndex] = { ...asRecord(next[rowIndex]), shippingProfileID: profileId };
       return next;
     });
+  }
+
+  function updateRowCategory(rowIndex: number, category: string) {
+    setProducts((prev) => {
+      const next = [...prev];
+      const current = asRecord(next[rowIndex]);
+      next[rowIndex] = updateProductField(current, ["productDescription", "category"], category);
+      return next;
+    });
+    setConfirmedCategoryRowIndexes((prev) => prev.filter((item) => item !== rowIndex));
+  }
+
+  function toggleCategorySelection(rowIndex: number) {
+    setSelectedCategoryRowIndexes((prev) =>
+      prev.includes(rowIndex) ? prev.filter((item) => item !== rowIndex) : [...prev, rowIndex],
+    );
+  }
+
+  function toggleAllFilteredRows() {
+    setSelectedCategoryRowIndexes((prev) => {
+      if (allFilteredRowsSelected) {
+        return prev.filter((item) => !filteredRows.some((row) => row.index === item));
+      }
+      const next = new Set(prev);
+      for (const row of filteredRows) next.add(row.index);
+      return Array.from(next).sort((a, b) => a - b);
+    });
+  }
+
+  function applyBulkCategory() {
+    if (!bulkCategoryValue || selectedCategoryRowIndexes.length === 0) return;
+    const selectedSet = new Set(selectedCategoryRowIndexes);
+    setProducts((prev) =>
+      prev.map((item, index) =>
+        selectedSet.has(index)
+          ? updateProductField(asRecord(item), ["productDescription", "category"], bulkCategoryValue)
+          : item,
+      ),
+    );
+    setConfirmedCategoryRowIndexes((prev) => prev.filter((item) => !selectedSet.has(item)));
+    setUiMessage(`Категория применена к ${selectedCategoryRowIndexes.length} товарам.`);
+  }
+
+  function confirmCategoryRows(rowIndexes: number[]) {
+    if (rowIndexes.length === 0) return;
+    const eligible = rowIndexes.filter((index) => {
+      const row = rows.find((item) => item.index === index);
+      if (!row) return false;
+      return row.selectedCategory.trim().length > 0;
+    });
+    if (eligible.length === 0) return;
+    setConfirmedCategoryRowIndexes((prev) => Array.from(new Set([...prev, ...eligible])).sort((a, b) => a - b));
+    setUiMessage(`Подтверждено категорий: ${eligible.length}.`);
+  }
+
+  function unconfirmCategoryRows(rowIndexes: number[]) {
+    if (rowIndexes.length === 0) return;
+    const confirmedIndexes = rowIndexes.filter((index) => confirmedCategoryIndexSet.has(index));
+    if (confirmedIndexes.length === 0) return;
+    const confirmedSet = new Set(confirmedIndexes);
+    setConfirmedCategoryRowIndexes((prev) => prev.filter((item) => !confirmedSet.has(item)));
+    setUiMessage(`Снято подтверждение с категорий: ${confirmedIndexes.length}.`);
   }
 
   function fieldHasError(keywords: string[]): boolean {
@@ -741,7 +1247,9 @@ export default function CreatorPage() {
     setUiMessage("Процесс подготовки запущен...");
     setIssues([]);
     setProducts([]);
+    setAiCategoryByIndex({});
     setProcessId("");
+    setWorkflowStep("categories");
     setCurrentStep("prepare_initializing");
     setStepElapsed(0);
     setHeartbeatLag(0);
@@ -751,6 +1259,9 @@ export default function CreatorPage() {
     setOttoErrors([]);
     setTableStatusPhase("pending");
     setLastSubmitTotal(0);
+    setConfirmedCategoryRowIndexes([]);
+    setTaskProgress({ total: 0, completed: 0, percent: 0 });
+    setRealtimeMode("websocket");
     try {
       const response = await fetch("/api/products/create-from-fabric", {
         method: "POST",
@@ -767,6 +1278,48 @@ export default function CreatorPage() {
       }
       setProcessId(parsed?.process_id ?? "");
       setUiMessage(`Запуск успешен. Process ID: ${parsed?.process_id ?? "-"}`);
+    } catch (caughtError) {
+      setState("error");
+      setUiMessage(caughtError instanceof Error ? `Ошибка запроса: ${caughtError.message}` : "Ошибка запроса");
+    }
+  }
+
+  async function confirmCategories() {
+    if (!processId || products.length === 0) return;
+    if (missingCategoryCount > 0) {
+      setState("error");
+      setUiMessage("Укажите категорию для всех товаров перед переходом к следующему шагу.");
+      return;
+    }
+    if (categoryKpis.requiresReview > 0) {
+      setState("error");
+      setUiMessage("Подтвердите все неотмеченные категории или измените их вручную перед созданием товаров.");
+      return;
+    }
+    setState("loading");
+    setUiMessage("Категории подтверждены. Запускаю создание товаров и AI-генерацию...");
+    try {
+      const response = await fetch(`/api/products/create-from-fabric/${processId}/enrich`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          products,
+          controller,
+          factory_id: selectedFabricId,
+        }),
+        cache: "no-store",
+      });
+      const parsed = await readJsonResponse<EnrichPreparedResponse>(response);
+      if (!response.ok || parsed?.success === false) {
+        setState("error");
+        setUiMessage(readApiErrorMessage(parsed, "Не удалось сгенерировать детали товаров", response.status));
+        return;
+      }
+      setProcessState("IN_PROGRESS");
+      setCurrentStep("ai_enrichment_queued");
+      setTaskProgress({ total: products.length, completed: 0, percent: 0 });
+      setRealtimeMode("websocket");
+      setUiMessage("Создание товаров запущено. Дожидаюсь генерации атрибутов, описаний и bullet points...");
     } catch (caughtError) {
       setState("error");
       setUiMessage(caughtError instanceof Error ? `Ошибка запроса: ${caughtError.message}` : "Ошибка запроса");
@@ -796,6 +1349,14 @@ export default function CreatorPage() {
       if (!response.ok || parsed?.success === false) {
         setState("error");
         setUiMessage(readApiErrorMessage(parsed, "Не удалось сохранить итоговые данные", response.status));
+        return;
+      }
+      if (parsed?.queued) {
+        setProcessState(parsed?.process_state ?? "IN_PROGRESS");
+        setCurrentStep("otto_create_queued");
+        setTaskProgress({ total: products.length, completed: 0, percent: 0 });
+        setRealtimeMode("websocket");
+        setUiMessage("Загрузка в OTTO запущена. Дожидаюсь live-результата...");
         return;
       }
       const update = asRecord(parsed?.otto_update_result);
@@ -844,9 +1405,11 @@ export default function CreatorPage() {
         return;
       }
 
-      setUiMessage("Товары созданы. Отправляю availability...");
-      const availabilityResults = await Promise.allSettled(
-        products.map(async (product) => {
+      setUiMessage(`Товары созданы. Отправляю availability партиями по ${AVAILABILITY_CONCURRENCY}...`);
+      const availabilityResults = await runWithConcurrency(
+        products,
+        AVAILABILITY_CONCURRENCY,
+        async (product) => {
           const record = asRecord(product);
           const sku = String(record.sku ?? "").trim();
           const shippingProfileID = productShippingProfileId(record);
@@ -879,7 +1442,7 @@ export default function CreatorPage() {
             throw new Error(`quantity=${quantityError || "failed"}, delivery=${deliveryError || "failed"}`);
           }
           return sku;
-        }),
+        },
       );
       const availabilityErrors: OttoErrorRow[] = availabilityResults.flatMap((result, index) => {
         if (result.status === "fulfilled") return [];
@@ -908,7 +1471,8 @@ export default function CreatorPage() {
     }
   }
 
-  function handleClear() {
+  async function handleClear() {
+    const staleProcessId = processId;
     window.localStorage.removeItem(CREATOR_DRAFT_KEY);
     setState("idle");
     setUiMessage("Состояние очищено.");
@@ -916,7 +1480,9 @@ export default function CreatorPage() {
     setProcessId("");
     setProcessState("IDLE");
     setProducts([]);
+    setAiCategoryByIndex({});
     setSelectedIndex(0);
+    setWorkflowStep("categories");
     setCurrentStep("prepare_initializing");
     setStepElapsed(0);
     setHeartbeatLag(0);
@@ -926,10 +1492,24 @@ export default function CreatorPage() {
     setOttoErrors([]);
     setTableStatusPhase("pending");
     setLastSubmitTotal(0);
+    setConfirmedCategoryRowIndexes([]);
+    setTaskProgress({ total: 0, completed: 0, percent: 0 });
+    setRealtimeMode("websocket");
+    setSelectedFabricId((prev) =>
+      prev && fabrics.some((item) => item.id === prev) ? prev : (fabrics[0]?.id ?? ""),
+    );
+    if (staleProcessId) {
+      await fetch(`/api/products/create-from-fabric/${encodeURIComponent(staleProcessId)}`, {
+        method: "DELETE",
+        cache: "no-store",
+      }).catch(() => {
+        // Client-side reset is still useful if the backend task was already gone.
+      });
+    }
   }
 
   if (isLoading) {
-    return <main className="otto-page"><section className="app-shell"><section className="workspace"><p className="helper-banner info">Пожалуйста, подождите...</p></section></section></main>;
+    return <PageLoadingShell contentMode="form" />;
   }
 
   return (
@@ -941,9 +1521,9 @@ export default function CreatorPage() {
       description="Подготовка, проверка и публикация товаров в OTTO"
       compactSidebar
     >
-      <div className="creator-workspace creator-ref-workspace">
+      <div className={`creator-workspace creator-ref-workspace ${isCategoryStage ? "is-category-stage" : ""}`}>
         {error ? <p className="helper-banner">{error}</p> : null}
-        <section className="creator-ref-top-grid">
+        <section className={`creator-ref-top-grid ${isCategoryStage ? "is-category-stage" : ""}`}>
           <article className="creator-ref-card creator-ref-card-action">
             <h2>Подготовка по Fabric</h2>
             <p className="creator-ref-card-subtitle">Выберите Controller и Fabric для запуска загрузки товаров.</p>
@@ -970,9 +1550,14 @@ export default function CreatorPage() {
                 {isRefreshingFabrics ? "Обновляю..." : "Обновить"}
               </button>
             </div>
-            <Button className="creator-ref-launch-btn" size="lg" type="button" onClick={handleCreate} disabled={state === "loading" || !selectedFabricId}>
-              {state === "loading" ? "Запуск..." : "🚀 Выставить товары"}
-            </Button>
+            <div className="creator-ref-launch-actions">
+              <Button className="creator-ref-launch-btn" size="lg" type="button" onClick={handleCreate} disabled={state === "loading" || !selectedFabricId}>
+                {state === "loading" ? "Запуск..." : "Выставить товары"}
+              </Button>
+              <Button className="creator-ref-reset-btn" variant="secondary" size="lg" type="button" onClick={() => void handleClear()} disabled={!processId && state === "idle" && products.length === 0}>
+                Сбросить
+              </Button>
+            </div>
             <div className={`creator-ref-inline-alert ${state === "error" ? "is-error" : state === "success" ? "is-success" : "is-info"}`}>
               <span className="creator-ref-inline-alert-icon" aria-hidden="true">
                 {state === "error" ? <AlertCircle size={16} /> : state === "success" ? <Check size={16} /> : "i"}
@@ -983,7 +1568,7 @@ export default function CreatorPage() {
 
           <article className="creator-ref-card creator-ref-card-main">
             <div className="creator-ref-main-head">
-              <h2>Последняя загрузка</h2>
+              <h2>{isCategoryStage ? "Проверка категорий" : "Последняя загрузка"}</h2>
             </div>
             <div className="creator-ref-status-line">
               <span className="creator-ref-status-label">Статус</span>
@@ -999,150 +1584,240 @@ export default function CreatorPage() {
                 {processState}
               </Badge>
             </div>
-            <div className="creator-ref-metrics">
-              <Card className="metric success">
-                <span className="metric-icon"><Check size={18} /></span>
-                <small>Успешно</small>
-                <strong>{kpiSucceeded}</strong>
-              </Card>
-              <Card className="metric error">
-                <span className="metric-icon"><X size={18} /></span>
-                <small>Ошибки</small>
-                <strong>{kpiFailed}</strong>
-              </Card>
-              <Card className="metric neutral">
-                <span className="metric-icon"><Box size={18} /></span>
-                <small>Всего</small>
-                <strong>{kpiTotal}</strong>
-              </Card>
+            <div className={`creator-ref-metrics ${isCategoryStage ? "is-category-kpi" : ""}`}>
+              {isCategoryStage ? (
+                <>
+                  <Card className="metric neutral">
+                    <span className="metric-icon"><Box size={18} /></span>
+                    <small>Всего</small>
+                    <strong>{categoryKpis.total}</strong>
+                  </Card>
+                  <Card className="metric success">
+                    <span className="metric-icon"><Check size={18} /></span>
+                    <small>Подтверждено</small>
+                    <strong>{categoryKpis.confirmed}</strong>
+                  </Card>
+                  <Card className="metric warning">
+                    <span className="metric-icon"><AlertCircle size={18} /></span>
+                    <small>Требуют проверки</small>
+                    <strong>{categoryKpis.requiresReview}</strong>
+                  </Card>
+                  <Card className="metric error">
+                    <span className="metric-icon"><RefreshCw size={18} /></span>
+                    <small>Изменено вручную</small>
+                    <strong>{categoryKpis.manuallyChanged}</strong>
+                  </Card>
+                </>
+              ) : (
+                <>
+                  <Card className="metric success">
+                    <span className="metric-icon"><Check size={18} /></span>
+                    <small>Успешно</small>
+                    <strong>{kpiSucceeded}</strong>
+                  </Card>
+                  <Card className="metric error">
+                    <span className="metric-icon"><X size={18} /></span>
+                    <small>Ошибки</small>
+                    <strong>{kpiFailed}</strong>
+                  </Card>
+                  <Card className="metric neutral">
+                    <span className="metric-icon"><Box size={18} /></span>
+                    <small>Всего</small>
+                    <strong>{kpiTotal}</strong>
+                  </Card>
+                </>
+              )}
             </div>
+            {processState === "IN_PROGRESS" ? (
+              <div className="creator-ref-progress">
+                <div className="creator-ref-progress-head">
+                  <strong>{currentStep === "ai_enrichment_in_progress" || currentStep === "ai_enrichment_queued" ? "Создание товаров через AI" : "Подготовка данных"}</strong>
+                  <span>
+                    {isItemProgressStep(currentStep) && taskProgress.total > 0
+                      ? `${Math.min(taskProgress.completed, taskProgress.total)} / ${taskProgress.total}`
+                      : `${Math.max(0, Math.round(taskProgress.percent))}%`}
+                  </span>
+                </div>
+                <div className="creator-ref-progress-track" aria-hidden="true">
+                  <span style={{ width: `${Math.max(0, Math.min(100, Math.round(taskProgress.percent || 0)))}%` }} />
+                </div>
+                <p>{realtimeMode === "websocket" ? "Live updates через WebSocket" : "Live updates через polling fallback"}</p>
+              </div>
+            ) : null}
             <div className="creator-ref-runtime">
               <div className="creator-ref-runtime-row">
                 <span>Otto Process ID</span>
                 <code>{ottoProcessId || "-"}</code>
-                <button type="button" onClick={() => copyText(ottoProcessId || "-")}><Copy size={14} /></button>
+                <button
+                  type="button"
+                  className={`creator-runtime-copy-btn ${
+                    copiedRuntimeField === "otto_process_id"
+                      ? "is-copied"
+                      : runtimeCopyErrorField === "otto_process_id"
+                        ? "is-error"
+                        : ""
+                  }`}
+                  onClick={() => void copyText(ottoProcessId || "-", "otto_process_id")}
+                  disabled={!ottoProcessId}
+                >
+                  {copiedRuntimeField === "otto_process_id" ? <Check size={14} /> : <Copy size={14} />}
+                  <span>
+                    {copiedRuntimeField === "otto_process_id"
+                      ? "Скопировано"
+                      : runtimeCopyErrorField === "otto_process_id"
+                        ? "Ошибка"
+                        : "Копировать"}
+                  </span>
+                </button>
               </div>
               <div className="creator-ref-runtime-row">
                 <span>Process ID</span>
                 <code>{processId || "-"}</code>
-                <button type="button" onClick={() => copyText(processId || "-")}><Copy size={14} /></button>
+                <button
+                  type="button"
+                  className={`creator-runtime-copy-btn ${
+                    copiedRuntimeField === "process_id"
+                      ? "is-copied"
+                      : runtimeCopyErrorField === "process_id"
+                        ? "is-error"
+                        : ""
+                  }`}
+                  onClick={() => void copyText(processId || "-", "process_id")}
+                  disabled={!processId}
+                >
+                  {copiedRuntimeField === "process_id" ? <Check size={14} /> : <Copy size={14} />}
+                  <span>
+                    {copiedRuntimeField === "process_id"
+                      ? "Скопировано"
+                      : runtimeCopyErrorField === "process_id"
+                        ? "Ошибка"
+                        : "Копировать"}
+                  </span>
+                </button>
               </div>
               <p>Шаг: <strong>{currentStep}</strong> · <strong>{Math.max(0, Math.round(stepElapsed))}s</strong></p>
               {stuckMessage ? <p className="helper-banner error">{stuckMessage}</p> : null}
             </div>
           </article>
 
-          <article className="creator-ref-card creator-ref-card-errors">
-            <div className="creator-ref-errors-head">
-              <h2>{`Ошибки (${errorCardsBySku.length})`}</h2>
-              {errorCardsBySku.length > 2 ? (
-                <button type="button" className="creator-ref-show-all" onClick={() => setShowAllErrorCards((prev) => !prev)}>
-                  {showAllErrorCards ? "Скрыть" : "Показать все"}
-                </button>
-              ) : null}
-            </div>
-            <div className="creator-ref-errors-list">
-              {visibleErrorCards.map((item) => (
-                <Card className="creator-ref-error-card" key={item.sku}>
-                  <div className="creator-ref-error-row-top">
-                    <span className="creator-ref-error-icon"><AlertCircle size={16} /></span>
-                    <p className="creator-ref-error-title clamp-2">{item.firstMessage}</p>
-                  </div>
-                  <p className="creator-ref-error-meta">{`SKU: ${item.sku} • Ошибок: ${item.count}`}</p>
-                  <div className="creator-ref-error-actions">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const sourceSku = normalizeSku(item.sku);
-                        const row = rows.find((rowItem) => normalizeSku(rowItem.sku) === sourceSku);
-                        if (row) setSelectedIndex(row.index);
-                      }}
-                    >
-                      Открыть товар
-                    </button>
-                  </div>
-                </Card>
-              ))}
-              {!showAllErrorCards && errorCardsBySku.length > 2 ? (
-                <button className="creator-ref-more-errors" type="button" onClick={() => setShowAllErrorCards(true)}>
-                  {`Еще ${errorCardsBySku.length - 2} ошибки`}
-                </button>
-              ) : null}
-              {errorCardsBySku.length === 0 ? (
-                <p className="helper-banner info">Ошибок не обнаружено.</p>
-              ) : null}
-            </div>
-          </article>
+          {!isCategoryStage ? (
+            <article className="creator-ref-card creator-ref-card-errors">
+              <div className="creator-ref-errors-head">
+                <h2>{`Ошибки (${errorCardsBySku.length})`}</h2>
+                {errorCardsBySku.length > 2 ? (
+                  <button type="button" className="creator-ref-show-all" onClick={() => setShowAllErrorCards((prev) => !prev)}>
+                    {showAllErrorCards ? "Скрыть" : "Показать все"}
+                  </button>
+                ) : null}
+              </div>
+              <div className="creator-ref-errors-list">
+                {visibleErrorCards.map((item) => (
+                  <Card className="creator-ref-error-card" key={item.sku}>
+                    <div className="creator-ref-error-row-top">
+                      <span className="creator-ref-error-icon"><AlertCircle size={16} /></span>
+                      <p className="creator-ref-error-title clamp-2">{item.firstMessage}</p>
+                    </div>
+                    <p className="creator-ref-error-meta">{`SKU: ${item.sku} • Ошибок: ${item.count}`}</p>
+                    <div className="creator-ref-error-actions">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const sourceSku = normalizeSku(item.sku);
+                          const row = rows.find((rowItem) => normalizeSku(rowItem.sku) === sourceSku);
+                          if (row) setSelectedIndex(row.index);
+                        }}
+                      >
+                        Открыть товар
+                      </button>
+                    </div>
+                  </Card>
+                ))}
+                {!showAllErrorCards && errorCardsBySku.length > 2 ? (
+                  <button className="creator-ref-more-errors" type="button" onClick={() => setShowAllErrorCards(true)}>
+                    {`Еще ${errorCardsBySku.length - 2} ошибки`}
+                  </button>
+                ) : null}
+                {errorCardsBySku.length === 0 ? (
+                  <p className="helper-banner info">Ошибок не обнаружено.</p>
+                ) : null}
+              </div>
+            </article>
+          ) : null}
         </section>
 
-        <section className="creator-ref-main-grid">
-          <Card className="creator-products-card">
-            <div className="creator-products-head">
-              <div>
-                <h2 className="text-xl font-semibold">Товары</h2>
-                <p className="text-sm text-[var(--muted-fg)]">{`${filteredRows.length} товаров`}</p>
-              </div>
-              <div className="creator-products-controls">
-                <div className="creator-search-wrap">
-                  <Search size={16} className="creator-search-icon" />
-                  <input
-                    className="creator-search-input"
-                    placeholder="Поиск по SKU, категории или артикулу..."
-                    type="search"
-                    value={tableQuery}
-                    onChange={(event) => {
-                      setTableQuery(event.target.value);
-                      setPage(1);
-                    }}
-                  />
-                </div>
-                <div className="creator-table-popover-wrap">
-                  <button className="creator-table-top-btn" type="button" onClick={() => setIsFilterOpen((prev) => !prev)}>
-                    <Funnel
-                      size={16}
-                      color="currentColor"
-                      fill={isFilterOpen ? "#111111" : "#ffffff"}
-                    />
-                    Фильтр
-                  </button>
-                  {isFilterOpen ? (
-                    <div className="creator-table-popover">
-                      <p>Статус</p>
-                      <select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}>
-                        <option value="all">Все</option>
-                        <option value="passed">Passed</option>
-                        <option value="failed">Failed</option>
-                        <option value="processing">Processing</option>
-                        <option value="pending">Pending</option>
-                      </select>
-                      <p>Категория</p>
-                      <select value={categoryFilter} onChange={(event) => { setCategoryFilter(event.target.value); setPage(1); }}>
-                        <option value="all">Все категории</option>
-                        {categories.map((item) => <option key={item} value={item}>{item}</option>)}
-                      </select>
-                      <p>Диапазон цены</p>
-                      <div className="creator-popover-price-grid">
-                        <input placeholder="От" value={priceFrom} onChange={(event) => { setPriceFrom(event.target.value); setPage(1); }} />
-                        <input placeholder="До" value={priceTo} onChange={(event) => { setPriceTo(event.target.value); setPage(1); }} />
-                      </div>
-                      <p>Наличие ошибок</p>
-                      <select value={errorFilter} onChange={(event) => { setErrorFilter(event.target.value as "all" | "with_errors" | "only_success"); setPage(1); }}>
-                        <option value="all">Все</option>
-                        <option value="with_errors">Только с ошибками</option>
-                        <option value="only_success">Только успешные</option>
-                      </select>
-                    </div>
-                  ) : null}
-                </div>
+        {isCategoryStage ? (
+        <section className="creator-ref-main-grid creator-ref-main-grid-category">
+          <Card className="creator-category-card">
+            <div className="creator-category-head">
+              <div className="creator-category-intro">
+                <h2>Подтвердите категории</h2>
               </div>
             </div>
 
-            <div className="creator-products-grid-head">
-              <span>Preview</span>
-              <span>SKU</span>
-              <span>Delivery Profile</span>
-              <span className="is-right">Price</span>
-              <span className="creator-status-head">Status</span>
+            <div className="creator-category-toolbar">
+              <div className="creator-category-toolbar-summary">
+                <p>Категории</p>
+                <span>{selectedCategoryRowIndexes.length > 0 ? `Выбрано: ${selectedCategoryRowIndexes.length}` : "Массовое изменение"}</span>
+              </div>
+              <div className="creator-category-bulk">
+                <select value={bulkCategoryValue} onChange={(event) => setBulkCategoryValue(event.target.value)} disabled={availableCategories.length === 0}>
+                  <option value="">{availableCategories.length === 0 ? "Нет категорий" : "Категория для выбранных"}</option>
+                  {availableCategories.map((item) => <option key={item} value={item}>{item}</option>)}
+                </select>
+                <button className="secondary-btn" type="button" onClick={applyBulkCategory} disabled={!bulkCategoryValue || selectedCategoryRowIndexes.length === 0}>
+                  Применить
+                </button>
+                <button
+                  className="secondary-btn"
+                  type="button"
+                  onClick={() => confirmCategoryRows(selectedCategoryRowIndexes)}
+                  disabled={selectedConfirmableCount === 0}
+                >
+                  {selectedConfirmableCount > 0
+                    ? `Подтвердить (${selectedConfirmableCount})`
+                    : "Подтвердить"}
+                </button>
+              </div>
+              <div className="creator-category-toolbar-actions">
+                <div className="creator-category-toolbar-search">
+                  <div className="creator-search-wrap">
+                    <Search size={16} className="creator-search-icon" />
+                    <input
+                      className="creator-search-input"
+                      placeholder="Поиск по названию, EAN"
+                      type="search"
+                      value={tableQuery}
+                      onChange={(event) => {
+                        setTableQuery(event.target.value);
+                        setPage(1);
+                      }}
+                    />
+                  </div>
+                  <div className="creator-table-popover-wrap">
+                    <button className="creator-table-top-btn" type="button" onClick={() => setIsFilterOpen((prev) => !prev)}>
+                      <Funnel size={16} color="currentColor" fill={isFilterOpen ? "#111111" : "#ffffff"} />
+                      Фильтр
+                    </button>
+                    {isFilterOpen ? (
+                      <div className="creator-table-popover">
+                        <p>Категория</p>
+                        <select value={categoryFilter} onChange={(event) => { setCategoryFilter(event.target.value); setPage(1); }}>
+                          <option value="all">Все категории</option>
+                          {availableCategories.map((item) => <option key={item} value={item}>{item}</option>)}
+                        </select>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+                <button className="secondary-btn creator-category-reset-btn" type="button" onClick={handleClear}>
+                  <Trash2 size={14} aria-hidden="true" />
+                  Начать заново
+                </button>
+                <button className="primary-btn creator-category-submit-btn" type="button" onClick={confirmCategories} disabled={state === "loading" || filteredRows.length === 0 || missingCategoryCount > 0 || categoryKpis.requiresReview > 0}>
+                  Создать товары
+                  <ChevronRight size={16} aria-hidden="true" />
+                </button>
+              </div>
             </div>
 
             {pagedRows.length === 0 ? (
@@ -1152,57 +1827,124 @@ export default function CreatorPage() {
                 <p>Выберите Fabric и запустите подготовку товаров.</p>
               </div>
             ) : (
-              pagedRows.map((row) => (
-                <div
-                  key={row.index}
-                  className={`creator-products-row ${selectedIndex === row.index ? "is-selected" : ""}`}
-                  onClick={() => setSelectedIndex(row.index)}
-                >
-                  <span className="creator-products-preview">
-                    {row.image ? (
-                      <img className="creator-ref-thumb" src={row.image} alt={row.sku || `product-${row.index}`} />
-                    ) : (
-                      <span className="creator-ref-thumb creator-ref-thumb-empty">-</span>
-                    )}
-                  </span>
-                  <span className="creator-products-sku">
-                    <strong>{row.sku || "-"}</strong>
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        navigator.clipboard.writeText(row.sku || "");
-                        setCopiedSkuIndex(row.index);
-                        window.setTimeout(() => setCopiedSkuIndex(null), 1200);
-                      }}
-                    >
-                      <Copy size={14} />
-                      {copiedSkuIndex === row.index ? <em>Скопировано</em> : null}
-                    </button>
-                  </span>
-                  <span className="creator-products-delivery" title={row.shippingProfileName || "-"}>
-                    <select
-                      value={row.shippingProfileId}
-                      onClick={(event) => event.stopPropagation()}
-                      onChange={(event) => updateRowShippingProfile(row.index, event.target.value)}
-                      disabled={state === "loading" || shippingProfiles.length === 0}
-                    >
-                      {shippingProfiles.length === 0 ? <option value="">Нет профилей</option> : null}
-                      {shippingProfiles.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                    </select>
-                  </span>
-                  <span className="creator-products-price">{row.price || "-"}</span>
-                  <span className="creator-products-status">
-                    <Badge
-                      className={`creator-ref-status-pill ${row.status}`}
-                      variant={row.status === "passed" ? "success" : row.status === "failed" ? "outline" : "secondary"}
-                    >
-                      <span className="creator-ref-status-dot" aria-hidden="true" />
-                      {rowStatusLabel(row.status)}
-                    </Badge>
-                  </span>
-                </div>
-              ))
+              <div className="creator-ref-table-scroll">
+                <table className="creator-ref-table">
+                  <thead>
+                    <tr>
+                      <th>
+                        <input type="checkbox" checked={allFilteredRowsSelected} onChange={toggleAllFilteredRows} aria-label="Выбрать все товары" />
+                      </th>
+                      <th>Preview</th>
+                      <th>Товар</th>
+                      <th>AI Категория</th>
+                      <th>Уверенность</th>
+                      <th>Проверка</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pagedRows.map((row) => {
+                      const isSelected = selectedCategoryIndexSet.has(row.index);
+                      const reviewStatus = categoryRowStatuses[row.index];
+                      const confidenceColorClass =
+                        row.aiConfidence >= 95
+                          ? "high"
+                          : row.aiConfidence >= 80
+                            ? "medium"
+                            : "low";
+                      return (
+                        <tr
+                          key={row.index}
+                          className={selectedIndex === row.index ? "is-selected" : ""}
+                          onClick={() => setSelectedIndex(row.index)}
+                        >
+                          <td data-label="Выбор" onClick={(event) => event.stopPropagation()}>
+                            <label className="creator-category-checkbox">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => toggleCategorySelection(row.index)}
+                                aria-label={`Выбрать товар ${row.title || row.ean || row.sku || row.index}`}
+                              />
+                            </label>
+                          </td>
+                          <td data-label="Preview">
+                            {row.image ? (
+                              <img className="creator-ref-thumb" src={row.image} alt={row.title || row.sku || `product-${row.index}`} />
+                            ) : (
+                              <span className="creator-ref-thumb creator-ref-thumb-empty">-</span>
+                            )}
+                          </td>
+                          <td data-label="Товар">
+                            <div className="creator-category-title-cell">
+                              <span>{`EAN: ${row.ean || "-"}`}</span>
+                              <strong>{row.title || "-"}</strong>
+                            </div>
+                          </td>
+                          <td data-label="AI Категория">
+                            <div className="creator-category-select-cell">
+                              <select
+                                value={row.selectedCategory || ""}
+                                onClick={(event) => event.stopPropagation()}
+                                onChange={(event) => updateRowCategory(row.index, event.target.value)}
+                                disabled={state === "loading" || availableCategories.length === 0}
+                              >
+                                <option value="">{availableCategories.length === 0 ? "Нет категорий" : "Выберите категорию"}</option>
+                                {availableCategories.map((item) => <option key={item} value={item}>{item}</option>)}
+                              </select>
+                              <span className="creator-category-ai-hint">{`AI: ${row.aiCategory || "Не определена"}`}</span>
+                            </div>
+                          </td>
+                          <td data-label="Уверенность">
+                            <div className={`creator-confidence ${confidenceColorClass}`}>
+                              <strong>{`${Math.max(0, Math.min(100, Math.round(row.aiConfidence || 0)))}%`}</strong>
+                              <div className="creator-confidence-track" aria-hidden="true">
+                                <span style={{ width: `${Math.max(0, Math.min(100, Math.round(row.aiConfidence || 0)))}%` }} />
+                              </div>
+                            </div>
+                          </td>
+                          <td data-label="Проверка">
+                            <div className="creator-category-review-inline" onClick={(event) => event.stopPropagation()}>
+                              <div className={`creator-category-status ${reviewStatus}`}>
+                                {reviewStatus === "confirmed" ? (
+                                  <CheckCircle2 size={16} aria-hidden="true" />
+                                ) : reviewStatus === "manually_confirmed" ? (
+                                  <Pencil size={16} aria-hidden="true" />
+                                ) : reviewStatus === "manually_changed" ? (
+                                  <Pencil size={16} aria-hidden="true" />
+                                ) : (
+                                  <TriangleAlert size={16} aria-hidden="true" />
+                                )}
+                                <span>
+                                  {reviewStatus === "confirmed"
+                                    ? "Подтверждено"
+                                    : reviewStatus === "manually_confirmed"
+                                      ? "Подтверждено вручную"
+                                      : reviewStatus === "manually_changed"
+                                        ? "Изменено вручную"
+                                        : "Требует проверки"}
+                                </span>
+                              </div>
+                              <button
+                                className="secondary-btn"
+                                type="button"
+                                onClick={() => (
+                                  reviewStatus === "confirmed" || reviewStatus === "manually_confirmed"
+                                    ? unconfirmCategoryRows([row.index])
+                                    : confirmCategoryRows([row.index])
+                                )}
+                              >
+                                {reviewStatus === "confirmed" || reviewStatus === "manually_confirmed"
+                                  ? "Отменить подтверждение"
+                                  : "Подтвердить"}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             )}
 
             <div className="creator-products-pagination">
@@ -1223,189 +1965,342 @@ export default function CreatorPage() {
               </div>
             </div>
           </Card>
+        </section>
+        ) : null}
 
-          <aside className="creator-ref-editor">
-            <div className="creator-ref-editor-head">
-              <h3>Редактор товара</h3>
-            </div>
-            <div className="saas-editor-image-wrap">
-              {selectedImage ? <img className="saas-editor-image" src={selectedImage} alt={String(selectedProduct.sku ?? "preview")} /> : <div className="saas-editor-image saas-editor-image-empty">No image</div>}
-            </div>
-            <div className="saas-editor-grid creator-ref-editor-grid">
-              <label className={fieldHasError(["sku"]) ? "creator-field-error" : ""}>SKU<input value={String(selectedProduct.sku ?? "")} onChange={(event) => updateSelected(["sku"], event.target.value)} /></label>
-              <label className={fieldHasError(["ean"]) ? "creator-field-error" : ""}>EAN<input value={String(selectedProduct.ean ?? "")} onChange={(event) => updateSelected(["ean"], event.target.value)} /></label>
-              <label className={fieldHasError(["reference", "productreference"]) ? "creator-field-error" : ""}>Product Reference<input value={String(selectedProduct.productReference ?? "")} onChange={(event) => updateSelected(["productReference"], event.target.value)} /></label>
-              <label className={fieldHasError(["category", "kategorie"]) ? "creator-field-error" : ""}>Category<input value={String(selectedDescription.category ?? "")} onChange={(event) => updateSelected(["productDescription", "category"], event.target.value)} /></label>
-              <label className={fieldHasError(["price", "preis", "amount"]) ? "creator-field-error" : ""}>Price
-                <input
-                  value={String(selectedStandardPrice.amount ?? "")}
-                  onChange={(event) => {
-                    const value = event.target.value.trim();
-                    const amount = value === "" ? 0 : Number(value);
-                    if (Number.isNaN(amount)) return;
-                    setProducts((prev) => {
-                      const next = [...prev];
-                      next[selectedIndex] = updateProductField(asRecord(next[selectedIndex]), ["pricing", "standardPrice", "amount"], amount);
-                      return next;
-                    });
-                  }}
-                />
-              </label>
-              <label className={fieldHasError(["productline", "line"]) ? "creator-field-error" : ""}>Product Line<input value={String(selectedDescription.productLine ?? "")} onChange={(event) => updateSelected(["productDescription", "productLine"], event.target.value)} /></label>
-            </div>
-            <div className="creator-ref-tabs">
-              <button className={editorTab === "general" ? "active" : ""} onClick={() => setEditorTab("general")} type="button">Основное</button>
-              <button className={editorTab === "attributes" ? "active" : ""} onClick={() => setEditorTab("attributes")} type="button">Атрибуты</button>
-              <button className={editorTab === "json" ? "active" : ""} onClick={() => setEditorTab("json")} type="button">JSON</button>
-            </div>
-            {editorTab === "general" ? (
-              <div className="saas-editor-grid">
-                <label className={fieldHasError(["bullet", "point"]) ? "creator-field-error" : ""}>Bullet Points (one per line)
-                  <textarea
-                    value={selectedBulletPoints.join("\n")}
-                    onChange={(event) => {
-                      const next = event.target.value
-                        .split("\n")
-                        .map((line) => line.trim())
-                        .filter(Boolean);
-                      setProducts((prev) => {
-                        const copy = [...prev];
-                        copy[selectedIndex] = updateProductField(
-                          asRecord(copy[selectedIndex]),
-                          ["productDescription", "bulletPoints"],
-                          next,
-                        );
-                        return copy;
-                      });
-                    }}
-                    rows={6}
-                  />
-                </label>
-              </div>
-            ) : null}
-            {editorTab === "attributes" ? (
-              <div className="creator-attributes-v3">
-                <div className="creator-attributes-v3-toolbar">
-                  <input
-                    type="search"
-                    value={attributeQuery}
-                    onChange={(event) => setAttributeQuery(event.target.value)}
-                    placeholder="Поиск атрибута..."
-                  />
+        {workflowStep === "details" ? (
+        <section className="creator-ref-main-grid creator-ref-main-grid-details">
+              <aside className="creator-ref-editor">
+                <div className="creator-ref-editor-head">
+                  <h3>Редактор товара</h3>
                 </div>
-                {filteredAttributeCards.length === 0 ? <p>Ничего не найдено.</p> : null}
-                {(["Основные характеристики", "Комплектация", "Дополнительно"] as const).map((groupName) => (
-                  groupedAttributeCards[groupName].length > 0 ? (
-                    <section key={groupName} className="creator-attributes-v3-group">
-                      <h4>{groupName}</h4>
-                      <div className="creator-attributes-v3-grid">
-                        {groupedAttributeCards[groupName].map((attribute) => {
-                          const key = `${attribute.index}`;
-                          const isExpanded = expandedAttributes.includes(key);
-                          const isValueEditing = editingAttribute?.index === attribute.index && editingAttribute.field === "values";
-                          const valueIsLong = attribute.values.length > 90;
-                          const attrName = normalizeFieldToken(attribute.name);
-                          const isAttributeError = selectedErrorFieldTokens.some((fieldToken) =>
-                            fieldToken.includes(attrName) || attrName.includes(fieldToken),
-                          );
-                          return (
-                            <Card className={`creator-attributes-v3-card ${isAttributeError ? "is-error" : ""}`} key={`attr-${attribute.index}`}>
-                              <div className="creator-attributes-v3-name-wrap">
-                                <p className="creator-attributes-v3-name">{attribute.name || "Без названия"}</p>
-                                <button
-                                  type="button"
-                                  className="creator-attributes-v3-delete"
-                                  onClick={() => deleteAttribute(attribute.index)}
-                                  aria-label="Удалить атрибут"
-                                  title="Удалить атрибут"
-                                >
-                                  <Trash2 size={14} />
-                                </button>
-                              </div>
-                              <div className="creator-attributes-v3-value-wrap">
-                                {isValueEditing ? (
-                                  <input
-                                    autoFocus
-                                    value={editingDraft}
-                                    onBlur={saveAttributeEdit}
-                                    onChange={(event) => setEditingDraft(event.target.value)}
-                                    onKeyDown={(event) => {
-                                      if (event.key === "Enter") saveAttributeEdit();
-                                      if (event.key === "Escape") {
-                                        setEditingAttribute(null);
-                                        setEditingDraft("");
-                                      }
-                                    }}
-                                  />
-                                ) : (
-                                  <>
+                <div className="saas-editor-image-wrap">
+                  {selectedImage ? <img className="saas-editor-image" src={selectedImage} alt={String(selectedProduct.sku ?? "preview")} /> : <div className="saas-editor-image saas-editor-image-empty">No image</div>}
+                </div>
+                <div className="saas-editor-grid creator-ref-editor-grid">
+                  <label className={fieldHasError(["sku"]) ? "creator-field-error" : ""}>SKU<input value={String(selectedProduct.sku ?? "")} onChange={(event) => updateSelected(["sku"], event.target.value)} /></label>
+                  <label className={fieldHasError(["ean"]) ? "creator-field-error" : ""}>EAN<input value={String(selectedProduct.ean ?? "")} onChange={(event) => updateSelected(["ean"], event.target.value)} /></label>
+                  <label className={fieldHasError(["reference", "productreference"]) ? "creator-field-error" : ""}>Product Reference<input value={String(selectedProduct.productReference ?? "")} onChange={(event) => updateSelected(["productReference"], event.target.value)} /></label>
+                  <label className={fieldHasError(["category", "kategorie"]) ? "creator-field-error" : ""}>Category<input value={String(selectedDescription.category ?? "")} onChange={(event) => updateSelected(["productDescription", "category"], event.target.value)} /></label>
+                  <label className={fieldHasError(["price", "preis", "amount"]) ? "creator-field-error" : ""}>Price
+                    <input
+                      value={String(selectedStandardPrice.amount ?? "")}
+                      onChange={(event) => {
+                        const value = event.target.value.trim();
+                        const amount = value === "" ? 0 : Number(value);
+                        if (Number.isNaN(amount)) return;
+                        setProducts((prev) => {
+                          const next = [...prev];
+                          next[selectedIndex] = updateProductField(asRecord(next[selectedIndex]), ["pricing", "standardPrice", "amount"], amount);
+                          return next;
+                        });
+                      }}
+                    />
+                  </label>
+                  <label className={fieldHasError(["productline", "line"]) ? "creator-field-error" : ""}>Product Line<input value={String(selectedDescription.productLine ?? "")} onChange={(event) => updateSelected(["productDescription", "productLine"], event.target.value)} /></label>
+                </div>
+                <div className="creator-ref-tabs">
+                  <button className={editorTab === "general" ? "active" : ""} onClick={() => setEditorTab("general")} type="button">Основное</button>
+                  <button className={editorTab === "attributes" ? "active" : ""} onClick={() => setEditorTab("attributes")} type="button">Атрибуты</button>
+                  <button className={editorTab === "json" ? "active" : ""} onClick={() => setEditorTab("json")} type="button">JSON</button>
+                </div>
+                {editorTab === "general" ? (
+                  <div className="saas-editor-grid">
+                    <label className={fieldHasError(["bullet", "point"]) ? "creator-field-error" : ""}>Bullet Points (one per line)
+                      <textarea
+                        value={selectedBulletPoints.join("\n")}
+                        onChange={(event) => {
+                          const next = event.target.value
+                            .split("\n")
+                            .map((line) => line.trim())
+                            .filter(Boolean);
+                          setProducts((prev) => {
+                            const copy = [...prev];
+                            copy[selectedIndex] = updateProductField(
+                              asRecord(copy[selectedIndex]),
+                              ["productDescription", "bulletPoints"],
+                              next,
+                            );
+                            return copy;
+                          });
+                        }}
+                        rows={6}
+                      />
+                    </label>
+                  </div>
+                ) : null}
+                {editorTab === "attributes" ? (
+                  <div className="creator-attributes-v3">
+                    <div className="creator-attributes-v3-toolbar">
+                      <input
+                        type="search"
+                        value={attributeQuery}
+                        onChange={(event) => setAttributeQuery(event.target.value)}
+                        placeholder="Поиск атрибута..."
+                      />
+                    </div>
+                    {filteredAttributeCards.length === 0 ? <p>Ничего не найдено.</p> : null}
+                    {(["Основные характеристики", "Комплектация", "Дополнительно"] as const).map((groupName) => (
+                      groupedAttributeCards[groupName].length > 0 ? (
+                        <section key={groupName} className="creator-attributes-v3-group">
+                          <h4>{groupName}</h4>
+                          <div className="creator-attributes-v3-grid">
+                            {groupedAttributeCards[groupName].map((attribute) => {
+                              const key = `${attribute.index}`;
+                              const isExpanded = expandedAttributes.includes(key);
+                              const isValueEditing = editingAttribute?.index === attribute.index && editingAttribute.field === "values";
+                              const valueIsLong = attribute.values.length > 90;
+                              const attrName = normalizeFieldToken(attribute.name);
+                              const isAttributeError = selectedErrorFieldTokens.some((fieldToken) =>
+                                fieldToken.includes(attrName) || attrName.includes(fieldToken),
+                              );
+                              return (
+                                <Card className={`creator-attributes-v3-card ${isAttributeError ? "is-error" : ""}`} key={`attr-${attribute.index}`}>
+                                  <div className="creator-attributes-v3-name-wrap">
+                                    <p className="creator-attributes-v3-name">{attribute.name || "Без названия"}</p>
                                     <button
                                       type="button"
-                                      className={`creator-attributes-v3-value ${isExpanded ? "expanded" : ""}`}
-                                      onClick={() => startAttributeEdit(attribute.index, "values", attribute.values)}
+                                      className="creator-attributes-v3-delete"
+                                      onClick={() => deleteAttribute(attribute.index)}
+                                      aria-label="Удалить атрибут"
+                                      title="Удалить атрибут"
                                     >
-                                      {attribute.values || "—"}
+                                      <Trash2 size={14} />
                                     </button>
-                                    {valueIsLong ? (
-                                      <button
-                                        type="button"
-                                        className="creator-attributes-v3-expand"
-                                        onClick={() =>
-                                          setExpandedAttributes((prev) =>
-                                            prev.includes(key)
-                                              ? prev.filter((item) => item !== key)
-                                              : [...prev, key],
-                                          )
-                                        }
-                                      >
-                                        {isExpanded ? "Свернуть" : "Показать полностью"}
-                                      </button>
-                                    ) : null}
-                                  </>
-                                )}
-                              </div>
-                            </Card>
-                          );
-                        })}
-                      </div>
-                    </section>
-                  ) : null
-                ))}
-              </div>
-            ) : null}
-            {editorTab === "json" ? (
-              <div className="saas-editor-grid">
-                <label>Attributes (JSON array)
-                  <textarea
-                    value={JSON.stringify(selectedAttributes, null, 2)}
-                    onChange={(event) => {
-                      try {
-                        const parsed = JSON.parse(event.target.value);
-                        if (!Array.isArray(parsed)) return;
-                        setProducts((prev) => {
-                          const copy = [...prev];
-                          copy[selectedIndex] = updateProductField(
-                            asRecord(copy[selectedIndex]),
-                            ["productDescription", "attributes"],
-                            parsed,
-                          );
-                          return copy;
-                        });
-                      } catch {
-                        // let user type invalid JSON temporarily without crashing
-                      }
-                    }}
-                    rows={12}
-                  />
-                </label>
-              </div>
-            ) : null}
-            <div className="creator-ref-editor-actions">
-              <button className="primary-btn" type="button" onClick={submitEditedProducts}>Загрузить</button>
-              <button className="secondary-btn" type="button" onClick={handleClear}>Clear</button>
-            </div>
-          </aside>
+                                  </div>
+                                  <div className="creator-attributes-v3-value-wrap">
+                                    {isValueEditing ? (
+                                      <input
+                                        autoFocus
+                                        value={editingDraft}
+                                        onBlur={saveAttributeEdit}
+                                        onChange={(event) => setEditingDraft(event.target.value)}
+                                        onKeyDown={(event) => {
+                                          if (event.key === "Enter") saveAttributeEdit();
+                                          if (event.key === "Escape") {
+                                            setEditingAttribute(null);
+                                            setEditingDraft("");
+                                          }
+                                        }}
+                                      />
+                                    ) : (
+                                      <>
+                                        <button
+                                          type="button"
+                                          className={`creator-attributes-v3-value ${isExpanded ? "expanded" : ""}`}
+                                          onClick={() => startAttributeEdit(attribute.index, "values", attribute.values)}
+                                        >
+                                          {attribute.values || "—"}
+                                        </button>
+                                        {valueIsLong ? (
+                                          <button
+                                            type="button"
+                                            className="creator-attributes-v3-expand"
+                                            onClick={() =>
+                                              setExpandedAttributes((prev) =>
+                                                prev.includes(key)
+                                                  ? prev.filter((item) => item !== key)
+                                                  : [...prev, key],
+                                              )
+                                            }
+                                          >
+                                            {isExpanded ? "Свернуть" : "Показать полностью"}
+                                          </button>
+                                        ) : null}
+                                      </>
+                                    )}
+                                  </div>
+                                </Card>
+                              );
+                            })}
+                          </div>
+                        </section>
+                      ) : null
+                    ))}
+                  </div>
+                ) : null}
+                {editorTab === "json" ? (
+                  <div className="saas-editor-grid">
+                    <label>Attributes (JSON array)
+                      <textarea
+                        value={JSON.stringify(selectedAttributes, null, 2)}
+                        onChange={(event) => {
+                          try {
+                            const parsed = JSON.parse(event.target.value);
+                            if (!Array.isArray(parsed)) return;
+                            setProducts((prev) => {
+                              const copy = [...prev];
+                              copy[selectedIndex] = updateProductField(
+                                asRecord(copy[selectedIndex]),
+                                ["productDescription", "attributes"],
+                                parsed,
+                              );
+                              return copy;
+                            });
+                          } catch {
+                            // let user type invalid JSON temporarily without crashing
+                          }
+                        }}
+                        rows={12}
+                      />
+                    </label>
+                  </div>
+                ) : null}
+              </aside>
+
+              <Card className="creator-products-card">
+                <div className="creator-products-head">
+                  <div>
+                    <h2 className="text-xl font-semibold">Товары</h2>
+                    <p className="text-sm text-[var(--muted-fg)]">{`${filteredRows.length} товаров`}</p>
+                  </div>
+                  <div className="creator-products-controls">
+                    <div className="creator-search-wrap">
+                      <Search size={16} className="creator-search-icon" />
+                      <input
+                        className="creator-search-input"
+                        placeholder="Поиск по SKU, категории или артикулу..."
+                        type="search"
+                        value={tableQuery}
+                        onChange={(event) => {
+                          setTableQuery(event.target.value);
+                          setPage(1);
+                        }}
+                      />
+                    </div>
+                    <div className="creator-table-popover-wrap">
+                      <button className="creator-table-top-btn" type="button" onClick={() => setIsFilterOpen((prev) => !prev)}>
+                        <Funnel
+                          size={16}
+                          color="currentColor"
+                          fill={isFilterOpen ? "#111111" : "#ffffff"}
+                        />
+                        Фильтр
+                      </button>
+                      {isFilterOpen ? (
+                        <div className="creator-table-popover">
+                          <p>Статус</p>
+                          <select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}>
+                            <option value="all">Все</option>
+                            <option value="passed">Passed</option>
+                            <option value="failed">Failed</option>
+                            <option value="processing">Processing</option>
+                            <option value="pending">Pending</option>
+                          </select>
+                          <p>Категория</p>
+                          <select value={categoryFilter} onChange={(event) => { setCategoryFilter(event.target.value); setPage(1); }}>
+                            <option value="all">Все категории</option>
+                            {categories.map((item) => <option key={item} value={item}>{item}</option>)}
+                          </select>
+                          <p>Диапазон цены</p>
+                          <div className="creator-popover-price-grid">
+                            <input placeholder="От" value={priceFrom} onChange={(event) => { setPriceFrom(event.target.value); setPage(1); }} />
+                            <input placeholder="До" value={priceTo} onChange={(event) => { setPriceTo(event.target.value); setPage(1); }} />
+                          </div>
+                          <p>Наличие ошибок</p>
+                          <select value={errorFilter} onChange={(event) => { setErrorFilter(event.target.value as "all" | "with_errors" | "only_success"); setPage(1); }}>
+                            <option value="all">Все</option>
+                            <option value="with_errors">Только с ошибками</option>
+                            <option value="only_success">Только успешные</option>
+                          </select>
+                        </div>
+                      ) : null}
+                    </div>
+                    <div className="creator-products-head-actions">
+                      <button className="secondary-btn" type="button" onClick={handleClear}>Очистить</button>
+                      <button className="primary-btn" type="button" onClick={submitEditedProducts}>Загрузить</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="creator-products-grid-head">
+                  <span>Preview</span>
+                  <span>SKU</span>
+                  <span>Delivery Profile</span>
+                  <span className="is-right">Price</span>
+                  <span className="creator-status-head">Status</span>
+                </div>
+
+                {pagedRows.length === 0 ? (
+                  <div className="creator-products-empty">
+                    <Package size={28} />
+                    <strong>Нет товаров</strong>
+                    <p>Выберите Fabric и запустите подготовку товаров.</p>
+                  </div>
+                ) : (
+                  pagedRows.map((row) => (
+                    <div
+                      key={row.index}
+                      className={`creator-products-row ${selectedIndex === row.index ? "is-selected" : ""}`}
+                      onClick={() => setSelectedIndex(row.index)}
+                    >
+                      <span className="creator-products-preview" data-label="Preview">
+                        {row.image ? (
+                          <img className="creator-ref-thumb" src={row.image} alt={row.sku || `product-${row.index}`} />
+                        ) : (
+                          <span className="creator-ref-thumb creator-ref-thumb-empty">-</span>
+                        )}
+                      </span>
+                      <span className="creator-products-sku" data-label="SKU">
+                        <strong>{row.sku || "-"}</strong>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            navigator.clipboard.writeText(row.sku || "");
+                            setCopiedSkuIndex(row.index);
+                            window.setTimeout(() => setCopiedSkuIndex(null), 1200);
+                          }}
+                        >
+                          <Copy size={14} />
+                          {copiedSkuIndex === row.index ? <em>Скопировано</em> : null}
+                        </button>
+                      </span>
+                      <span className="creator-products-delivery" data-label="Delivery Profile" title={row.shippingProfileName || "-"}>
+                        <select
+                          value={row.shippingProfileId}
+                          onClick={(event) => event.stopPropagation()}
+                          onChange={(event) => updateRowShippingProfile(row.index, event.target.value)}
+                          disabled={state === "loading" || shippingProfiles.length === 0}
+                        >
+                          {shippingProfiles.length === 0 ? <option value="">Нет профилей</option> : null}
+                          {shippingProfiles.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                        </select>
+                      </span>
+                      <span className="creator-products-price" data-label="Price">{row.price || "-"}</span>
+                      <span className="creator-products-status" data-label="Status">
+                        <Badge
+                          className={`creator-ref-status-pill ${row.status}`}
+                          variant={row.status === "passed" ? "success" : row.status === "failed" ? "outline" : "secondary"}
+                        >
+                          <span className="creator-ref-status-dot" aria-hidden="true" />
+                          {rowStatusLabel(row.status)}
+                        </Badge>
+                      </span>
+                    </div>
+                  ))
+                )}
+
+                <div className="creator-products-pagination">
+                  <div className="creator-products-pagination-left">
+                    <select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}>
+                      {[10, 25, 50, 100].map((item) => <option key={item} value={item}>{`${item} на странице`}</option>)}
+                    </select>
+                    <span>{`${filteredRows.length === 0 ? 0 : (safePage - 1) * pageSize + 1}-${Math.min(safePage * pageSize, filteredRows.length)} из ${filteredRows.length}`}</span>
+                  </div>
+                  <div className="creator-products-pagination-right">
+                    <button type="button" disabled={safePage <= 1} onClick={() => setPage((prev) => Math.max(1, prev - 1))}><ChevronLeft size={14} /></button>
+                    {paginationItems.map((item, idx) => typeof item === "number" ? (
+                      <button key={`${item}-${idx}`} type="button" className={item === safePage ? "active" : ""} onClick={() => setPage(item)}>{item}</button>
+                    ) : (
+                      <span key={`${item}-${idx}`}>...</span>
+                    ))}
+                    <button type="button" disabled={safePage >= totalPages} onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}><ChevronRight size={14} /></button>
+                  </div>
+                </div>
+              </Card>
         </section>
+        ) : null}
       </div>
     </AppWorkspaceShell>
   );
