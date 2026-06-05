@@ -18,7 +18,6 @@ from app.core.user_auth import UserAuth
 from app.core.afterbuy_auth import AfterbuyAuth
 from app.database import get_db
 from app.repository.user_repository import UserRepository
-from app.services.product_creation_service import ProductCreationService
 from app.services.product_service import ProductService
 from app.services.afterbuy_service import AfterbuyService
 from app.schemas.enums import RoleEnum
@@ -55,12 +54,6 @@ def get_otto_client() -> OttoClient:
 def get_product_service() -> ProductService:
     """Create a cached product service wrapper."""
     return ProductService(client=get_otto_client())
-
-
-@lru_cache
-def get_product_creation_service() -> ProductCreationService:
-    """Create a cached upload/normalization creation service."""
-    return ProductCreationService(product_service=get_product_service())
 
 
 @lru_cache

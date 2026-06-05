@@ -1,11 +1,8 @@
-"""Typed query builders for product and marketplace-status endpoints."""
+"""Typed query builders used by product mapping helpers."""
 
-from typing import List, Optional
+from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
-
-from app.schemas.marketplaceStatus import MarketPlaceStatus
-from app.schemas.enums import SortOrderEnum
+from pydantic import BaseModel, Field
 
 
 def _normalize_category(payload: dict) -> dict:
@@ -16,53 +13,6 @@ def _normalize_category(payload: dict) -> dict:
         if cleaned:
             payload["category"] = cleaned.capitalize()
     return payload
-
-
-class ProductListQuery(BaseModel):
-    """Query parameters for listing active products from upstream services."""
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    page: int = Field(default=0, ge=0)
-    sku: Optional[str] = None
-    limit: int = Field(default=100, ge=10, le=100)
-    product_reference: Optional[str] = Field(default=None, alias="productReference")
-    category: Optional[str] = None
-    brand_id: Optional[str] = Field(default=None, alias="brandId")
-
-    def to_payload(self) -> dict:
-        """Serialize model to upstream payload, excluding empty fields."""
-        payload = self.model_dump(by_alias=True, exclude_none=True)
-        return _normalize_category(payload)
-
-
-class MarketplaceStatusQuery(BaseModel):
-    """Query parameters for marketplace-status listing endpoint."""
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    sku: Optional[str] = None
-    product_reference: Optional[str] = Field(default=None, alias="productReference")
-    category: Optional[str] = None
-    brand_id: Optional[str] = Field(default=None, alias="brandId")
-    from_date: Optional[str] = Field(default=None, alias="fromDate")
-    page: int = Field(default=0, ge=0)
-    limit: int = Field(default=10, ge=10, le=100)
-    market_place_status: Optional[List[MarketPlaceStatus]] = Field(
-        default=None, alias="marketPlaceStatus"
-    )
-    sort_order: SortOrderEnum = Field(default=SortOrderEnum.DESC, alias="sortOrder")
-
-    def to_payload(self) -> dict:
-        """Serialize and normalize enum/category fields for HTTP query usage."""
-        payload = self.model_dump(by_alias=True, exclude_none=True)
-        _normalize_category(payload)
-        if "marketPlaceStatus" in payload:
-            payload["marketPlaceStatus"] = [
-                status.value for status in payload["marketPlaceStatus"]
-            ]
-        payload["sortOrder"] = self.sort_order.value
-        return payload
 
 
 class CategoryQuery(BaseModel):

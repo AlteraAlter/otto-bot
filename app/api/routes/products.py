@@ -1,11 +1,4 @@
-"""HTTP endpoints for local product DB access and OTTO-facing workflows.
-
-Read APIs are intentionally split:
-- `/v1/products/db...` serves the local database-backed catalog
-- `/v1/products/otto...` proxies OTTO marketplace product retrieval
-
-Write/import workflows remain under `/v1/products/...`.
-"""
+"""Product endpoints for catalog, creation, deletion, and XLSX import."""
 
 import asyncio
 from datetime import UTC, date, datetime
@@ -14,7 +7,7 @@ import json
 import logging
 from pathlib import Path
 import re
-from typing import Any, List, Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 import httpx
@@ -23,8 +16,6 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     File,
-    Form,
-    Form,
     Query,
     UploadFile,
     WebSocket,
@@ -39,59 +30,38 @@ from openpyxl import load_workbook
 from app.database import SessionLocal
 from app.dependencies import (
     get_afterbuy_login,
-    get_current_user,
-    get_product_creation_service,
     get_product_service,
     require_role,
 )
 from app.database import get_db
 from app.models.product_import_tasks import ProductImportTask
 from app.models.products import Product
-from app.schemas.marketplaceStatus import MarketPlaceStatus
 from app.schemas.product_creation import (
     ProductCreationErrorResponse,
-    ProductCreationFileResponse,
     ProductImportTaskDTO,
     ProductImportTaskListResponse,
-    ProductCreationPreparedRequest,
-    ProductCreationPrepareResponse,
-    ProductSpreadsheetImportResponse,
 )
 from app.schemas.product import (
-    ProductResponse,
     CreateProductRequest,
     Product as ProductPayload,
-    Status,
     Availability,
-    UpdateQuantity,
-    UpdateProductDelivery,
 )
 from app.schemas.product_response import (
     ProductCreateResponse,
     AvailabilityResponse,
-    DeleteProductResponse,
 )
 from app.schemas.product_tasks import (
     ProductFactoryCreateRequestDTO,
     ProductFactoryCreateResponseDTO,
 )
 
-from app.schemas.product_query import (
-    MarketplaceStatusQuery,
-    ProductListQuery,
-    CategoryQuery,
-)
 from app.schemas.enums import SortOrderEnum
 from app.schemas.enums import RoleEnum
 from app.schemas.enums import Controller
-from app.tasks import sync_afterbuy_jv_lister_task
-from app.services.afterbuy_sync_service import sync_afterbuy_to_jv_lister
 from app.services.afterbuy_service import AfterbuyService
-from app.services.local_product_sync_service import upsert_local_products_from_payloads
 from app.mapper.seo import build_seo_description
 from app.mapper.normalizer import build_normalized_product
 from app.core.configs import settings
-from app.services.product_creation_service import ProductCreationService
 from app.services.factory_task_state_service import FactoryTaskStateService
 from app.services.product_service import ProductService
 
@@ -127,7 +97,10 @@ MAPPER_LOG_PATH = (
 MAPPER_LOGGER = logging.getLogger("product_mapper_flow")
 if not MAPPER_LOGGER.handlers:
     MAPPER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _handler = logging.FileHandler(MAPPER_LOG_PATH, encoding="utf-8")
+    try:
+        _handler = logging.FileHandler(MAPPER_LOG_PATH, encoding="utf-8")
+    except OSError:
+        _handler = logging.NullHandler()
     _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     MAPPER_LOGGER.setLevel(logging.INFO)
     MAPPER_LOGGER.addHandler(_handler)
@@ -139,7 +112,10 @@ PREPARED_UPLOAD_LOG_PATH = (
 PREPARED_UPLOAD_LOGGER = logging.getLogger("prepared_upload_payloads")
 if not PREPARED_UPLOAD_LOGGER.handlers:
     PREPARED_UPLOAD_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _prepared_handler = logging.FileHandler(PREPARED_UPLOAD_LOG_PATH, encoding="utf-8")
+    try:
+        _prepared_handler = logging.FileHandler(PREPARED_UPLOAD_LOG_PATH, encoding="utf-8")
+    except OSError:
+        _prepared_handler = logging.NullHandler()
     _prepared_handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     )
@@ -169,7 +145,10 @@ PRODUCT_DEACTIVATE_CONCURRENCY = 10
 
 def _reset_log_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("", encoding="utf-8")
+    try:
+        path.write_text("", encoding="utf-8")
+    except OSError:
+        return
 
 
 def _flush_logger(logger: logging.Logger) -> None:
@@ -1304,26 +1283,6 @@ async def _run_product_import_task(
             await session.commit()
 
 
-def _product_list_payload(
-    *,
-    product_reference: Optional[str],
-    page: int,
-    sku: Optional[str],
-    limit: int,
-    category: Optional[str],
-    brand_id: Optional[str],
-) -> dict:
-    """Build a sanitized upstream list query payload from request parameters."""
-    return ProductListQuery(
-        page=page,
-        sku=sku,
-        limit=limit,
-        productReference=product_reference,
-        category=category,
-        brandId=brand_id,
-    ).to_payload()
-
-
 def _is_all_categories_value(value: str | None) -> bool:
     if value is None:
         return True
@@ -1336,7 +1295,6 @@ def _normalized_product_category_expression():
 
 
 @router.get("/db")
-@router.get("", include_in_schema=False)
 async def get_db_products(
     db: AsyncSession = Depends(get_db),
     product_reference: Optional[str] = Query(None, alias="productReference"),
@@ -1450,174 +1408,12 @@ async def get_db_product_categories(
     }
 
 
-@router.get("/attributes/options")
-async def get_attribute_options():
-    """Return supported attribute names from attributes_list.txt."""
-    if not ATTRIBUTES_LIST_PATH.exists():
-        return {"items": []}
-
-    items: list[str] = []
-    for line in ATTRIBUTES_LIST_PATH.read_text(encoding="utf-8").splitlines():
-        value = line.strip()
-        if value:
-            items.append(value)
-
-    return {"items": items, "total": len(items)}
-
-
-@router.get("/otto", response_model=ProductResponse)
-async def get_otto_products(
-    product_service: ProductService = Depends(get_product_service),
-    product_reference: Optional[str] = Query(None, alias="productReference"),
-    page: int = Query(0, ge=0),
-    sku: Optional[str] = Query(None),
-    limit: int = Query(30, ge=1, le=1000),
-    category: Optional[str] = Query(None),
-    brand_id: Optional[str] = Query(None, alias="brandId"),
-):
-    """Proxy paginated product retrieval from OTTO marketplace."""
-    payload = _product_list_payload(
-        product_reference=product_reference,
-        page=page,
-        sku=sku,
-        limit=limit,
-        category=category,
-        brand_id=brand_id,
-    )
-    return await product_service.get_products(payload)
-
-
-@router.get("/otto/active")
-@router.get("/active", include_in_schema=False)
-async def get_active_products(
-    product_service: ProductService = Depends(get_product_service),
-    product_reference: Optional[str] = Query(None, alias="productReference"),
-    page: int = Query(0, ge=0),
-    sku: Optional[str] = Query(None),
-    limit: int = Query(30, ge=10, le=1000),
-    category: Optional[str] = Query(None),
-    brand_id: Optional[str] = Query(None, alias="brandId"),
-):
-    """Proxy active-product status listing from OTTO using typed query building."""
-    payload = _product_list_payload(
-        product_reference=product_reference,
-        page=page,
-        sku=sku,
-        limit=limit,
-        category=category,
-        brand_id=brand_id,
-    )
-    return await product_service.get_active_products(payload)
-
-
 @router.get("/otto/shipping-profiles")
 async def get_shipping_profiles(
     controller: Controller = Query(default=Controller.JV),
     product_service: ProductService = Depends(get_product_service),
 ):
     return await product_service.get_shipping_profiles(controller=controller)
-
-
-@router.get("/otto/update-tasks/{pid}")
-@router.get("/update-tasks/{pid}", include_in_schema=False)
-async def update_tasks(
-    pid: str,
-    controller: Controller = Query(default=Controller.JV),
-    product_service: ProductService = Depends(get_product_service),
-):
-    """Trigger OTTO update-task execution for a single product id (`pid`)."""
-    return await product_service.update_tasks(pid, controller=controller)
-
-
-@router.get("/otto/failed/{pid}")
-async def failed_tasks(
-    pid: str,
-    controller: Controller = Query(default=Controller.JV),
-    product_service: ProductService = Depends(get_product_service),
-):
-    return await product_service.failed_tasks(pid, controller=controller)
-
-
-@router.get("/otto/marketplace-status")
-@router.get("/marketplace-status", include_in_schema=False)
-async def get_product_status(
-    product_service: ProductService = Depends(get_product_service),
-    sku: Optional[str] = Query(None),
-    product_reference: Optional[str] = Query(None, alias="productReference"),
-    category: Optional[str] = Query(None),
-    brand_id: Optional[str] = Query(None, alias="brandId"),
-    from_date: Optional[str] = Query(None, alias="fromDate"),
-    page: int = Query(0, ge=0),
-    limit: int = Query(10, ge=10, le=100),
-    market_place_status: Optional[List[MarketPlaceStatus]] = Query(
-        None, alias="marketPlaceStatus"
-    ),
-    sort_order: SortOrderEnum = Query(default=SortOrderEnum.DESC, alias="sortOrder"),
-):
-    """Return marketplace-status entries from OTTO for filtered products."""
-    payload = MarketplaceStatusQuery(
-        sku=sku,
-        productReference=product_reference,
-        category=category,
-        brandId=brand_id,
-        fromDate=from_date,
-        page=page,
-        limit=limit,
-        marketPlaceStatus=market_place_status,
-        sortOrder=sort_order,
-    ).to_payload()
-
-    return await product_service.get_marketplace_status(payload)
-
-
-@router.get("/otto/categories")
-@router.get("/categories", include_in_schema=False)
-async def get_categories(
-    product_service: ProductService = Depends(get_product_service),
-    page: int = Query(default=0, ge=0),
-    limit: int = Query(default=10, ge=0, le=2000),
-    category: Optional[str] = Query(None),
-    controller: Controller = Query(default=Controller.JV),
-):
-    """List available categories from OTTO, optionally filtered by category name."""
-    payload = CategoryQuery(page=page, limit=limit, category=category).to_payload()
-    return await product_service.get_categories(payload, controller=controller)
-
-
-@router.get("/db/status/{sku}")
-@router.get("/status/{sku}", include_in_schema=False)
-async def get_product_by_status_path(
-    sku: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """Fetch one imported product row from the local DB by SKU."""
-    stmt = select(Product).where(Product.sku == sku)
-    stmt = stmt.order_by(Product.id.desc())
-
-    result = await db.execute(stmt)
-    product = result.scalars().first()
-    if not product:
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={"message": f"Product with sku '{sku}' not found in DB"},
-        )
-    return _product_to_dict(product)
-
-
-@router.post("/sync-to-db")
-async def sync_products_to_db(
-    account_source: str = Query(default="JV", alias="accountSource"),
-):
-    """Legacy sync endpoint left in place for compatibility."""
-    return JSONResponse(
-        status_code=status.HTTP_410_GONE,
-        content={
-            "message": (
-                "Local products table now stores spreadsheet import data. "
-                f"OTTO sync is disabled for accountSource={account_source}."
-            )
-        },
-    )
 
 
 # <======= POST METHOD =======>
@@ -1638,39 +1434,6 @@ async def create_availability(
     product_service: ProductService = Depends(get_product_service),
 ):
     return await product_service.create_availability(payload)
-
-
-@router.post("/update-quantity")
-async def update_delivery_stock(
-    payload: list[UpdateQuantity],
-    controller: Controller = Controller.JV,
-    product_service: ProductService = Depends(get_product_service),
-):
-    data = [item.model_dump() for item in payload]
-    response = await product_service.update_quantity(data, controller=controller)
-    return response
-
-
-@router.post("/update-product-delivery-information")
-async def update_product_delivery_information(
-    payload: UpdateProductDelivery,
-    product_service: ProductService = Depends(get_product_service),
-):
-    data = payload.model_dump(mode="json", exclude_none=True)
-    return await product_service.update_product_delivery_information(data)
-
-
-@router.post("/update-status")
-async def update_status(
-    payload: Status,
-    controller: Controller = Controller.JV,
-    product_service: ProductService = Depends(get_product_service),
-):
-    """Update active/inactive state for one or more SKUs in OTTO."""
-    return await product_service.update_status(
-        payload.model_dump(mode="json", exclude_none=True),
-        controller=controller,
-    )
 
 
 @router.post("/deactivate-by-ean")
@@ -1756,324 +1519,6 @@ async def deactivate_products_by_ean(
         "failed": len(failed),
         "items": normalized_results,
     }
-
-
-@router.post(
-    "/prepare-from-file",
-    response_model=ProductCreationPrepareResponse,
-    responses={
-        400: {"model": ProductCreationErrorResponse, "description": "Invalid request"},
-        415: {
-            "model": ProductCreationErrorResponse,
-            "description": "Unsupported media type",
-        },
-    },
-)
-async def prepare_products_from_file(
-    file: UploadFile = File(
-        ..., description="JSON file with one object or an array of objects"
-    ),
-    max_chars: int = Form(default=2000, ge=300, le=5000),
-    creation_service: ProductCreationService = Depends(get_product_creation_service),
-):
-    """Normalize and validate uploaded JSON without creating products yet.
-
-    This is the "preview" step used by the two-phase create flow:
-    parse input -> normalize to schema -> validate -> return prepared bodies.
-    """
-    if not file.filename or not file.filename.lower().endswith(".json"):
-        return JSONResponse(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            content=ProductCreationErrorResponse(
-                message="Only .json files are supported"
-            ).model_dump(),
-        )
-
-    try:
-        raw = await file.read()
-    except Exception as exc:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ProductCreationErrorResponse(
-                message=f"Unable to read uploaded file: {exc}"
-            ).model_dump(),
-        )
-
-    if not raw:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ProductCreationErrorResponse(
-                message="Uploaded file is empty"
-            ).model_dump(),
-        )
-
-    try:
-        source_items, prepared_payloads, issues = await creation_service.prepare_upload(
-            raw,
-            max_chars=max_chars,
-        )
-    except ValueError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ProductCreationErrorResponse(message=str(exc)).model_dump(),
-        )
-    except Exception as exc:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ProductCreationErrorResponse(
-                message=f"Unable to parse/process JSON: {exc}"
-            ).model_dump(),
-        )
-
-    return ProductCreationPrepareResponse(
-        success=True,
-        source_items=source_items,
-        normalized_items=len(prepared_payloads),
-        skipped_items=source_items - len(prepared_payloads),
-        issues=issues,
-        request_bodies=[payload for _index, payload in prepared_payloads],
-    )
-
-
-@router.post(
-    "/create-from-prepared",
-    response_model=ProductCreationFileResponse,
-    responses={
-        400: {"model": ProductCreationErrorResponse, "description": "Invalid request"},
-        422: {
-            "model": ProductCreationErrorResponse,
-            "description": "Validation failed",
-        },
-        502: {
-            "model": ProductCreationErrorResponse,
-            "description": "Upstream creation failed",
-        },
-    },
-)
-async def create_products_from_prepared(
-    payload: ProductCreationPreparedRequest,
-    creation_service: ProductCreationService = Depends(get_product_creation_service),
-):
-    """Create products from pre-validated request bodies produced by prepare step."""
-    if not payload.request_bodies:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ProductCreationErrorResponse(
-                message="request_bodies must contain at least one item"
-            ).model_dump(),
-        )
-
-    validated_payloads, validation_issues = creation_service.validate_prepared_payloads(
-        payload.request_bodies
-    )
-    if not validated_payloads:
-        return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content=ProductCreationErrorResponse(
-                message="No valid request bodies to create",
-                issues=validation_issues,
-            ).model_dump(),
-        )
-
-    for source_index, prepared_payload in validated_payloads:
-        PREPARED_UPLOAD_LOGGER.info(
-            "prepared_upload_payload index=%s body=%s",
-            source_index,
-            json.dumps(prepared_payload, ensure_ascii=False),
-        )
-
-    created_items, create_issues = await creation_service.create_products(
-        validated_payloads
-    )
-    issues = validation_issues + create_issues
-
-    if created_items == 0 or any(issue.stage == "create" for issue in issues):
-        return JSONResponse(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            content=ProductCreationErrorResponse(
-                message="Product creation failed for one or more items",
-                issues=issues,
-            ).model_dump(),
-        )
-
-    return ProductCreationFileResponse(
-        success=True,
-        source_items=len(payload.request_bodies),
-        normalized_items=len(validated_payloads),
-        created_items=created_items,
-        skipped_items=len(payload.request_bodies) - created_items,
-        issues=issues,
-    )
-
-
-@router.post(
-    "/create-from-file",
-    response_model=ProductCreationFileResponse,
-    responses={
-        400: {"model": ProductCreationErrorResponse, "description": "Invalid request"},
-        415: {
-            "model": ProductCreationErrorResponse,
-            "description": "Unsupported media type",
-        },
-        422: {
-            "model": ProductCreationErrorResponse,
-            "description": "Validation failed",
-        },
-        502: {
-            "model": ProductCreationErrorResponse,
-            "description": "Upstream creation failed",
-        },
-    },
-)
-async def create_products_from_file(
-    file: UploadFile = File(
-        ..., description="JSON file with one object or an array of objects"
-    ),
-    max_chars: int = Form(default=2000, ge=300, le=5000),
-    creation_service: ProductCreationService = Depends(get_product_creation_service),
-):
-    """One-shot flow: upload file, normalize/validate, and create in OTTO."""
-    if not file.filename or not file.filename.lower().endswith(".json"):
-        return JSONResponse(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            content=ProductCreationErrorResponse(
-                message="Only .json files are supported"
-            ).model_dump(),
-        )
-
-    try:
-        raw = await file.read()
-    except Exception as exc:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ProductCreationErrorResponse(
-                message=f"Unable to read uploaded file: {exc}"
-            ).model_dump(),
-        )
-
-    if not raw:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ProductCreationErrorResponse(
-                message="Uploaded file is empty"
-            ).model_dump(),
-        )
-
-    try:
-        result = await creation_service.process_upload(raw, max_chars=max_chars)
-    except ValueError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ProductCreationErrorResponse(message=str(exc)).model_dump(),
-        )
-    except Exception as exc:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ProductCreationErrorResponse(
-                message=f"Unable to parse/process JSON: {exc}"
-            ).model_dump(),
-        )
-
-    if result.normalized_items == 0:
-        return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content=ProductCreationErrorResponse(
-                message="No valid products after normalization and validation",
-                issues=result.issues,
-            ).model_dump(),
-        )
-
-    if result.created_items == 0 or any(
-        issue.stage == "create" for issue in result.issues
-    ):
-        return JSONResponse(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            content=ProductCreationErrorResponse(
-                message="Product creation failed for one or more items",
-                issues=result.issues,
-            ).model_dump(),
-        )
-
-    return ProductCreationFileResponse(
-        success=True,
-        source_items=result.source_items,
-        normalized_items=result.normalized_items,
-        created_items=result.created_items,
-        skipped_items=result.skipped_items,
-        issues=result.issues,
-    )
-
-
-@router.post(
-    "/upload-xlsx",
-    response_model=ProductSpreadsheetImportResponse,
-    responses={
-        400: {"model": ProductCreationErrorResponse, "description": "Invalid request"},
-        415: {
-            "model": ProductCreationErrorResponse,
-            "description": "Unsupported media type",
-        },
-    },
-)
-async def upload_products(
-    db: AsyncSession = Depends(get_db),
-    file: UploadFile = File(..., description="XLSX file exported from OTTO market"),
-):
-    """Import selected XLSX columns into the local products table."""
-    if not file.filename or not file.filename.lower().endswith(".xlsx"):
-        return JSONResponse(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            content=ProductCreationErrorResponse(
-                message="Only .xlsx files are supported"
-            ).model_dump(),
-        )
-
-    raw = await file.read()
-    if not raw:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ProductCreationErrorResponse(
-                message="Uploaded file is empty"
-            ).model_dump(),
-        )
-
-    try:
-        parsed_rows = _read_xlsx_rows(raw)
-    except ValueError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ProductCreationErrorResponse(message=str(exc)).model_dump(),
-        )
-    except Exception as exc:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ProductCreationErrorResponse(
-                message=f"Could not parse XLSX file: {exc}"
-            ).model_dump(),
-        )
-
-    rows, skipped_rows = _deduplicate_rows(parsed_rows)
-
-    if not rows:
-        return ProductSpreadsheetImportResponse(
-            success=True,
-            file_name=file.filename,
-            imported_rows=0,
-            upserted_rows=0,
-            skipped_rows=skipped_rows,
-            columns=list(XLSX_COLUMN_MAP.values()),
-        )
-
-    upserted_rows = await _upsert_products_in_batches(db, rows)
-
-    return ProductSpreadsheetImportResponse(
-        success=True,
-        file_name=file.filename,
-        imported_rows=len(parsed_rows),
-        upserted_rows=upserted_rows,
-        skipped_rows=skipped_rows,
-        columns=list(XLSX_COLUMN_MAP.values()),
-    )
 
 
 @router.post(
@@ -2174,56 +1619,7 @@ async def get_product_import_task(
     return _task_to_dto(task)
 
 
-@router.post(
-    "/fetch-afterbuy-task",
-    response_model=ProductImportTaskDTO,
-)
-async def create_afterbuy_fetch_task(
-    db: AsyncSession = Depends(get_db),
-    current_user=Depends(require_role([RoleEnum.SEO])),
-    account: str = Query(default="JV"),
-    dataset: str = Query(default="lister"),
-    limit: int = Query(default=100000, ge=1, le=100000),
-):
-    """Create a background Afterbuy fetch task for the JV lister table."""
-    task = ProductImportTask(
-        id=str(uuid4()),
-        file_name=f"Afterbuy {account} {dataset}",
-        status="queued",
-        created_by_user_id=current_user.id,
-        total_rows=None,
-        processed_rows=0,
-        upserted_rows=0,
-        skipped_rows=0,
-        error_message=None,
-    )
-    db.add(task)
-    await db.commit()
-    await db.refresh(task)
-
-    try:
-        sync_afterbuy_jv_lister_task.delay(
-            task_id=task.id,
-            account=account,
-            dataset=dataset,
-            limit=limit,
-        )
-    except Exception as exc:
-        task.status = "failed"
-        task.error_message = f"Could not enqueue Celery task: {exc}"
-        task.finished_at = datetime.utcnow()
-        await db.commit()
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content=ProductCreationErrorResponse(
-                message="Could not enqueue Afterbuy fetch task",
-            ).model_dump(),
-        )
-    return _task_to_dto(task)
-
-
 @router.get("/db/{sku}")
-@router.get("/{sku}", include_in_schema=False)
 async def get_db_product(
     sku: str,
     db: AsyncSession = Depends(get_db),
@@ -2240,15 +1636,6 @@ async def get_db_product(
             content={"message": f"Product with sku '{sku}' not found in DB"},
         )
     return _product_to_dict(product)
-
-
-@router.get("/otto/{sku}")
-async def get_otto_product(
-    sku: str,
-    product_service: ProductService = Depends(get_product_service),
-):
-    """Fetch one product directly from OTTO by SKU."""
-    return await product_service.get_product(sku)
 
 
 @router.post(
@@ -3043,12 +2430,3 @@ async def submit_factory_prepared_products(
         "queued": True,
         "products_count": len(products),
     }
-
-
-@router.delete("delete-by-url/product", response_model=DeleteProductResponse)
-async def delete_by_url(
-    skus: list[str],
-    controller: Controller = Controller.JV,
-    product_service: ProductService = Depends(get_product_service),
-):
-    return await product_service.delete_product_from_file(skus, controller)

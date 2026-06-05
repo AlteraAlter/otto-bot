@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Home, ListTodo, LogOut, Menu, Package2, RefreshCw, X } from "lucide-react";
+import { FileSpreadsheet, Home, LogOut, Menu, Package2, Trash2, X } from "lucide-react";
 import { ReactNode, useEffect, useState } from "react";
 
 import { OttoLogo } from "@/components/otto-logo";
@@ -32,12 +32,8 @@ export function AppWorkspaceShell({
   const navItems = [
     { href: "/", label: "Каталог", icon: Home },
     { href: "/creator", label: "Создание товара", icon: Package2 },
-    ...(currentUser?.role === "SEO"
-      ? [
-          { href: "/tasks", label: "Задачи", icon: ListTodo },
-          { href: "/imports", label: "Data Operations", icon: RefreshCw },
-        ]
-      : []),
+    { href: "/tasks", label: "Удаление товара", icon: Trash2 },
+    { href: "/imports", label: "XLSX импорт", icon: FileSpreadsheet },
   ];
 
   async function handleLogout() {

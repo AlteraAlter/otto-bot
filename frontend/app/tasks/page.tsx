@@ -44,7 +44,7 @@ export default function TasksPage() {
   const { currentUser, isLoading, error } = useCurrentUser();
   const [controller, setController] = useState<"jv" | "xl">("jv");
   const [deactivateInput, setDeactivateInput] = useState<string>("");
-  const [message, setMessage] = useState<string>("Paste EAN values and deactivate the matching OTTO products.");
+  const [message, setMessage] = useState<string>("Вставьте EAN, чтобы деактивировать найденные товары в OTTO.");
   const [results, setResults] = useState<DeactivateItemResult[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -54,12 +54,12 @@ export default function TasksPage() {
 
   async function submitDeactivate() {
     if (eans.length === 0) {
-      setMessage("Add at least one EAN.");
+      setMessage("Добавьте хотя бы один EAN.");
       return;
     }
 
     setIsSubmitting(true);
-    setMessage(`Deactivating ${eans.length} product${eans.length === 1 ? "" : "s"}...`);
+    setMessage(`Деактивирую товаров: ${eans.length}...`);
     setResults([]);
     try {
       const response = await fetch("/api/products/deactivate-by-ean", {
@@ -70,7 +70,7 @@ export default function TasksPage() {
       });
       const payload = await readJsonResponse<DeactivateResponse>(response);
       if (!response.ok || payload?.success === false) {
-        setMessage(readApiErrorMessage(payload, "Could not deactivate products", response.status));
+        setMessage(readApiErrorMessage(payload, "Не удалось деактивировать товары", response.status));
         return;
       }
       const items = Array.isArray(payload?.items) ? payload.items : [];
@@ -78,11 +78,11 @@ export default function TasksPage() {
       setResults(items);
       setMessage(
         failed > 0
-          ? `Finished with errors: ${failed} of ${items.length} failed.`
-          : `Done. Deactivated ${items.length} product${items.length === 1 ? "" : "s"}.`,
+          ? `Готово с ошибками: ${failed} из ${items.length} не обработано.`
+          : `Готово. Деактивировано товаров: ${items.length}.`,
       );
     } catch (caughtError) {
-      setMessage(caughtError instanceof Error ? `Error: ${caughtError.message}` : "Deactivate request failed.");
+      setMessage(caughtError instanceof Error ? `Ошибка: ${caughtError.message}` : "Запрос на деактивацию не выполнен.");
     } finally {
       setIsSubmitting(false);
     }
@@ -91,7 +91,7 @@ export default function TasksPage() {
   function clearForm() {
     setDeactivateInput("");
     setResults([]);
-    setMessage("Paste EAN values and deactivate the matching OTTO products.");
+    setMessage("Вставьте EAN, чтобы деактивировать найденные товары в OTTO.");
   }
 
   if (isLoading) {
@@ -102,9 +102,9 @@ export default function TasksPage() {
     <AppWorkspaceShell
       activeHref="/tasks"
       currentUser={currentUser}
-      sectionLabel="Задачи"
-      title="Деактивация товаров"
-      description="Batch deactivation by EAN without saving task history."
+      sectionLabel="Удаление"
+      title="Удаление товаров"
+      description="Деактивация товаров по EAN без истории задач."
     >
       <div className="deactivate-workspace">
         {error ? <p className="helper-banner">{error}</p> : null}
@@ -112,8 +112,8 @@ export default function TasksPage() {
         <Card className="deactivate-panel">
           <div className="deactivate-panel-head">
             <div>
-              <span className="deactivate-kicker">OTTO status tool</span>
-              <h2>Deactivate by EAN</h2>
+              <span className="deactivate-kicker">OTTO</span>
+              <h2>Удалить по EAN</h2>
             </div>
             <Badge variant={eans.length > 0 ? "secondary" : "outline"}>
               {`${eans.length} EAN${eans.length === 1 ? "" : "s"}`}
@@ -122,7 +122,7 @@ export default function TasksPage() {
 
           <div className="deactivate-grid">
             <label className="deactivate-field">
-              Controller
+              Контроллер
               <select value={controller} onChange={(event) => setController(event.target.value as "jv" | "xl")} disabled={isSubmitting}>
                 <option value="jv">JV</option>
                 <option value="xl">XL</option>
@@ -130,7 +130,7 @@ export default function TasksPage() {
             </label>
 
             <label className="deactivate-field deactivate-eans">
-              EAN list
+              Список EAN
               <textarea
                 rows={12}
                 value={deactivateInput}
@@ -141,19 +141,19 @@ export default function TasksPage() {
             </label>
           </div>
 
-          <div className={`deactivate-message ${message.startsWith("Error") || message.startsWith("Could") || message.startsWith("Add") ? "is-error" : ""}`}>
-            {message.startsWith("Error") || message.startsWith("Could") || message.startsWith("Add") ? <CircleAlert size={16} /> : <CheckCircle2 size={16} />}
+          <div className={`deactivate-message ${message.startsWith("Ошибка") || message.startsWith("Не удалось") || message.startsWith("Добавьте") ? "is-error" : ""}`}>
+            {message.startsWith("Ошибка") || message.startsWith("Не удалось") || message.startsWith("Добавьте") ? <CircleAlert size={16} /> : <CheckCircle2 size={16} />}
             <span>{message}</span>
           </div>
 
           <div className="deactivate-actions">
             <Button type="button" variant="secondary" onClick={clearForm} disabled={isSubmitting || (!deactivateInput && results.length === 0)}>
               <RotateCcw size={16} />
-              Clear
+              Очистить
             </Button>
             <Button type="button" onClick={() => void submitDeactivate()} disabled={isSubmitting || eans.length === 0}>
               {isSubmitting ? <Loader2 className="spin" size={16} /> : <PowerOff size={16} />}
-              {isSubmitting ? "Deactivating" : "Deactivate Products"}
+              {isSubmitting ? "Удаляю" : "Удалить товары"}
             </Button>
           </div>
         </Card>
@@ -162,11 +162,11 @@ export default function TasksPage() {
           <Card className="deactivate-results">
             <div className="deactivate-results-head">
               <div>
-                <h2>Result</h2>
-                <p>{`${successCount} succeeded, ${failedCount} failed`}</p>
+                <h2>Результат</h2>
+                <p>{`Успешно: ${successCount}, с ошибкой: ${failedCount}`}</p>
               </div>
               <Badge variant={failedCount > 0 ? "outline" : "success"}>
-                {failedCount > 0 ? "Needs review" : "Complete"}
+                {failedCount > 0 ? "Проверить" : "Готово"}
               </Badge>
             </div>
 
@@ -178,11 +178,11 @@ export default function TasksPage() {
                   </div>
                   <div>
                     <strong>{item.ean}</strong>
-                    <span>{item.sku || "SKU not found"}</span>
+                    <span>{item.sku || "SKU не найден"}</span>
                   </div>
                   <div className="deactivate-result-checks">
-                    <Badge variant={item.quantity_success ? "secondary" : "outline"}>Quantity 0</Badge>
-                    <Badge variant={item.status_success ? "secondary" : "outline"}>Inactive</Badge>
+                    <Badge variant={item.quantity_success ? "secondary" : "outline"}>Количество 0</Badge>
+                    <Badge variant={item.status_success ? "secondary" : "outline"}>Неактивен</Badge>
                   </div>
                   <p>{item.message}</p>
                 </article>

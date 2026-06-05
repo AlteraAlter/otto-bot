@@ -2187,10 +2187,6 @@ a:focus-visible {
   gap: 18px;
 }
 
-.imports-user-note {
-  gap: 8px;
-}
-
 .imports-summary-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2201,7 +2197,7 @@ a:focus-visible {
 .imports-job-card {
   border: 1px solid var(--line);
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.82);
+  background: var(--card);
   box-shadow: var(--shadow-sm);
 }
 
@@ -2209,13 +2205,18 @@ a:focus-visible {
   padding: 16px 18px;
 }
 
-.imports-summary-card span {
-  display: block;
+.imports-summary-card span,
+.imports-job-badge,
+.imports-task-kind {
   color: var(--muted);
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
+}
+
+.imports-summary-card span {
+  display: block;
 }
 
 .imports-summary-card strong {
@@ -2224,13 +2225,11 @@ a:focus-visible {
   font-family: var(--font-outfit), sans-serif;
   font-size: 28px;
   line-height: 1;
-  letter-spacing: -0.04em;
 }
 
 .imports-summary-card p,
 .imports-section-head p,
 .imports-job-copy,
-.imports-job-detail,
 .imports-file-placeholder,
 .imports-file-meta,
 .imports-progress-copy span {
@@ -2261,18 +2260,10 @@ a:focus-visible {
   font-family: var(--font-outfit), sans-serif;
   font-size: 24px;
   line-height: 1;
-  letter-spacing: -0.04em;
 }
 
 .imports-section-head-actions {
   align-items: center;
-}
-
-.imports-job-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-  align-items: start;
 }
 
 .imports-job-card {
@@ -2281,7 +2272,10 @@ a:focus-visible {
   padding: 18px;
 }
 
-.imports-job-head {
+.imports-job-head,
+.imports-upload-form,
+.imports-task-main,
+.imports-progress-block {
   display: grid;
   gap: 10px;
 }
@@ -2297,27 +2291,16 @@ a:focus-visible {
   border-radius: 999px;
   background: var(--surface-soft);
   padding: 0 10px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
 }
 
 .imports-job-head h3 {
   margin: 0;
   font-size: 19px;
   line-height: 1.1;
-  letter-spacing: -0.03em;
 }
 
 .imports-job-copy {
   color: var(--ink);
-}
-
-.imports-upload-form {
-  display: grid;
-  gap: 12px;
 }
 
 .imports-file-field {
@@ -2353,20 +2336,21 @@ a:focus-visible {
   min-width: 0;
 }
 
-.imports-file-name {
-  min-height: 40px;
-  color: var(--muted);
-  font-size: 13px;
+.imports-file-name,
+.imports-file-meta span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.imports-file-name {
+  min-height: 40px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .imports-file-meta span {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .imports-file-meta strong {
@@ -2385,16 +2369,10 @@ a:focus-visible {
 
 .imports-task-card {
   padding: 18px;
-  background: rgba(255, 255, 255, 0.86);
 }
 
 .imports-task-head {
   align-items: center;
-}
-
-.imports-task-main {
-  display: grid;
-  gap: 6px;
 }
 
 .imports-task-title-row {
@@ -2410,46 +2388,7 @@ a:focus-visible {
 
 .imports-progress-block {
   margin-top: 16px;
-  display: grid;
   gap: 8px;
-}
-
-.imports-spinner-block {
-  margin-top: 16px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--surface-muted);
-  padding: 12px 14px;
-}
-
-.imports-spinner {
-  width: 18px;
-  height: 18px;
-  border: 2px solid #d8d2c8;
-  border-top-color: var(--brand);
-  border-radius: 999px;
-  animation: imports-spin 900ms linear infinite;
-  flex: 0 0 auto;
-}
-
-.imports-spinner-copy {
-  display: grid;
-  gap: 3px;
-}
-
-.imports-spinner-copy span,
-.imports-spinner-copy p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.imports-spinner-copy strong {
-  font-size: 13px;
 }
 
 .imports-progress-copy {
@@ -2476,16 +2415,6 @@ a:focus-visible {
   background: linear-gradient(90deg, #1f1f1f 0%, #4d5a6d 100%);
 }
 
-@keyframes imports-spin {
-  from {
-    transform: rotate(0deg);
-  }
-
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 .imports-task-stats {
   margin-top: 16px;
 }
@@ -2498,7 +2427,23 @@ a:focus-visible {
   min-height: 140px;
   border: 1px dashed var(--line);
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.66);
+  background: var(--card);
+}
+
+@media (max-width: 1180px) {
+  .imports-summary-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@keyframes app-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .creator-workspace,
@@ -3424,8 +3369,6 @@ a:focus-visible {
 
 @media (max-width: 1180px) {
 
-  .imports-summary-grid,
-  .imports-job-grid,
   .invitation-hero-grid {
     grid-template-columns: 1fr;
   }
@@ -4054,8 +3997,6 @@ a:focus-visible {
 .creator-editor,
 .hero-stat,
 .user-context-mini,
-.imports-summary-card,
-.imports-job-card,
 .task-card,
 .invitation-form-card,
 .invitation-info-card,
@@ -4082,8 +4023,6 @@ a:focus-visible {
 .table-pill,
 .task-stats span,
 .task-status,
-.imports-job-badge,
-.imports-task-kind,
 .invitation-role-pill,
 .invitation-status-pill {
   background: var(--muted-bg);
@@ -4155,9 +4094,6 @@ a:focus-visible {
 .product-row:hover,
 .product-row.selected,
 .product-row-head,
-.imports-file-name,
-.imports-file-meta,
-.imports-file-placeholder,
 .manual-form-section {
   background: var(--surface-muted);
 }
@@ -4166,8 +4102,7 @@ a:focus-visible {
   box-shadow: inset 2px 0 0 var(--primary);
 }
 
-.editor-empty-state,
-.imports-empty-state {
+.editor-empty-state {
   background: var(--card);
   border-color: var(--border);
   border-radius: var(--radius);
@@ -4248,7 +4183,7 @@ a:focus-visible {
   border: 2px solid rgba(255, 255, 255, 0.45);
   border-top-color: #ffffff;
   border-radius: 999px;
-  animation: imports-spin 900ms linear infinite;
+  animation: app-spin 900ms linear infinite;
   margin-right: 8px;
 }
 
