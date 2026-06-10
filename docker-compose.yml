@@ -35,7 +35,7 @@ services:
     container_name: otto-bot-backend
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file:
-      - .env
+      - docker.env
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
@@ -61,7 +61,7 @@ services:
     container_name: otto-bot-worker
     command: ["arq", "app.tasks.WorkerSettings"]
     env_file:
-      - .env
+      - docker.env
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
