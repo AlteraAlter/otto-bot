@@ -36,7 +36,7 @@ export OTTO_CATEGORIES_FILE="/absolute/path/to/available_cats.json"
 uvicorn app.main:app --reload
 ```
 
-## Run Redis + Celery Worker
+## Run Redis + ARQ Worker
 
 ```bash
 docker compose up -d redis worker
@@ -48,13 +48,13 @@ Default Redis URL:
 Inside Docker Compose the worker connects to Redis using the service hostname:
 - `redis://redis:6379/0`
 
-## Run Celery Worker Manually
+## Run ARQ Worker Manually
 
 ```bash
-celery -A app.celery_app.celery_app worker --loglevel=info
+arq app.tasks.WorkerSettings
 ```
 
-The Afterbuy JV lister fetch is now queued through Celery and processed by this worker.
+Queued factory jobs are processed by this ARQ worker.
 
 ## Sync OTTO Product Images And Descriptions Into Local DB
 
@@ -91,14 +91,10 @@ Default frontend URL:
 
 - `app/api/routes/products.py`: OTTO products + creation workflow endpoints
 - `app/services/product_creation_service.py`: upload/prepare/validate/create pipeline
-- `app/mapper/category_mapper.py`: reusable category mapping engine
 - `app/mapper/normalizer.py`: normalized OTTO payload entrypoint
-- `app/mapper/seo.py`: SEO description generation entrypoint
-- `normalize_product_to_schema.py`: schema transformation implementation
-- `generate_seo_descriptions.py`: SEO generation implementation
+- `app/normalize_product_to_schema.py`: schema transformation implementation
 - `frontend/app/creator/page.tsx`: JSON upload, edit, prepare, create UI
 
 ## Notes
 
-- Mapper category data lives in `app/mapper/available_cats.json`.
 - Legacy standalone uploader route/page were removed; product file flow is under `/v1/products/*`.

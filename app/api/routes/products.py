@@ -54,12 +54,13 @@ from app.schemas.product_tasks import (
     ProductFactoryCreateRequestDTO,
     ProductFactoryCreateResponseDTO,
 )
+from app.schemas.product_query import CategoryQuery
 
 from app.schemas.enums import SortOrderEnum
 from app.schemas.enums import RoleEnum
 from app.schemas.enums import Controller
 from app.services.afterbuy_service import AfterbuyService
-from app.mapper.seo import build_seo_description
+from app.arq_app import enqueue_job
 from app.mapper.normalizer import build_normalized_product
 from app.core.configs import settings
 from app.services.factory_task_state_service import FactoryTaskStateService
@@ -68,6 +69,10 @@ from app.services.product_service import ProductService
 router = APIRouter(
     prefix="/v1/products",
     tags=["Products"],
+)
+otto_v5_router = APIRouter(
+    prefix="/v5/products",
+    tags=["OTTO Products v5"],
 )
 
 XLSX_COLUMN_MAP = {
@@ -475,9 +480,8 @@ async def _build_factory_prepared_products(
             ean = source_item.get("EAN") or source_item.get("ean")
             MAPPER_LOGGER.info("step=normalize_start index=%s ean=%s", index, ean)
             async with normalize_semaphore:
-                seo_html = build_seo_description(source_item, max_chars=2000)
                 normalized = await asyncio.wait_for(
-                    asyncio.to_thread(build_normalized_product, source_item, seo_html),
+                    asyncio.to_thread(build_normalized_product, source_item),
                     timeout=FACTORY_NORMALIZE_TIMEOUT_SEC,
                 )
             PREPARED_UPLOAD_LOGGER.info(
@@ -1408,6 +1412,55 @@ async def get_db_product_categories(
     }
 
 
+async def _get_otto_product_categories(
+    *,
+    page: int,
+    limit: int,
+    category: str | None,
+    product_service: ProductService,
+):
+    payload = CategoryQuery(
+        page=page,
+        limit=limit,
+        category=category,
+    ).to_payload()
+    return await product_service.get_categories(payload)
+
+
+@router.get("/categories")
+async def get_product_categories(
+    page: int = Query(default=0, ge=0),
+    limit: int = Query(default=1, ge=0, le=2000),
+    category: str | None = Query(default=None),
+    product_service: ProductService = Depends(get_product_service),
+):
+    """Proxy OTTO `GET /v5/products/categories` through the backend API."""
+    return await _get_otto_product_categories(
+        page=page,
+        limit=limit,
+        category=category,
+        product_service=product_service,
+    )
+
+
+@otto_v5_router.get("/categories")
+async def get_otto_v5_product_categories(
+    page: int = Query(default=0, ge=0),
+    limit: int = Query(default=10, ge=10, le=2000),
+    category: str | None = Query(default=None),
+    controller: Controller = Query(default=Controller.JV),
+    product_service: ProductService = Depends(get_product_service),
+):
+    """Proxy OTTO `GET /v5/products/categories` and expose the OTTO path in docs."""
+    return await _get_otto_product_categories(
+        page=page,
+        limit=limit,
+        category=category,
+        controller=controller,
+        product_service=product_service,
+    )
+
+
 @router.get("/otto/shipping-profiles")
 async def get_shipping_profiles(
     controller: Controller = Query(default=Controller.JV),
@@ -1667,9 +1720,8 @@ async def create_product_task_from_factory(
     }
     await _save_factory_task_state(run_id, task)
 
-    from app.tasks import prepare_factory_products_task
-
-    prepare_factory_products_task.delay(
+    await enqueue_job(
+        "prepare_factory_products_task",
         process_id=run_id,
         payload=payload.model_dump(mode="json"),
     )
@@ -2089,9 +2141,8 @@ async def enrich_factory_prepared_products(
         task["progress_percent"] = 0
         await _save_factory_task_state(process_id, task)
 
-    from app.tasks import enrich_factory_products_task
-
-    enrich_factory_products_task.delay(
+    await enqueue_job(
+        "enrich_factory_products_task",
         process_id=process_id,
         payload=payload,
     )
@@ -2416,9 +2467,8 @@ async def submit_factory_prepared_products(
         task["progress_percent"] = 0
         await _save_factory_task_state(process_id, task)
 
-    from app.tasks import submit_factory_products_task
-
-    submit_factory_products_task.delay(
+    await enqueue_job(
+        "submit_factory_products_task",
         process_id=process_id,
         payload=payload,
     )
@@ -2430,3 +2480,13 @@ async def submit_factory_prepared_products(
         "queued": True,
         "products_count": len(products),
     }
+    
+
+@router.get("/fetch-otto-categories-to-db")
+async def fetch_otto_categories_to_db(
+    product_service: ProductService = Depends(get_product_service),
+    session: AsyncSession = Depends(get_db)
+):
+    await product_service.fetch_all_categories_to_db(session)
+    
+    return {"success": True, "message": "Category sync started"}

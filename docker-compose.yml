@@ -40,8 +40,8 @@ services:
       DB_HOST: postgres
       DB_PORT: 5432
       REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      ARQ_REDIS_URL: redis://redis:6379/0
+      ARQ_QUEUE_NAME: arq:otto-bot
       FRONTEND_APP_URL: http://localhost
       UPLOADS_DIR: /app/uploads
     volumes:
@@ -59,16 +59,16 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: otto-bot-worker
-    command: ["celery", "-A", "app.celery_app.celery_app", "worker", "--loglevel=info", "--concurrency=${CELERY_WORKER_CONCURRENCY:-2}"]
+    command: ["arq", "app.tasks.WorkerSettings"]
     env_file:
       - .env
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
       REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
-      CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-2}
+      ARQ_REDIS_URL: redis://redis:6379/0
+      ARQ_QUEUE_NAME: arq:otto-bot
+      ARQ_WORKER_CONCURRENCY: ${ARQ_WORKER_CONCURRENCY:-2}
       FRONTEND_APP_URL: http://localhost
     depends_on:
       postgres:

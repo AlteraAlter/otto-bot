@@ -51,9 +51,10 @@ class Settings(BaseSettings):
     afterbuy_username: str
     afterbuy_password: str
     redis_url: str = "redis://127.0.0.1:6379/0"
-    celery_broker_url: str = "redis://127.0.0.1:6379/0"
-    celery_result_backend: str = "redis://127.0.0.1:6379/1"
-    celery_worker_concurrency: int = 2
+    arq_redis_url: str | None = None
+    arq_queue_name: str = "arq:otto-bot"
+    arq_worker_concurrency: int = 2
+    arq_job_timeout_seconds: int = 7200
     factory_product_concurrency: int = 10
     factory_ai_enrich_item_timeout_seconds: int = 300
 

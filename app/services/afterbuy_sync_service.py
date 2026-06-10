@@ -1,4 +1,4 @@
-"""Afterbuy-to-database synchronization helpers shared by API and Celery."""
+"""Afterbuy-to-database synchronization helpers shared by API and workers."""
 
 from __future__ import annotations
 
@@ -266,7 +266,7 @@ def run_afterbuy_import_task_sync(
     dataset: str,
     limit: int,
 ) -> None:
-    """Synchronous wrapper used by Celery workers."""
+    """Synchronous wrapper kept for compatibility with direct worker callers."""
     asyncio.run(
         run_afterbuy_import_task(
             task_id=task_id,

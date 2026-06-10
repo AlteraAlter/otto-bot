@@ -19,7 +19,7 @@ class CategoryQuery(BaseModel):
     """Query parameters for fetching category lists from upstream service."""
 
     page: int = Field(0, ge=0)
-    limit: int = Field(10, ge=10, le=2000)
+    limit: int = Field(1, ge=0, le=2000)
     category: Optional[str] = Field(None)
 
     def to_payload(self) -> dict:

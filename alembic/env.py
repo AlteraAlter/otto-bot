@@ -16,6 +16,11 @@ import app.models.users
 import app.models.user_roles
 import app.models.factories
 import app.models.factory_task_states
+import app.models.categories
+import app.models.category_group
+import app.models.attributes
+import app.models.attribute_allowed_values
+import app.models.variation_theme
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

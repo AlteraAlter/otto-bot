@@ -1,5 +1,5 @@
-"""Compatibility re-export module for category mapper utilities."""
+"""Compatibility re-export module for product mapper utilities."""
 
-from app.mapper.category_mapper import CategoryMapper, get_default_category_mapper
+from app.mapper.product_mapper import ProductMapper
 
-__all__ = ["CategoryMapper", "get_default_category_mapper"]
+__all__ = ["ProductMapper"]

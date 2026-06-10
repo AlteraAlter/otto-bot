@@ -313,8 +313,7 @@ class ProductMapper:
                 limit=100,
             ).to_payload()
             category_attributes = await self.otto_client.get_categories(
-                categories_payload,
-                controller=self.controller,
+                categories_payload
             )
             cleaned_otto_attrs = self.prepare_attrs(category_attributes)
             self._category_attrs_cache[cache_key] = cleaned_otto_attrs

@@ -229,3 +229,4 @@ class Availability(BaseModel):
 class AvailabilityRequest(BaseModel):
     availability: list[Availability]
     controller: Controller = Controller.JV
+    

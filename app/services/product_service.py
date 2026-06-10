@@ -5,17 +5,21 @@ stable dependency boundary for routes and higher-level workflows while keeping
 the HTTP implementation isolated inside `OttoClient`.
 """
 
-from bs4 import BeautifulSoup
 import asyncio
+from pathlib import Path
 from datetime import datetime
-from fastapi import UploadFile
-from typing import Any, Optional
-from pydantic import ValidationError
+from typing import Optional
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
 from app.clients.otto_client import OttoClient
 from app.services.utility_service import UtilityService
 from app.utils.helpers import to_json
 
 from app.core.configs import settings
+
+from app.core.logger import logging
 
 # Schemas
 from app.schemas.product import (
@@ -36,16 +40,23 @@ from app.schemas.product_response import (
     UpdateProductDeliveryResponse,
     OperationResult,
     AvailabilityResponse,
+    OttoCategoryResponse,
+    CategoryGroupSchema
 )
 from app.schemas.enums import Controller
 
+from app.models.category_group import CategoryGroup
+from app.models.categories import Category
+from app.models.attributes import Attribute
+from app.models.attribute_allowed_values import AttributeAllowedValue
+from app.models.variation_theme import VariationTheme
 
 class ProductService:
     """Coordinate product-related calls to OTTO-facing client methods."""
 
     def __init__(self, client: OttoClient):
-        """Initialize service with an already configured OTTO client."""
         self.client = client
+        self.logger = logging.getLogger(__name__)
 
     async def get_product(self, sku: str):
         """Fetch one product from OTTO by SKU."""
@@ -102,17 +113,18 @@ class ProductService:
         """Update active flags/status for one or more products in OTTO."""
         return await self.client.update_status(payload, controller=controller)
 
-    async def get_categories(
-        self, payload: dict, controller: Controller = Controller.JV
-    ):
+    async def get_categories(self, payload: dict):
         """Fetch category information from OTTO, normalized by the client."""
-        return await self.client.get_categories(payload, controller=controller)
+
+        return await self.client.get_categories(payload)
+
 
     async def update_quantity(
         self, payload: Optional[dict | list], controller: Controller = Controller.JV
     ):
         """Upload or create quantity for sku(product)"""
         return await self.client.update_quantity(payload, controller=controller)
+
 
     async def update_product_delivery_information(
         self, payload: dict, controller: Controller = Controller.JV
@@ -246,3 +258,121 @@ class ProductService:
         return DeleteProductResponse(
             product_operation=product_operation, quantity_operation=quantity_operation
         )
+        
+    async def fetch_all_categories_to_db(self, session: AsyncSession):
+        """Фетчит все категории из ОТТО и сохраняет в БД"""
+        
+        self.logger.info("Started category synchronization")
+        
+        MAX_FETCH_SIZE = 10
+        page = 0
+        
+        existing_groups: dict[str, CategoryGroup] = {
+            group.name: group
+            for group in (await session.scalars(
+                select(CategoryGroup)
+            )).all()
+        }
+        
+        self.logger.info(
+            "Loading existing category groups",
+            extra={"count": len(existing_groups)}
+        )
+        while True:
+            try:
+                self.logger.info(f"Fetching page {page}")
+                
+                otto_response = await self.client.get_categories(
+                    {
+                        "page": page,
+                        "limit": MAX_FETCH_SIZE
+                    }
+                )
+
+                if not otto_response.categoryGroups:
+                    self.logger.info("Category groups not found")
+                    break
+
+                for group_item in otto_response.categoryGroups:
+                    # Создает родительскую категорию
+                    category_group = existing_groups.get(group_item.categoryGroup)
+                    
+                    if not category_group:
+                        category_group = CategoryGroup(name=group_item.categoryGroup)
+                        session.add(category_group)
+                        self.logger.info(f"Created category group: {category_group.name}")
+
+                    else:
+                        self.logger.debug(f"Skipping existing category group: {category_group.name}")
+                        continue
+                    
+                    # =====================
+                    # Categories
+                    # =====================
+                    self.logger.info(f"Start saving the categories: {group_item.categories}")
+                    for category_name in group_item.categories:
+                        category = Category(
+                            group=category_group,
+                            name=category_name
+                        )
+                        session.add(category)
+                        self.logger.debug(f"INSERT category: {category.name} to group {category_group.name}")
+
+                    # =====================
+                    # Attributes
+                    # =====================
+                    self.logger.info(f"Start saving attributes: {group_item.attributes}")
+                    for attr_item in group_item.attributes:
+
+                        attribute = Attribute(
+                            group=category_group,
+                            name=attr_item.name,
+                            type=attr_item.type,
+                            description=attr_item.description,
+                            relevance=attr_item.relevance.value if attr_item.relevance else None,
+                            multi_value=attr_item.multiValue,
+                            unit=attr_item.unit
+                        )
+                        session.add(attribute)
+                        self.logger.debug(f"INSERT attribute: {attribute.name} to group {category_group.name}")
+
+                        # =====================
+                        # Allowed values
+                        # =====================
+                        self.logger.info(f"Start saving allowed values for attribute: {attribute.name}")
+                        for item_allowed_value in attr_item.allowedValues:
+
+                            allowed_val = AttributeAllowedValue(
+                                attribute=attribute,
+                                value=item_allowed_value
+                            )
+                            session.add(allowed_val)
+                            self.logger.debug(f"INSERT {allowed_val.value} into {attribute.name} with group: {category_group.name}")
+                            
+                        # =====================
+                        # Variation Themes
+                        # =====================
+                        self.logger.info(f"Start saving Variation Themes: {group_item.variationThemes}")
+                        if attr_item.name in group_item.variationThemes:
+                            variation_theme = VariationTheme(
+                                group=category_group,
+                                attribute=attribute
+                            )
+                            session.add(variation_theme)
+                            self.logger.debug(f"INSERT {attr_item.name} into {attribute.name} with group: {category_group.name}")
+
+                    existing_groups[category_group.name] = category_group
+                await session.commit()
+                self.logger.info(f"Committed page{page}")
+
+            except Exception:
+                self.logger.exception("Failed category synchronization. Rolling back INSERTS")
+                await session.rollback()
+                
+            page += 1
+                
+        self.logger.info("Completed the fetch saving of category groups from OTTO")
+                
+
+
+async def main(): ...

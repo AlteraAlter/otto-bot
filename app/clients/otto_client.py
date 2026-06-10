@@ -14,7 +14,7 @@ from app.schemas.enums import Controller
 
 # Schemas
 from app.schemas.product import CreateProductRequest, ProductBase, ProductResponse
-from app.schemas.product_response import ProductCreateResponse
+from app.schemas.product_response import ProductCreateResponse, OttoCategoryResponse
 
 # Helper
 from app.utils.helpers import to_json, parse
@@ -233,33 +233,9 @@ class OttoClient:
 
         return parse(ProductCreateResponse, response_data)
 
-    async def get_categories(
-        self, payload: dict, controller: Controller | str = Controller.JV
-    ):
-        """Fetch and flatten category values from OTTO category-group responses."""
-        body = await self._request(
-            "GET", "/v5/products/categories", params=payload, controller=controller
-        )
-        if isinstance(body, dict):
-            groups = body.get("categoryGroups")
-            if isinstance(groups, list):
-                categories: list[str] = []
-                for group in groups:
-                    if not isinstance(group, dict):
-                        continue
-                    group_categories = group.get("categories")
-                    if not isinstance(group_categories, list):
-                        continue
-                    for item in group_categories:
-                        if isinstance(item, str) and item.strip():
-                            categories.append(item.strip())
-                            continue
-                        if isinstance(item, dict):
-                            for key in ("category", "name", "label", "categoryName"):
-                                value = item.get(key)
-                                if isinstance(value, str) and value.strip():
-                                    categories.append(value.strip())
-                                    break
-                if categories:
-                    return list(dict.fromkeys(categories))
-        return body
+    async def get_categories(self, payload: dict) -> OttoCategoryResponse:
+        """Fetch category values from OTTO category-group responses."""
+
+        response_data = await self._request("GET", "/v5/products/categories", params=payload)
+        
+        return parse(OttoCategoryResponse, response_data)
