@@ -1,8 +1,7 @@
-from typing import Any
+from enum import Enum
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict
-from typing import Optional
-from enum import Enum
 
 from app.schemas.base_data import Link
 
@@ -50,7 +49,7 @@ class UrlProcessResult(BaseModel):
 class DeleteProductFrmFileResponse(BaseModel):
     update_product: OperationResult
     update_quantity: OperationResult
-    
+
 
 class Relevance(str, Enum):
     LOW = "LOW"
@@ -78,6 +77,5 @@ class CategoryGroupSchema(BaseModel):
 
 class OttoCategoryResponse(BaseModel):
     categoryGroups: list[CategoryGroupSchema]
-    
+
     model_config = ConfigDict(extra="ignore")
-    

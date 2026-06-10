@@ -36,6 +36,26 @@ export OTTO_CATEGORIES_FILE="/absolute/path/to/available_cats.json"
 uvicorn app.main:app --reload
 ```
 
+## Lightweight Local Docker Dev
+
+For local development on a laptop, prefer the lightweight stack instead of the full production-like compose setup:
+
+```bash
+cp docker.env.example docker.env
+docker compose -f docker-compose.dev.yml up --build
+```
+
+This mode is lighter because it:
+- skips `nginx`
+- skips the ARQ `worker` unless you really need background jobs
+- disables Redis AOF disk writes
+- uses Docker volumes instead of Windows bind mounts for uploads and logs
+
+Useful URLs:
+- `http://127.0.0.1:3000`
+- `http://127.0.0.1:8000/docs`
+- `http://127.0.0.1:8000/uploads/<filename>`
+
 ## Run Redis + ARQ Worker
 
 ```bash
@@ -86,6 +106,14 @@ npm run dev
 
 Default frontend URL:
 - `http://127.0.0.1:3000`
+
+## Full Docker Stack
+
+If you specifically want the production-like local stack with `worker` and `nginx`, keep using:
+
+```bash
+docker compose up --build
+```
 
 ## Project Structure
 

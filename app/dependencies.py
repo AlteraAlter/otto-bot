@@ -12,16 +12,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.afterbuy_client import AfterbuyClient
 from app.clients.otto_client import OttoClient
+from app.core.afterbuy_auth import AfterbuyAuth
 from app.core.configs import settings
 from app.core.otto_auth import OttoAuth
 from app.core.user_auth import UserAuth
-from app.core.afterbuy_auth import AfterbuyAuth
 from app.database import get_db
 from app.repository.user_repository import UserRepository
-from app.services.product_service import ProductService
-from app.services.afterbuy_service import AfterbuyService
 from app.schemas.enums import RoleEnum
 from app.schemas.userDTO import UserDTO
+from app.services.afterbuy_service import AfterbuyService
+from app.services.product_service import ProductService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/v1/auth/login")
 

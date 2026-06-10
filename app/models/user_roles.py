@@ -1,11 +1,11 @@
-from app.database import Base
+from sqlalchemy import Enum, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy import String, Integer, ForeignKey, Enum
+
+from app.database import Base
 from app.schemas.enums import RoleEnum
 
 
 class UserRoles(Base):
-
     __tablename__ = "user_roles"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

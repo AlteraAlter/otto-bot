@@ -10,11 +10,11 @@ from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.afterbuy_service import AfterbuyService
-from app.dependencies import get_afterbuy_login
 from app.database import SessionLocal
+from app.dependencies import get_afterbuy_login
 from app.models.jv_lister import JVLister
 from app.models.product_import_tasks import ProductImportTask
+from app.services.afterbuy_service import AfterbuyService
 
 POSTGRES_MAX_BIND_PARAMS = 32767
 JV_LISTER_UPSERT_COLUMN_COUNT = 4

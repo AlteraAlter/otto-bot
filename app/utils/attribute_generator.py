@@ -3610,11 +3610,12 @@ async def main():
 
 
 if __name__ == "__main__":
+    import asyncio
     import json
+
+    from ..core.configs import settings
     from ..mapper.product_mapper import ProductMapper
     from .gpt_helper import GPTHelper
-    from ..core.configs import settings
-    import asyncio
 
     res = asyncio.run(main())
 

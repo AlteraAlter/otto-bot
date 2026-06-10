@@ -8,8 +8,8 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
-from app.schemas.enums import RoleEnum
 from app.repository.user_repository import UserRepository
+from app.schemas.enums import RoleEnum
 from app.schemas.tokenDTO import TokenDTO
 from app.schemas.userDTO import (
     AdminUserCreateDTO,

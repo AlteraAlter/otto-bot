@@ -1,10 +1,10 @@
-from app.database import Base
+from sqlalchemy import Enum, Integer, String, null
 from sqlalchemy.orm import Mapped, mapped_column, validates
-from sqlalchemy import String, Integer, Enum, null
+
+from app.database import Base
 
 
 class User(Base):
-
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

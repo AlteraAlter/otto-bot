@@ -1,11 +1,12 @@
 """Application settings loaded from environment and optional `.env` file."""
 
-from pydantic import HttpUrl
 from typing import ClassVar
 
+from pydantic import HttpUrl
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 from app.schemas.enums import Controller
-from app.schemas.product import Compliance, ProductSafety, Address
+from app.schemas.product import Address, Compliance, ProductSafety
 
 
 class Settings(BaseSettings):
@@ -33,7 +34,7 @@ class Settings(BaseSettings):
     db_name: str
     db_user: str
     db_pass: str
-    
+
     # JWT settings
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
@@ -45,7 +46,7 @@ class Settings(BaseSettings):
     afterbuy_username: str
     afterbuy_password: str
     redis_url: str = "redis://127.0.0.1:6379/0"
-    
+
     # ARQ settings
     arq_redis_url: str | None = None
     arq_queue_name: str = "arq:otto-bot"

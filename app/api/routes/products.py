@@ -1,12 +1,12 @@
 """Product endpoints for catalog, creation, deletion, and XLSX import."""
 
 import asyncio
-from datetime import UTC, date, datetime
-from io import BytesIO
 import json
 import logging
-from pathlib import Path
 import re
+from datetime import UTC, date, datetime
+from io import BytesIO
+from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -23,46 +23,44 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
+from openpyxl import load_workbook
 from sqlalchemy import asc, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from openpyxl import load_workbook
 
-from app.database import SessionLocal
+from app.arq_app import enqueue_job
+from app.core.configs import settings
+from app.database import SessionLocal, get_db
 from app.dependencies import (
     get_afterbuy_login,
     get_product_service,
     require_role,
 )
-from app.database import get_db
+from app.mapper.normalizer import build_normalized_product
 from app.models.product_import_tasks import ProductImportTask
 from app.models.products import Product
+from app.schemas.enums import Controller, RoleEnum, SortOrderEnum
+from app.schemas.product import (
+    Availability,
+    CreateProductRequest,
+)
+from app.schemas.product import (
+    Product as ProductPayload,
+)
 from app.schemas.product_creation import (
     ProductCreationErrorResponse,
     ProductImportTaskDTO,
     ProductImportTaskListResponse,
 )
-from app.schemas.product import (
-    CreateProductRequest,
-    Product as ProductPayload,
-    Availability,
-)
+from app.schemas.product_query import CategoryQuery
 from app.schemas.product_response import (
-    ProductCreateResponse,
     AvailabilityResponse,
+    ProductCreateResponse,
 )
 from app.schemas.product_tasks import (
     ProductFactoryCreateRequestDTO,
     ProductFactoryCreateResponseDTO,
 )
-from app.schemas.product_query import CategoryQuery
-
-from app.schemas.enums import SortOrderEnum
-from app.schemas.enums import RoleEnum
-from app.schemas.enums import Controller
 from app.services.afterbuy_service import AfterbuyService
-from app.arq_app import enqueue_job
-from app.mapper.normalizer import build_normalized_product
-from app.core.configs import settings
 from app.services.factory_task_state_service import FactoryTaskStateService
 from app.services.product_service import ProductService
 
@@ -118,7 +116,9 @@ PREPARED_UPLOAD_LOGGER = logging.getLogger("prepared_upload_payloads")
 if not PREPARED_UPLOAD_LOGGER.handlers:
     PREPARED_UPLOAD_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
-        _prepared_handler = logging.FileHandler(PREPARED_UPLOAD_LOG_PATH, encoding="utf-8")
+        _prepared_handler = logging.FileHandler(
+            PREPARED_UPLOAD_LOG_PATH, encoding="utf-8"
+        )
     except OSError:
         _prepared_handler = logging.NullHandler()
     _prepared_handler.setFormatter(
@@ -235,9 +235,7 @@ async def _mark_factory_task_stale_if_needed(
         task["finished_at"] = now.isoformat()
         issues = task.get("issues")
         task["issues"] = (
-            [stale_message, *issues]
-            if isinstance(issues, list)
-            else [stale_message]
+            [stale_message, *issues] if isinstance(issues, list) else [stale_message]
         )
         await _save_factory_task_state(process_id, task)
         MAPPER_LOGGER.warning(
@@ -441,9 +439,7 @@ async def _build_factory_prepared_products(
     mapped_result = await _run_step_with_timeout(
         step_name="map_products",
         timeout_sec=FACTORY_MAP_TIMEOUT_SEC,
-        fn=lambda: mapper.payload_deploy(
-            on_item_finished=mapping_progress_callback
-        ),
+        fn=lambda: mapper.payload_deploy(on_item_finished=mapping_progress_callback),
     )
     mapped_items = (
         mapped_result.get("items", []) if isinstance(mapped_result, dict) else []
@@ -552,7 +548,10 @@ async def _build_factory_prepared_products(
             _flush_logger(PREPARED_UPLOAD_LOGGER)
 
     await asyncio.gather(
-        *[_normalize_one(index, source_item) for index, source_item in enumerate(source_items)]
+        *[
+            _normalize_one(index, source_item)
+            for index, source_item in enumerate(source_items)
+        ]
     )
 
     products_payload: list[ProductPayload] = [
@@ -704,41 +703,47 @@ async def _run_factory_prepare_task(
             controller=payload.controller,
             factory_id=payload.factory_id,
         )
-        await _save_factory_task_state(process_id, {
-            "status": "DONE",
-            "controller": payload.controller.value,
-            "factory_id": payload.factory_id,
-            "source_items": source_count,
-            "mapped_items": mapped_count,
-            "payload_items": len(products_payload),
-            "issues": issues,
-            "source_items_raw": raw_source_items,
-            "products": [
-                item.model_dump(mode="json", exclude_none=True)
-                for item in products_payload
-            ],
-            "snapshot_path": snapshot_path.as_posix(),
-            "finished_at": datetime.now(UTC).isoformat(),
-            "heartbeat_at": datetime.now(UTC).isoformat(),
-            "updated_at": datetime.now(UTC).isoformat(),
-            "progress_total": source_count,
-            "progress_completed": source_count,
-            "progress_percent": 100 if source_count > 0 else 0,
-        })
+        await _save_factory_task_state(
+            process_id,
+            {
+                "status": "DONE",
+                "controller": payload.controller.value,
+                "factory_id": payload.factory_id,
+                "source_items": source_count,
+                "mapped_items": mapped_count,
+                "payload_items": len(products_payload),
+                "issues": issues,
+                "source_items_raw": raw_source_items,
+                "products": [
+                    item.model_dump(mode="json", exclude_none=True)
+                    for item in products_payload
+                ],
+                "snapshot_path": snapshot_path.as_posix(),
+                "finished_at": datetime.now(UTC).isoformat(),
+                "heartbeat_at": datetime.now(UTC).isoformat(),
+                "updated_at": datetime.now(UTC).isoformat(),
+                "progress_total": source_count,
+                "progress_completed": source_count,
+                "progress_percent": 100 if source_count > 0 else 0,
+            },
+        )
     except Exception as exc:
         MAPPER_LOGGER.exception(
             "step=factory_prepare_task_failed process_id=%s error=%s", process_id, exc
         )
-        await _save_factory_task_state(process_id, {
-            "status": "FAILED",
-            "controller": payload.controller.value,
-            "factory_id": payload.factory_id,
-            "issues": [str(exc)],
-            "products": [],
-            "finished_at": datetime.now(UTC).isoformat(),
-            "heartbeat_at": datetime.now(UTC).isoformat(),
-            "updated_at": datetime.now(UTC).isoformat(),
-        })
+        await _save_factory_task_state(
+            process_id,
+            {
+                "status": "FAILED",
+                "controller": payload.controller.value,
+                "factory_id": payload.factory_id,
+                "issues": [str(exc)],
+                "products": [],
+                "finished_at": datetime.now(UTC).isoformat(),
+                "heartbeat_at": datetime.now(UTC).isoformat(),
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+        )
     finally:
         heartbeat_stop.set()
         try:
@@ -989,9 +994,7 @@ async def _submit_products_to_otto_in_batches(
         "batches": batch_summaries,
     }
     aggregated_failed_result = (
-        {"results": aggregated_failed_results}
-        if aggregated_failed_results
-        else None
+        {"results": aggregated_failed_results} if aggregated_failed_results else None
     )
     aggregated_process_id = ",".join(process_ids) if process_ids else None
 
@@ -1509,7 +1512,10 @@ async def deactivate_products_by_ean(
     except ValueError:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content={"success": False, "message": f"Invalid controller: {controller_value}"},
+            content={
+                "success": False,
+                "message": f"Invalid controller: {controller_value}",
+            },
         )
 
     eans = _normalize_ean_lines(raw_eans)
@@ -1560,7 +1566,9 @@ async def deactivate_products_by_ean(
             item_result["message"] = str(exc)
         results[index] = item_result
 
-    await asyncio.gather(*[_deactivate_one(index, ean) for index, ean in enumerate(eans)])
+    await asyncio.gather(
+        *[_deactivate_one(index, ean) for index, ean in enumerate(eans)]
+    )
     await db.commit()
 
     normalized_results = [item for item in results if isinstance(item, dict)]
@@ -1752,9 +1760,12 @@ async def get_factory_prepare_task(process_id: str):
                 "process_id": process_id,
             },
         )
-    task, heartbeat_lag_sec, step_elapsed_sec, is_stuck = (
-        await _mark_factory_task_stale_if_needed(process_id, task)
-    )
+    (
+        task,
+        heartbeat_lag_sec,
+        step_elapsed_sec,
+        is_stuck,
+    ) = await _mark_factory_task_stale_if_needed(process_id, task)
 
     return {
         "success": True,
@@ -1796,9 +1807,8 @@ async def save_factory_prepare_task_draft(
 
     task_step = str(task.get("current_step") or "")
     task_status = str(task.get("status") or "")
-    is_enrichment_running = (
-        task_status == "IN_PROGRESS"
-        and task_step.startswith("ai_enrichment")
+    is_enrichment_running = task_status == "IN_PROGRESS" and task_step.startswith(
+        "ai_enrichment"
     )
 
     products = payload.get("products")
@@ -1806,7 +1816,11 @@ async def save_factory_prepare_task_draft(
         task["products"] = products
 
     current_step = payload.get("current_step")
-    if isinstance(current_step, str) and current_step.strip() and not is_enrichment_running:
+    if (
+        isinstance(current_step, str)
+        and current_step.strip()
+        and not is_enrichment_running
+    ):
         task["current_step"] = current_step.strip()
 
     frontend_draft_payload = payload.get("frontend_draft")
@@ -1850,9 +1864,12 @@ async def factory_prepare_task_ws(websocket: WebSocket, process_id: str):
                 )
                 await websocket.close(code=4404)
                 return
-            task, heartbeat_lag_sec, step_elapsed_sec, _is_stuck = (
-                await _mark_factory_task_stale_if_needed(process_id, task)
-            )
+            (
+                task,
+                heartbeat_lag_sec,
+                step_elapsed_sec,
+                _is_stuck,
+            ) = await _mark_factory_task_stale_if_needed(process_id, task)
 
             await websocket.send_json(
                 {
@@ -1946,6 +1963,7 @@ async def _run_factory_enrichment_task(
     progress_lock = asyncio.Lock()
 
     try:
+
         async def _enrich_one(index: int, item: dict[str, Any]) -> None:
             model = ProductPayload.model_validate(item)
             source_item = (
@@ -1969,7 +1987,9 @@ async def _run_factory_enrichment_task(
                 timeout=FACTORY_AI_ENRICH_ITEM_TIMEOUT_SEC,
             )
             enriched_model = ProductPayload.model_validate(enriched_payload)
-            enriched_products[index] = enriched_model.model_dump(mode="json", exclude_none=True)
+            enriched_products[index] = enriched_model.model_dump(
+                mode="json", exclude_none=True
+            )
             async with progress_lock:
                 task["progress_completed"] = int(task.get("progress_completed", 0)) + 1
                 task["progress_percent"] = int(
@@ -2001,9 +2021,7 @@ async def _run_factory_enrichment_task(
                             mode="json",
                             exclude_none=True,
                         )
-                        message = (
-                            f"AI enrichment failed at index={index} sku={fallback_model.sku}: {exc}"
-                        )
+                        message = f"AI enrichment failed at index={index} sku={fallback_model.sku}: {exc}"
                         item_failures.append(message)
                         MAPPER_LOGGER.exception(
                             "step=category_approval_enrichment_item_failed process_id=%s worker=%s index=%s sku=%s error=%s",
@@ -2014,9 +2032,14 @@ async def _run_factory_enrichment_task(
                             exc,
                         )
                         async with progress_lock:
-                            task["progress_completed"] = int(task.get("progress_completed", 0)) + 1
+                            task["progress_completed"] = (
+                                int(task.get("progress_completed", 0)) + 1
+                            )
                             task["progress_percent"] = int(
-                                round((task["progress_completed"] / max(1, len(products))) * 100)
+                                round(
+                                    (task["progress_completed"] / max(1, len(products)))
+                                    * 100
+                                )
                             )
                             task["updated_at"] = datetime.now(UTC).isoformat()
                             await _save_factory_task_state(process_id, task)
@@ -2028,8 +2051,7 @@ async def _run_factory_enrichment_task(
 
         worker_count = min(FACTORY_PRODUCT_CONCURRENCY, len(products))
         workers = [
-            asyncio.create_task(_worker(worker_id))
-            for worker_id in range(worker_count)
+            asyncio.create_task(_worker(worker_id)) for worker_id in range(worker_count)
         ]
         for _ in workers:
             await work_queue.put(None)
@@ -2119,7 +2141,11 @@ async def enrich_factory_prepared_products(
             },
         )
 
-    if task is not None and task.get("status") == "IN_PROGRESS" and task.get("current_step") == "ai_enrichment_in_progress":
+    if (
+        task is not None
+        and task.get("status") == "IN_PROGRESS"
+        and task.get("current_step") == "ai_enrichment_in_progress"
+    ):
         return {
             "success": True,
             "process_id": process_id,
@@ -2178,9 +2204,7 @@ async def _run_factory_submit_task(
     validated: list[dict[str, Any]] = []
     validated_models: list[ProductPayload] = []
     controller_value = str(
-        (task or {}).get("controller")
-        or payload.get("controller")
-        or "jv"
+        (task or {}).get("controller") or payload.get("controller") or "jv"
     ).lower()
 
     try:
@@ -2268,7 +2292,9 @@ async def _run_factory_submit_task(
             await _save_factory_task_state(process_id, task)
 
             availability_errors: list[dict[str, str]] = []
-            availability_queue: asyncio.Queue[tuple[int, dict[str, Any]] | None] = asyncio.Queue()
+            availability_queue: asyncio.Queue[tuple[int, dict[str, Any]] | None] = (
+                asyncio.Queue()
+            )
             availability_lock = asyncio.Lock()
 
             async def _submit_availability(index: int, item: dict[str, Any]) -> None:
@@ -2314,9 +2340,13 @@ async def _run_factory_submit_task(
                         }
                     )
                 async with availability_lock:
-                    task["progress_completed"] = int(task.get("progress_completed", 0)) + 1
+                    task["progress_completed"] = (
+                        int(task.get("progress_completed", 0)) + 1
+                    )
                     task["progress_percent"] = int(
-                        round((task["progress_completed"] / max(1, len(validated))) * 100)
+                        round(
+                            (task["progress_completed"] / max(1, len(validated))) * 100
+                        )
                     )
                     task["updated_at"] = datetime.now(UTC).isoformat()
                     task["heartbeat_at"] = task["updated_at"]
@@ -2358,9 +2388,17 @@ async def _run_factory_submit_task(
                                 exc,
                             )
                             async with availability_lock:
-                                task["progress_completed"] = int(task.get("progress_completed", 0)) + 1
+                                task["progress_completed"] = (
+                                    int(task.get("progress_completed", 0)) + 1
+                                )
                                 task["progress_percent"] = int(
-                                    round((task["progress_completed"] / max(1, len(validated))) * 100)
+                                    round(
+                                        (
+                                            task["progress_completed"]
+                                            / max(1, len(validated))
+                                        )
+                                        * 100
+                                    )
                                 )
                                 task["updated_at"] = datetime.now(UTC).isoformat()
                                 task["heartbeat_at"] = task["updated_at"]
@@ -2439,9 +2477,7 @@ async def submit_factory_prepared_products(
         )
 
     controller_value = str(
-        (task or {}).get("controller")
-        or payload.get("controller")
-        or "jv"
+        (task or {}).get("controller") or payload.get("controller") or "jv"
     ).lower()
     try:
         controller = Controller(controller_value)
@@ -2480,13 +2516,13 @@ async def submit_factory_prepared_products(
         "queued": True,
         "products_count": len(products),
     }
-    
+
 
 @router.get("/fetch-otto-categories-to-db")
 async def fetch_otto_categories_to_db(
     product_service: ProductService = Depends(get_product_service),
-    session: AsyncSession = Depends(get_db)
+    session: AsyncSession = Depends(get_db),
 ):
     await product_service.fetch_all_categories_to_db(session)
-    
+
     return {"success": True, "message": "Category sync started"}

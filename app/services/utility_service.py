@@ -1,13 +1,12 @@
-from app.utils.delete_script_by_url import parse_sku
+import httpx
 from playwright.async_api import async_playwright
 from playwright_stealth.stealth import Stealth
-import httpx
 
 from app.schemas.product_response import UrlProcessResult
+from app.utils.delete_script_by_url import parse_sku
 
 
 class UtilityService:
-
     async def _fetch_page_html(self, url: str):
         print("Fetching with playwright")
         async with async_playwright() as p:

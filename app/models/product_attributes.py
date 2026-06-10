@@ -1,6 +1,6 @@
 """ORM model for flattened product attribute/value pairs per SKU."""
 
-from sqlalchemy import ForeignKey, String, Integer
+from sqlalchemy import ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base

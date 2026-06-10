@@ -1,5 +1,7 @@
+from typing import Optional
+
 from pydantic import BaseModel, ConfigDict
-from typing import Any, Optional
+
 from app.schemas.afterbuy_enums import Kind
 
 

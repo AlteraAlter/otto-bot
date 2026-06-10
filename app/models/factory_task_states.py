@@ -17,10 +17,16 @@ class FactoryTaskState(Base):
         nullable=True,
         index=True,
     )
-    controller: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
-    factory_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    controller: Mapped[str | None] = mapped_column(
+        String(10), nullable=True, index=True
+    )
+    factory_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
-    current_step: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    current_step: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     task_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

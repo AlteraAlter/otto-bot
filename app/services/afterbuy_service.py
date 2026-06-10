@@ -1,31 +1,30 @@
 """Afterbuy service with request-level business logic."""
 
 from __future__ import annotations
-from datetime import datetime
 
+from datetime import datetime
 from typing import Any, Optional
 
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
 
 # Scheme
 from app.clients.afterbuy_client import (
     AfterbuyClient,
     FactoriesFetchResponse,
 )
+from app.core.afterbuy_auth import AfterbuyAuth
 
 # Models
 from app.models.factories import Factories
-
-from app.core.afterbuy_auth import AfterbuyAuth
-from app.schemas.enums import Controller
+from app.schemas.afterbuy_enums import Kind
 
 # Schemas
 from app.schemas.afterbuy_products_response import (
     FactoryBase,
     ProductFetchResponse,
 )
-from app.schemas.afterbuy_enums import Kind
+from app.schemas.enums import Controller
 
 
 class AfterbuyService:

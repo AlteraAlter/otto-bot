@@ -3,16 +3,13 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_afterbuy_login
 from app.database import get_db
-
-from app.services.afterbuy_service import AfterbuyService
-
-from app.schemas.enums import Controller
-
+from app.dependencies import get_afterbuy_login
 from app.schemas.afterbuy_products_response import (
     FactoriesFetchResponse,
 )
+from app.schemas.enums import Controller
+from app.services.afterbuy_service import AfterbuyService
 
 router = APIRouter(prefix="/v1/afterbuy", tags=["Afterbuy"])
 

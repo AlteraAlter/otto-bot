@@ -4,7 +4,6 @@ from openai import AsyncOpenAI
 
 
 class DescriptionGenerator:
-
     def __init__(self, client: AsyncOpenAI, model: str = "gpt-5-nano"):
         self.client = client
         self.model = model

@@ -1,22 +1,20 @@
+import asyncio
+import logging
 import xml
 import xml.etree.ElementTree as ET
-import logging
-import asyncio
 from collections.abc import Awaitable, Callable
 from xxlimited import Str
+
 import httpx
 
-from app.utils.category_classifier import CategoryClassifier
-from app.utils.bullet_point_generator import BulletPointGenerator
-from app.utils.description_generator import DescriptionGenerator
-from app.utils.attribute_generator import AttributeGenerator
-
-from app.schemas.product_query import CategoryQuery
-
 from app.clients.otto_client import OttoClient
-
-from app.utils.gpt_helper import GPTHelper
 from app.core.configs import settings
+from app.schemas.product_query import CategoryQuery
+from app.utils.attribute_generator import AttributeGenerator
+from app.utils.bullet_point_generator import BulletPointGenerator
+from app.utils.category_classifier import CategoryClassifier
+from app.utils.description_generator import DescriptionGenerator
+from app.utils.gpt_helper import GPTHelper
 
 PRODUCT_AI_CONCURRENCY = 10
 
@@ -140,7 +138,9 @@ class ProductMapper:
 
             raw_value = item.get("value")
             if isinstance(raw_value, list):
-                values = [str(value).strip() for value in raw_value if str(value).strip()]
+                values = [
+                    str(value).strip() for value in raw_value if str(value).strip()
+                ]
             elif raw_value is None:
                 values = []
             else:
@@ -190,8 +190,7 @@ class ProductMapper:
 
         try:
             direct_map = self.direct_map_attrs(source)
-            self.logger.info(
-                "Атрибуты замапано: ean=%s count=%s", ean, len(direct_map))
+            self.logger.info("Атрибуты замапано: ean=%s count=%s", ean, len(direct_map))
 
             category_attrs_task: asyncio.Task[list[dict]] | None = None
             if self.otto_client:
@@ -238,7 +237,9 @@ class ProductMapper:
                             ean,
                             category,
                         )
-                    elif otto_attr_names and otto_attr_names.issubset(direct_attr_names):
+                    elif otto_attr_names and otto_attr_names.issubset(
+                        direct_attr_names
+                    ):
                         self.logger.info(
                             "AI аттрибуты скипнуты: ean=%s category=%s reason=direct_attrs_cover_otto_attrs",
                             ean,
@@ -258,8 +259,12 @@ class ProductMapper:
                         self.logger.info("Аттрибуты сгенерированы для ean=%s", ean)
 
                 except httpx.HTTPStatusError as exc:
-                    status_code = exc.response.status_code if exc.response else "unknown"
-                    log_fn = self.logger.info if status_code == 404 else self.logger.warning
+                    status_code = (
+                        exc.response.status_code if exc.response else "unknown"
+                    )
+                    log_fn = (
+                        self.logger.info if status_code == 404 else self.logger.warning
+                    )
                     log_fn(
                         "Ошибка генерации ean=%s category=%s status=%s",
                         ean,
@@ -288,7 +293,9 @@ class ProductMapper:
             return result
 
         except Exception as exc:
-            self.logger.exception("Ошибка маппера для ean=%s\nОшибка: error=%s", ean, exc)
+            self.logger.exception(
+                "Ошибка маппера для ean=%s\nОшибка: error=%s", ean, exc
+            )
             raise
 
     async def _get_cleaned_category_attrs(self, category: str) -> list[dict]:

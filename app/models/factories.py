@@ -1,13 +1,12 @@
 from datetime import datetime
 
+from sqlalchemy import DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy import String, Integer, DateTime
 
 from app.database import Base
 
 
 class Factories(Base):
-
     __tablename__ = "factories"
 
     id: Mapped[int] = mapped_column(

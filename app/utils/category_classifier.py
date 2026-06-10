@@ -1,7 +1,8 @@
 import json
-from app.core.configs import settings
 
 from openai import AsyncOpenAI
+
+from app.core.configs import settings
 
 
 class CategoryClassifier:
@@ -27,7 +28,7 @@ class CategoryClassifier:
         - Return confidence for how certain you are about the category.
         - Confidence MUST be a number between 0 and 100.
         - Return valid JSON only.
-        
+
         Format:
         {
             "category": "...",
@@ -38,9 +39,9 @@ class CategoryClassifier:
         user_prompt = f"""
         PRODUCT:
         {json.dumps(product, ensure_ascii=False)}
-        
+
         AVAILABLE CATEGORIES:
-        
+
         {json.dumps(self.categories, ensure_ascii=False)}
         """
 
@@ -81,7 +82,9 @@ class CategoryClassifier:
                 raw_confidence = float(raw_confidence)
             except ValueError:
                 raw_confidence = 0
-        confidence = float(raw_confidence) if isinstance(raw_confidence, (int, float)) else 0
+        confidence = (
+            float(raw_confidence) if isinstance(raw_confidence, (int, float)) else 0
+        )
         if 0 <= confidence <= 1:
             confidence *= 100
         data["confidence"] = max(0, min(100, int(round(confidence))))
@@ -122,9 +125,11 @@ async def main():
 
 
 if __name__ == "__main__":
-    from app.core.configs import settings
-    from .gpt_helper import GPTHelper
     import asyncio
+
+    from app.core.configs import settings
+
+    from .gpt_helper import GPTHelper
 
     res = asyncio.run(main())
     print(res)

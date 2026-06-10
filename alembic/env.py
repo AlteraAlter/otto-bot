@@ -5,22 +5,21 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from alembic import context
-
-from app.database import Base, DATABASE_URL
-import app.models.products
-import app.models.product_attributes
-import app.models.product_import_tasks
-import app.models.jv_lister
-import app.models.users
-import app.models.user_roles
-import app.models.factories
-import app.models.factory_task_states
+import app.models.attribute_allowed_values
+import app.models.attributes
 import app.models.categories
 import app.models.category_group
-import app.models.attributes
-import app.models.attribute_allowed_values
+import app.models.factories
+import app.models.factory_task_states
+import app.models.jv_lister
+import app.models.product_attributes
+import app.models.product_import_tasks
+import app.models.products
+import app.models.user_roles
+import app.models.users
 import app.models.variation_theme
+from alembic import context
+from app.database import DATABASE_URL, Base
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

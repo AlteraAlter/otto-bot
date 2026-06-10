@@ -1,5 +1,6 @@
-from pydantic import BaseModel
 from typing import TypeVar
+
+from pydantic import BaseModel
 
 
 def to_json(model: BaseModel) -> dict:

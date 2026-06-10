@@ -11,7 +11,7 @@ class BulletPointGenerator:
     async def generate_bullet_points(self, product: dict):
         remaining = 5 - len(product["bulletPoints"])
 
-        system_prompt = f"""
+        system_prompt = """
         You are a professional OTTO marketplace copywriter.
 
         Your task is to create sales-oriented bullet points.
@@ -40,7 +40,7 @@ class BulletPointGenerator:
         - Instead explain WHY the feature is useful.
         - Every bullet must be unique.
         - Maximum 100 characters per bullet.
-        
+
         Only mention features that can reasonably be inferred from the product data.
 
         Do not invent:
@@ -157,8 +157,9 @@ async def main():
 
 if __name__ == "__main__":
     import asyncio
-    from .gpt_helper import GPTHelper
+
     from ..core.configs import settings
+    from .gpt_helper import GPTHelper
 
     res = asyncio.run(main())
     print(res)

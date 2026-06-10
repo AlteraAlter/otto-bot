@@ -52,10 +52,14 @@ def _parse_specifics(xml_data: Any) -> dict[str, str]:
     return result
 
 
-def _direct_attributes(source: dict[str, Any], specifics: dict[str, str]) -> list[dict[str, Any]]:
+def _direct_attributes(
+    source: dict[str, Any], specifics: dict[str, str]
+) -> list[dict[str, Any]]:
     candidates = {
         "Breite": _pick_text(source.get("Breite"), specifics.get("Breite")),
-        "Tiefe": _pick_text(source.get("Länge"), source.get("Tiefe"), specifics.get("Tiefe")),
+        "Tiefe": _pick_text(
+            source.get("Länge"), source.get("Tiefe"), specifics.get("Tiefe")
+        ),
         "Höhe": _pick_text(source.get("Höhe"), specifics.get("Höhe")),
         "Wohnraum": _pick_text(source.get("Zimmer"), specifics.get("Zimmer")),
         "Material": _pick_text(source.get("Material"), specifics.get("Material")),
@@ -72,10 +76,14 @@ def _media_assets(source: dict[str, Any]) -> list[dict[str, str]]:
     assets: list[dict[str, str]] = []
     for key, value in source.items():
         key_text = str(key).lower()
-        if not any(token in key_text for token in ("image", "bild", "picture", "foto", "media")):
+        if not any(
+            token in key_text for token in ("image", "bild", "picture", "foto", "media")
+        ):
             continue
         location = _pick_text(value)
-        if location and (location.startswith("http://") or location.startswith("https://")):
+        if location and (
+            location.startswith("http://") or location.startswith("https://")
+        ):
             assets.append({"type": "IMAGE", "location": location})
 
     direct = source.get("mediaAssets")
@@ -83,9 +91,13 @@ def _media_assets(source: dict[str, Any]) -> list[dict[str, str]]:
         for item in direct:
             if not isinstance(item, dict):
                 continue
-            location = _pick_text(item.get("location"), item.get("filename"), item.get("url"))
+            location = _pick_text(
+                item.get("location"), item.get("filename"), item.get("url")
+            )
             if location:
-                assets.append({"type": str(item.get("type") or "IMAGE"), "location": location})
+                assets.append(
+                    {"type": str(item.get("type") or "IMAGE"), "location": location}
+                )
 
     seen: set[str] = set()
     unique: list[dict[str, str]] = []
@@ -97,8 +109,12 @@ def _media_assets(source: dict[str, Any]) -> list[dict[str, str]]:
     return unique
 
 
-def _description(source: dict[str, Any], specifics: dict[str, str], max_chars: int = 2000) -> str:
-    title = _pick_text(source.get("Artikelbeschreibung"), source.get("title"), source.get("name"))
+def _description(
+    source: dict[str, Any], specifics: dict[str, str], max_chars: int = 2000
+) -> str:
+    title = _pick_text(
+        source.get("Artikelbeschreibung"), source.get("title"), source.get("name")
+    )
     details = [
         title,
         _pick_text(source.get("Beschreibung"), source.get("description")),

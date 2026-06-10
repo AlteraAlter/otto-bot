@@ -1,8 +1,8 @@
 """Authentication helper for OTTO client-credentials token retrieval."""
 
-from typing import Optional
-import httpx
 import time
+
+import httpx
 
 
 class OttoAuth:

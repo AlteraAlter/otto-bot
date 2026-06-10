@@ -4,11 +4,12 @@ These schemas describe the canonical request body shape used when creating or
 updating products through OTTO APIs.
 """
 
-from pydantic import BaseModel, HttpUrl, RootModel, ConfigDict
-from typing import List, Optional
 from datetime import datetime
+from typing import List, Optional
 
-from app.schemas.enums import ShippingProfileEnum, Controller
+from pydantic import BaseModel, ConfigDict, HttpUrl, RootModel
+
+from app.schemas.enums import Controller, ShippingProfileEnum
 
 
 class Attribute(BaseModel):
@@ -200,19 +201,16 @@ class Status(BaseModel):
 
 
 class UpdateQuantity(BaseModel):
-
     sku: str
     quantity: str
 
 
 class UpdateQuantityRequest(BaseModel):
-
     list[UpdateQuantity]
     controller: Controller = Controller.JV
 
 
 class UpdateProductDelivery(BaseModel):
-
     sku: str
     processingTime: str = "DEFAULT"
     shippingProfileId: ShippingProfileEnum
@@ -229,4 +227,3 @@ class Availability(BaseModel):
 class AvailabilityRequest(BaseModel):
     availability: list[Availability]
     controller: Controller = Controller.JV
-    
