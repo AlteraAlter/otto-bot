@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, Box, Check, CheckCircle2, ChevronLeft, ChevronRight, Copy, Funnel, Package, Pencil, RefreshCw, Search, Trash2, TriangleAlert, X } from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
+import { AlertCircle, Box, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Funnel, MoreVertical, Package, Pencil, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
 
 import { readApiErrorMessage, readJsonResponse } from "../lib/api";
 import { useCurrentUser } from "../hooks/use-current-user";
@@ -18,7 +18,10 @@ const AVAILABILITY_CONCURRENCY = 10;
 
 type FabricOption = { id: string; name: string; items_count?: number };
 type FabricListResponse = { factory?: FabricOption[] };
-type CategoryListResponse = { success?: boolean; items?: string[] };
+type CategoryGroupCategoriesResponse = {
+  success?: boolean;
+  items?: { categoryGroup?: string; categories?: string[] }[];
+};
 type ShippingProfileOption = { id: string; name: string };
 type CreateFromFabricResponse = {
   success?: boolean;
@@ -90,9 +93,59 @@ type OttoErrorRow = {
 };
 type AiCategoryReview = {
   category: string;
-  confidence: number;
+  categoryGroup: string;
 };
-type CategoryReviewStatus = "confirmed" | "requires_review" | "manually_changed" | "manually_confirmed";
+type CategoryReviewStatus = "confirmed" | "requires_review" | "manually_changed" | "manually_confirmed" | "skipped";
+type CategoryStatusFilter = "all" | "requires_review" | "confirmed" | "manually_changed" | "skipped";
+type CategorySortOption = "title" | "status";
+type ProductReviewStatus = "pending" | "approved" | "modified" | "rejected";
+type ReviewQueueFilter = "all" | ProductReviewStatus;
+type CategoryChangeEvent = {
+  at: string;
+  by: string;
+  from: string;
+  to: string;
+  comment?: string;
+};
+type CategoryCheckRow = {
+  index: number;
+  image: string;
+  title: string;
+  sku: string;
+  ean: string;
+  sourceCategory: string;
+  aiCategory: string;
+  aiCategoryGroup: string;
+  selectedCategory: string;
+  confidence: number;
+  shippingProfileId: string;
+  shippingProfileName: string;
+  productReference: string;
+  price: string;
+  productLine: string;
+  errors: number;
+  status: "passed" | "failed" | "processing" | "pending";
+};
+type ProductReviewRow = CategoryCheckRow & {
+  reviewStatus: ProductReviewStatus;
+};
+type CategoryAttributeOption = {
+  id?: string | number | null;
+  attributeId?: string | number | null;
+  attributeKey?: string | null;
+  name: string;
+  description?: string | null;
+  type?: string | null;
+  multiValue?: boolean;
+  relevance?: string | null;
+  unit?: string | null;
+  allowedValues?: string[];
+};
+type CategoryAttributesResponse = {
+  items?: CategoryAttributeOption[];
+  total?: number;
+  categoryGroup?: string | null;
+};
 type ParsedSkuError = {
   sku: string;
   code: string;
@@ -101,9 +154,18 @@ type ParsedSkuError = {
   jsonPath: string;
 };
 
-type EditorTab = "general" | "attributes" | "json";
+type EditorTab = "general" | "attributes" | "diff" | "json";
 type AttributeEditField = "values";
-type WorkflowStep = "categories" | "details";
+type BulkAttributePatch = {
+  rowId: number;
+  name: string;
+  value: string;
+  attributeId?: string;
+  attributeKey?: string;
+  unit?: string;
+};
+type BulkAttributeFailure = { productIndex: number; reason: string };
+type WorkflowStep = "categories" | "compare" | "details";
 const SHIPPING_PROFILE_LABELS: Record<string, string> = {
   "786c6468-3baf-52e0-88b5-13757eb7f873": "4-8 недель",
   "360835cf-4962-59bb-ae66-78e8a41c8948": "6-10 недель",
@@ -129,6 +191,53 @@ function updateProductField(product: Record<string, unknown>, path: string[], va
   }
   cursor[path[path.length - 1]] = value;
   return next;
+}
+
+function bulkUpsertProductAttributes(
+  sourceProducts: Record<string, unknown>[],
+  productIndexes: number[],
+  patches: BulkAttributePatch[],
+): { products: Record<string, unknown>[]; updatedIndexes: number[]; failures: BulkAttributeFailure[] } {
+  const products = [...sourceProducts];
+  const updatedIndexes: number[] = [];
+  const failures: BulkAttributeFailure[] = [];
+
+  for (const productIndex of productIndexes) {
+    const sourceProduct = products[productIndex];
+    if (!sourceProduct || typeof sourceProduct !== "object") {
+      failures.push({ productIndex, reason: "Product is no longer available." });
+      continue;
+    }
+    try {
+      const product = asRecord(sourceProduct);
+      const description = asRecord(product.productDescription);
+      const attributes = Array.isArray(description.attributes) ? [...description.attributes] : [];
+      for (const patch of patches) {
+        const patchId = String(patch.attributeId ?? "").trim();
+        const patchKey = String(patch.attributeKey ?? "").trim().toLowerCase();
+        const patchName = normalizeFieldToken(patch.name);
+        const existingIndex = attributes.findIndex((item) => {
+          const attribute = asRecord(item);
+          const attributeId = String(attribute.attribute_id ?? attribute.attributeId ?? "").trim();
+          const attributeKey = String(attribute.attribute_key ?? attribute.attributeKey ?? "").trim().toLowerCase();
+          if (patchId && attributeId) return patchId === attributeId;
+          if (patchKey && attributeKey) return patchKey === attributeKey;
+          return Boolean(patchName) && normalizeFieldToken(String(attribute.name ?? "")) === patchName;
+        });
+        const values = patch.value.split(",").map((value) => value.trim()).filter(Boolean);
+        if (existingIndex >= 0) {
+          attributes[existingIndex] = { ...asRecord(attributes[existingIndex]), values };
+        } else {
+          attributes.push({ name: patch.name.trim(), values, additional: true, ...(patch.unit ? { unit: patch.unit } : {}) });
+        }
+      }
+      products[productIndex] = updateProductField(product, ["productDescription", "attributes"], attributes);
+      updatedIndexes.push(productIndex);
+    } catch (error) {
+      failures.push({ productIndex, reason: error instanceof Error ? error.message : "Unknown update error." });
+    }
+  }
+  return { products, updatedIndexes, failures };
 }
 
 function firstImage(product: Record<string, unknown>): string {
@@ -269,22 +378,21 @@ function productShippingProfileId(product: Record<string, unknown>): string {
 
 function readAiCategoryReview(product: Record<string, unknown>): AiCategoryReview {
   const description = asRecord(product.productDescription);
+  const categoryGroup = String(
+    product.aiCategoryGroup ??
+    product.categoryGroup ??
+    description.aiCategoryGroup ??
+    description.categoryGroup ??
+    "",
+  );
   return {
+    categoryGroup,
     category: String(
       product.aiCategory ??
       product.category ??
       description.aiCategory ??
       description.category ??
       "",
-    ),
-    confidence: Number(
-      product.aiCategoryConfidence ??
-      product.categoryConfidence ??
-      product.confidence ??
-      description.aiCategoryConfidence ??
-      description.categoryConfidence ??
-      description.confidence ??
-      0,
     ),
   };
 }
@@ -299,14 +407,1510 @@ function mergeAiCategoryReview(
   }
 
   const storedCategory = String(storedReview.category ?? "").trim();
+  const storedCategoryGroup = String(storedReview.categoryGroup ?? "").trim();
   const productCategory = String(productReview.category ?? "").trim();
-  const storedConfidence = Number(storedReview.confidence ?? 0);
-  const productConfidence = Number(productReview.confidence ?? 0);
+  const productCategoryGroup = String(productReview.categoryGroup ?? "").trim();
 
   return {
     category: storedCategory || productCategory,
-    confidence: productConfidence > 0 ? productConfidence : storedConfidence,
+    categoryGroup: storedCategoryGroup || productCategoryGroup,
   };
+}
+
+function productAftercoolData(product: Record<string, unknown>) {
+  const comparison = asRecord(product.aftercoolComparison);
+  return asRecord(comparison.aftercool);
+}
+
+function previewText(value: unknown, fallback = "-"): string {
+  const text = String(value ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return text || fallback;
+}
+
+function formatDiffValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    const values = value
+      .map((item) => {
+        if (typeof item === "string" || typeof item === "number" || typeof item === "boolean") return String(item);
+        return formatDiffValue(item);
+      })
+      .filter((item) => item && item !== "-");
+    return values.join("\n");
+  }
+  if (value && typeof value === "object") {
+    return JSON.stringify(value, null, 2);
+  }
+  return previewText(value);
+}
+
+function readComparisonAttributes(body: Record<string, unknown>): Record<string, string> {
+  const result: Record<string, string> = {};
+  const attributes = Array.isArray(body.attributes) ? body.attributes : [];
+  for (const item of attributes) {
+    const attribute = asRecord(item);
+    const name = String(attribute.name ?? attribute.attributeName ?? attribute.key ?? "").trim();
+    if (!name) continue;
+    result[name] = formatDiffValue(attribute.values ?? attribute.value ?? attribute.text ?? "");
+  }
+  return result;
+}
+
+function readDiffList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => formatDiffValue(item))
+      .filter((item) => item && item !== "-");
+  }
+  const text = previewText(value, "");
+  if (!text) return [];
+  return text
+    .split(/\r?\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function buildAftercoolRows(aftercool: ReturnType<typeof productAftercoolData>) {
+  const aftercoolAttributes = readComparisonAttributes(aftercool);
+  const aftercoolBulletPoints = readDiffList(aftercool.bulletPoints);
+  const baseRows = [
+    { label: "EAN", value: aftercool.ean },
+    { label: "Title", value: aftercool.title },
+    { label: "Description", value: aftercool.description },
+    { label: "Price", value: aftercool.price },
+    { label: "Category", value: aftercool.category },
+  ];
+  const bulletPointRows = aftercoolBulletPoints.map((value, index) => ({
+    label: `Bullet Point ${index + 1}`,
+    value,
+  }));
+  const attributeNames = Object.keys(aftercoolAttributes).sort((a, b) => a.localeCompare(b));
+  return [
+    ...baseRows,
+    ...bulletPointRows,
+    ...attributeNames.map((name) => ({
+      label: name,
+      value: aftercoolAttributes[name],
+    })),
+  ]
+    .map((item) => ({
+      label: item.label,
+      value: formatDiffValue(item.value),
+    }))
+    .filter((item) => item.value !== "-");
+}
+
+function statusText(status: CategoryReviewStatus): string {
+  if (status === "confirmed" || status === "manually_confirmed") return "Подтверждено";
+  if (status === "manually_changed") return "Изменено вручную";
+  if (status === "skipped") return "Пропущено";
+  return "Требует проверки";
+}
+
+function StatusBadge({ status }: { status: CategoryReviewStatus }) {
+  return <span className={`category-check-status-badge ${status}`}>{statusText(status)}</span>;
+}
+
+function CategoryCheckSummary({
+  categoryKpis,
+  processState,
+}: {
+  categoryKpis: { total: number; confirmed: number; requiresReview: number; manuallyChanged: number; skipped: number };
+  processState: string;
+}) {
+  return (
+    <div className="category-check-summary">
+      <div className="category-check-summary-top">
+        <h2>Проверка категорий</h2>
+        <Badge className={`creator-ref-status-badge ${processState === "DONE" ? "done" : processState === "FAILED" ? "failed" : "progress"}`}>
+          {processState === "DONE" ? "Готово" : processState === "FAILED" ? "Ошибка" : "Подготовка"}
+        </Badge>
+      </div>
+      <p className="category-check-ready-copy">{`${categoryKpis.total} ${categoryKpis.total === 1 ? "товар готов" : "товаров готовы"} к проверке`}</p>
+      <div className="category-check-metrics">
+        <span className="category-check-metric neutral"><small>Всего</small><strong>{categoryKpis.total}</strong></span>
+        <span className="category-check-metric success"><small>Подтверждено</small><strong>{categoryKpis.confirmed}</strong></span>
+        <span className="category-check-metric warning"><small>На проверке</small><strong>{categoryKpis.requiresReview}</strong></span>
+        <span className="category-check-metric info"><small>Изменено</small><strong>{categoryKpis.manuallyChanged}</strong></span>
+        <span className="category-check-metric muted"><small>Пропущено</small><strong>{categoryKpis.skipped}</strong></span>
+      </div>
+    </div>
+  );
+}
+
+function CategoryCheckProgress({
+  currentStep,
+  processState,
+  progressPercent,
+  progressLabel,
+  preparationCounts,
+  realtimeMode,
+  processId,
+  ottoProcessId,
+  stepElapsed,
+  heartbeatLag,
+  copiedRuntimeField,
+  runtimeCopyErrorField,
+  copyText,
+}: {
+  currentStep: string;
+  processState: string;
+  progressPercent: number;
+  progressLabel: string;
+  preparationCounts: { source: number; mapped: number; payload: number };
+  realtimeMode: "websocket" | "polling";
+  processId: string;
+  ottoProcessId: string;
+  stepElapsed: number;
+  heartbeatLag: number;
+  copiedRuntimeField: string | null;
+  runtimeCopyErrorField: string | null;
+  copyText: (value: string, field: string) => void;
+}) {
+  const safeProgress = processState === "DONE"
+    ? 100
+    : Math.max(0, Math.min(100, Math.round(progressPercent || 0)));
+  return (
+    <div className="category-check-progress">
+      <div className="category-check-progress-main">
+        <div className="creator-ref-progress-head">
+          <div>
+            <strong>{processState === "DONE" ? "Подготовка завершена" : progressLabel}</strong>
+            <small>{realtimeMode === "websocket" ? "Обновляется в реальном времени" : "Обновляется через polling"}</small>
+          </div>
+          <span>{`${safeProgress}%`}</span>
+        </div>
+        <div className="creator-ref-progress-track" role="progressbar" aria-label="Прогресс подготовки товаров" aria-valuemin={0} aria-valuemax={100} aria-valuenow={safeProgress}>
+          <span style={{ width: `${safeProgress}%` }} />
+        </div>
+      </div>
+      <details className="category-check-tech">
+        <summary>Техническая информация</summary>
+        <div className="creator-ref-runtime">
+          <div className="category-check-tech-counts">
+            <span>{`Источник: ${preparationCounts.source}`}</span>
+            <span>{`Сопоставлено: ${preparationCounts.mapped}`}</span>
+            <span>{`Подготовлено: ${preparationCounts.payload}`}</span>
+            <span>{realtimeMode === "websocket" ? "WebSocket" : "Polling fallback"}</span>
+          </div>
+          {[
+            ["otto_process_id", "Otto Process ID", ottoProcessId],
+            ["process_id", "Process ID", processId],
+          ].map(([field, label, value]) => (
+            <div className="creator-ref-runtime-row" key={field}>
+              <span>{label}</span>
+              <code>{value || "-"}</code>
+              <button
+                type="button"
+                className={`creator-runtime-copy-btn ${copiedRuntimeField === field ? "is-copied" : runtimeCopyErrorField === field ? "is-error" : ""}`}
+                onClick={() => copyText(value || "-", field)}
+                disabled={!value}
+              >
+                {copiedRuntimeField === field ? <Check size={14} /> : <Copy size={14} />}
+                <span>{copiedRuntimeField === field ? "Скопировано" : runtimeCopyErrorField === field ? "Ошибка" : "Копировать"}</span>
+              </button>
+            </div>
+          ))}
+          <p>Шаг: <strong>{currentStep}</strong> · <strong>{Math.max(0, Math.round(stepElapsed))}s</strong> · heartbeat {Math.max(0, Math.round(heartbeatLag))}s</p>
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function CategoryCheckToolbar({
+  tableQuery,
+  setTableQuery,
+  statusFilter,
+  setStatusFilter,
+  categorySort,
+  setCategorySort,
+  setPage,
+}: {
+  tableQuery: string;
+  setTableQuery: (value: string) => void;
+  statusFilter: CategoryStatusFilter;
+  setStatusFilter: (value: CategoryStatusFilter) => void;
+  categorySort: CategorySortOption;
+  setCategorySort: (value: CategorySortOption) => void;
+  setPage: (value: number) => void;
+}) {
+  return (
+    <div className="category-check-toolbar">
+      <div className="creator-search-wrap category-check-search">
+        <Search size={16} className="creator-search-icon" />
+        <input
+          className="creator-search-input"
+          placeholder="Поиск по названию, EAN, SKU"
+          type="search"
+          value={tableQuery}
+          onChange={(event) => {
+            setTableQuery(event.target.value);
+            setPage(1);
+          }}
+        />
+      </div>
+      <select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as CategoryStatusFilter); setPage(1); }}>
+        <option value="all">Все статусы</option>
+        <option value="requires_review">Требуют проверки</option>
+        <option value="confirmed">Подтверждено</option>
+        <option value="manually_changed">Изменено вручную</option>
+        <option value="skipped">Пропущено</option>
+      </select>
+      <select value={categorySort} onChange={(event) => { setCategorySort(event.target.value as CategorySortOption); setPage(1); }}>
+        <option value="title">По названию</option>
+        <option value="status">По статусу</option>
+      </select>
+    </div>
+  );
+}
+
+function CategoryCheckBatchActions({
+  selectedCount,
+  selectedConfirmableCount,
+  editSelected,
+  confirmSelected,
+  skipSelected,
+  resetSelected,
+}: {
+  selectedCount: number;
+  selectedConfirmableCount: number;
+  editSelected: () => void;
+  confirmSelected: () => void;
+  skipSelected: () => void;
+  resetSelected: () => void;
+}) {
+  if (selectedCount === 0) return null;
+  return (
+    <div className="category-check-batch">
+      <strong>{`Выбрано: ${selectedCount}`}</strong>
+      <button className="primary-btn" type="button" onClick={editSelected}>Изменить категорию</button>
+      <button className="primary-btn" type="button" onClick={confirmSelected} disabled={selectedConfirmableCount === 0}>Подтвердить выбранные</button>
+      <button className="secondary-btn" type="button" onClick={skipSelected}>Пропустить выбранные</button>
+      <button className="secondary-btn" type="button" onClick={resetSelected}>Сбросить выбор</button>
+    </div>
+  );
+}
+
+function BulkCategoryEditDrawer({
+  open,
+  count,
+  groups,
+  options,
+  value,
+  setValue,
+  onClose,
+  onApply,
+}: {
+  open: boolean;
+  count: number;
+  groups: string[];
+  options: string[];
+  value: string;
+  setValue: (value: string) => void;
+  onClose: () => void;
+  onApply: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const hasSingleGroup = groups.length === 1;
+  const normalizedQuery = normalizeFieldToken(query);
+  const visibleOptions = options
+    .filter((option) => !normalizedQuery || normalizeFieldToken(option).includes(normalizedQuery))
+    .slice(0, 100);
+
+  useEffect(() => {
+    if (!open) {
+      setMenuOpen(false);
+      return;
+    }
+    setQuery(value);
+  }, [open, value]);
+
+  if (!open) return null;
+
+  return (
+    <div className="category-drawer-backdrop bulk-category-backdrop" onClick={onClose}>
+      <aside className="category-drawer bulk-category-drawer" onClick={(event) => event.stopPropagation()}>
+        <div className="category-drawer-head">
+          <div>
+            <h3>Массовое изменение категории</h3>
+            <p>Выберите одну подкатегорию для всех отмеченных товаров.</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button>
+        </div>
+        <div className="category-drawer-body">
+          <section className="bulk-selected-products">
+            <small>Выбрано товаров</small>
+            <strong>{count}</strong>
+          </section>
+          {hasSingleGroup ? (
+            <>
+              <div className="bulk-category-group">
+                <small>Category group</small>
+                <strong>{groups[0]}</strong>
+              </div>
+              <label className="bulk-category-field">
+                <span>Подкатегория</span>
+                <div className={`bulk-category-picker${menuOpen ? " is-open" : ""}`}>
+                  <Search size={16} aria-hidden="true" />
+                  <input
+                    value={query}
+                    placeholder="Найти категорию"
+                    onFocus={() => setMenuOpen(true)}
+                    onBlur={() => window.setTimeout(() => setMenuOpen(false), 120)}
+                    onChange={(event) => {
+                      setQuery(event.target.value);
+                      setValue("");
+                      setMenuOpen(true);
+                    }}
+                    aria-expanded={menuOpen}
+                    aria-autocomplete="list"
+                  />
+                  <ChevronDown size={16} aria-hidden="true" />
+                  {menuOpen ? (
+                    <div className="bulk-category-options" role="listbox">
+                      {visibleOptions.length ? visibleOptions.map((option) => {
+                        const active = option === value;
+                        return (
+                          <button
+                            className={active ? "is-selected" : ""}
+                            type="button"
+                            role="option"
+                            aria-selected={active}
+                            key={option}
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={() => {
+                              setValue(option);
+                              setQuery(option);
+                              setMenuOpen(false);
+                            }}
+                          >
+                            <span>{option}</span>
+                            {active ? <Check size={15} /> : null}
+                          </button>
+                        );
+                      }) : <div className="bulk-category-options-empty">Категории не найдены</div>}
+                    </div>
+                  ) : null}
+                </div>
+              </label>
+              {value ? <div className="bulk-category-selection"><Check size={15} /><span>Будет применено:</span><strong>{value}</strong></div> : null}
+            </>
+          ) : (
+            <div className="bulk-category-warning">
+              <AlertCircle size={18} />
+              <div>
+                <strong>Выбраны товары из разных Category group</strong>
+                <span>Для массового изменения выберите товары только из одной группы.</span>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="bulk-category-footer">
+          <button className="secondary-btn" type="button" onClick={onClose}>Отмена</button>
+          <button className="primary-btn" type="button" disabled={!hasSingleGroup || !value || count === 0} onClick={onApply}>
+            {`Применить к ${count} товарам`}
+          </button>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function CategoryCheckTable({
+  rows,
+  categoryRowStatuses,
+  selectedCategoryIndexSet,
+  allFilteredRowsSelected,
+  toggleAllFilteredRows,
+  toggleCategorySelection,
+  confirmCategoryRows,
+  openDetails,
+  selectedIndex,
+  setSelectedIndex,
+  pageSize,
+  setPageSize,
+  safePage,
+  totalPages,
+  paginationItems,
+  setPage,
+  filteredCount,
+  state,
+  processState,
+  rowNumberStart,
+}: {
+  rows: CategoryCheckRow[];
+  categoryRowStatuses: Record<number, CategoryReviewStatus>;
+  selectedCategoryIndexSet: Set<number>;
+  allFilteredRowsSelected: boolean;
+  toggleAllFilteredRows: () => void;
+  toggleCategorySelection: (rowIndex: number) => void;
+  confirmCategoryRows: (rowIndexes: number[]) => void;
+  openDetails: (rowIndex: number) => void;
+  selectedIndex: number;
+  setSelectedIndex: (index: number) => void;
+  pageSize: number;
+  setPageSize: (value: number) => void;
+  safePage: number;
+  totalPages: number;
+  paginationItems: Array<number | "...">;
+  setPage: (updater: number | ((value: number) => number)) => void;
+  filteredCount: number;
+  state: UploadState;
+  processState: string;
+  rowNumberStart: number;
+}) {
+  return (
+    <>
+      <div className="category-check-table-scroll">
+        <table className="category-check-table">
+          <thead>
+            <tr>
+              <th><input type="checkbox" checked={allFilteredRowsSelected} onChange={toggleAllFilteredRows} aria-label="Выбрать все товары" /></th>
+              <th>№</th>
+              <th>Название товара</th>
+              <th>EAN / SKU</th>
+              <th>Категория</th>
+              <th>Статус</th>
+              <th>Действия</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, displayIndex) => {
+              const reviewStatus = categoryRowStatuses[row.index] ?? "requires_review";
+              return (
+                <tr
+                  key={row.index}
+                  className={selectedIndex === row.index ? "is-selected" : ""}
+                  onClick={() => {
+                    setSelectedIndex(row.index);
+                    openDetails(row.index);
+                  }}
+                >
+                  <td data-label="Выбор" onClick={(event) => event.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selectedCategoryIndexSet.has(row.index)}
+                      onChange={() => toggleCategorySelection(row.index)}
+                      aria-label={`Выбрать товар ${row.title || row.ean || row.sku || row.index}`}
+                    />
+                  </td>
+                  <td data-label="№">{rowNumberStart + displayIndex + 1}</td>
+                  <td data-label="Название товара">
+                    <div className="category-check-title-cell" title={row.title || "-"}>
+                      {row.image ? <img src={row.image} alt="" /> : <span className="category-check-no-image">-</span>}
+                      <strong>{row.title || "-"}</strong>
+                    </div>
+                  </td>
+                  <td data-label="EAN / SKU">
+                    <div className="category-check-code-cell">
+                      <span>{row.ean || "-"}</span>
+                      <code>{row.sku || "-"}</code>
+                    </div>
+                  </td>
+                  <td data-label="Категория">
+                    <div className="category-check-ai-cell">
+                      {row.selectedCategory.trim() !== row.aiCategory.trim() ? (
+                        <div className="category-check-category-diff" aria-label="Категория изменена">
+                          <div className="removed">
+                            <span aria-hidden="true">−</span>
+                            <del>{row.aiCategory || "Без категории"}</del>
+                          </div>
+                          <div className="added">
+                            <span aria-hidden="true">+</span>
+                            <ins>{row.selectedCategory || "Без категории"}</ins>
+                          </div>
+                        </div>
+                      ) : (
+                        <strong>{row.selectedCategory || row.aiCategory || "-"}</strong>
+                      )}
+                      <span>{row.aiCategoryGroup || "-"}</span>
+                    </div>
+                  </td>
+                  <td data-label="Статус"><StatusBadge status={reviewStatus} /></td>
+                  <td data-label="Действия" onClick={(event) => event.stopPropagation()}>
+                    <div className="category-check-row-actions">
+                      <button type="button" onClick={() => confirmCategoryRows([row.index])} disabled={state === "loading" || reviewStatus === "confirmed" || reviewStatus === "manually_confirmed"}>Подтвердить</button>
+                      <button type="button" onClick={() => { setSelectedIndex(row.index); openDetails(row.index); }}>Детали</button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {rows.length === 0 ? (
+        <div className="creator-products-empty">
+          <div className="creator-products-empty-title">
+            <Package size={28} aria-hidden="true" />
+            <strong>{processState === "IN_PROGRESS" ? "Жду готовые категории" : "Нет товаров"}</strong>
+          </div>
+          <p>{processState === "IN_PROGRESS" ? "Товары появятся здесь по мере готовности AI category mapping." : "Измените фильтры или запустите подготовку товаров."}</p>
+        </div>
+      ) : null}
+      <div className="creator-products-pagination category-check-pagination">
+        <div className="creator-products-pagination-left">
+          <select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}>
+            {[25, 50, 100, 200].map((item) => <option key={item} value={item}>{`${item} на странице`}</option>)}
+          </select>
+          <span>{`${filteredCount === 0 ? 0 : (safePage - 1) * pageSize + 1}-${Math.min(safePage * pageSize, filteredCount)} из ${filteredCount}`}</span>
+        </div>
+        <div className="creator-products-pagination-right">
+          <button type="button" disabled={safePage <= 1} onClick={() => setPage((prev) => Math.max(1, prev - 1))}><ChevronLeft size={14} /></button>
+          {paginationItems.map((item, idx) => typeof item === "number" ? (
+            <button key={`${item}-${idx}`} type="button" className={item === safePage ? "active" : ""} onClick={() => setPage(item)}>{item}</button>
+          ) : (
+            <span key={`${item}-${idx}`}>...</span>
+          ))}
+          <button type="button" disabled={safePage >= totalPages} onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}><ChevronRight size={14} /></button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function CategoryProductMedia({ row }: { row: CategoryCheckRow }) {
+  return (
+    <figure className="category-details-product-media">
+      {row.image ? (
+        <img src={row.image} alt={row.title || "Изображение товара"} />
+      ) : (
+        <div className="category-details-product-media-empty">
+          <Package size={48} aria-hidden="true" />
+          <span>Изображение недоступно</span>
+        </div>
+      )}
+      <figcaption>{row.title || "-"}</figcaption>
+    </figure>
+  );
+}
+
+function CategoryEditDrawer({
+  row,
+  categoryOptionsByGroup,
+  open,
+  onSave,
+  onClose,
+}: {
+  row: CategoryCheckRow | null;
+  categoryOptionsByGroup: Record<string, string[]>;
+  open: boolean;
+  onSave: (category: string, comment: string) => void;
+  onClose: () => void;
+}) {
+  if (!open || !row) return null;
+
+  return (
+    <div className="category-drawer-backdrop" onClick={onClose}>
+      <aside className="category-drawer" onClick={(event) => event.stopPropagation()}>
+        <div className="category-drawer-head">
+          <h3>Изменить категорию</h3>
+          <button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button>
+        </div>
+        <div className="category-drawer-body">
+          <CategoryProductMedia row={row} />
+          <CategoryChangeForm
+            currentGroup={row.aiCategoryGroup}
+            currentCategory={row.selectedCategory || row.aiCategory}
+            categoryOptionsByGroup={categoryOptionsByGroup}
+            onSave={onSave}
+            onCancel={onClose}
+            onDirtyChange={() => undefined}
+          />
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function CategoryDrawerHeader({ onClose }: { onClose: () => void }) {
+  return (
+    <header className="category-drawer-head category-review-header">
+      <div className="category-review-heading">
+        <h3>Проверка категории</h3>
+        <p>Проверьте товар по изображению и подтвердите AI-категорию</p>
+      </div>
+      <button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button>
+    </header>
+  );
+}
+
+function ProductImageCard({ row }: { row: CategoryCheckRow }) {
+  return row.image ? (
+    <img className="category-review-product-image" src={row.image} alt={row.title || "Изображение товара"} />
+  ) : (
+    <div className="category-review-product-image-empty">
+      <Package size={42} aria-hidden="true" />
+      <span>Изображение отсутствует</span>
+    </div>
+  );
+}
+
+function ProductMeta({ row, status }: { row: CategoryCheckRow; status: CategoryReviewStatus }) {
+  return (
+    <div className="category-review-product-info">
+      <div className="category-review-product-title"><strong>{row.title || "Без названия"}</strong></div>
+      <div className="category-review-identifiers"><span>{`SKU: ${row.sku || "-"} · EAN: ${row.ean || "-"}`}</span></div>
+      <div className="category-review-product-status"><StatusBadge status={status} /></div>
+    </div>
+  );
+}
+
+function StickyProductPreview({ row, status }: { row: CategoryCheckRow; status: CategoryReviewStatus }) {
+  return <section className="category-review-preview"><ProductImageCard row={row} /><ProductMeta row={row} status={status} /></section>;
+}
+
+function CategoryChangeForm({
+  currentGroup,
+  currentCategory,
+  categoryOptionsByGroup,
+  onSave,
+  onCancel,
+  onDirtyChange,
+  autoSave = false,
+}: {
+  currentGroup: string;
+  currentCategory: string;
+  categoryOptionsByGroup: Record<string, string[]>;
+  onSave: (category: string, comment: string) => void;
+  onCancel: () => void;
+  onDirtyChange: (dirty: boolean) => void;
+  autoSave?: boolean;
+}) {
+  const groups = useMemo(() => Object.keys(categoryOptionsByGroup).sort((a, b) => a.localeCompare(b)), [categoryOptionsByGroup]);
+  const [group, setGroup] = useState(currentGroup);
+  const [category, setCategory] = useState(currentCategory);
+  const [query, setQuery] = useState(currentCategory);
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const comboboxRef = useRef<HTMLDivElement>(null);
+  const categories = categoryOptionsByGroup[group] ?? [];
+  const matches = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    return categories.filter((item) => !normalized || item.toLocaleLowerCase().includes(normalized)).slice(0, 80);
+  }, [categories, query]);
+
+  useEffect(() => onDirtyChange(group !== currentGroup || category !== currentCategory), [group, category, currentGroup, currentCategory, onDirtyChange]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      if (!comboboxRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
+  }, [open]);
+
+  const choose = (value: string) => {
+    setCategory(value);
+    setQuery(value);
+    setOpen(false);
+    if (autoSave) onSave(value, "");
+  };
+  const cancel = () => {
+    setGroup(currentGroup);
+    setCategory(currentCategory);
+    setQuery(currentCategory);
+    setOpen(false);
+    setActiveIndex(0);
+    onCancel();
+  };
+
+  return (
+    <div className="category-change-form">
+      <div className="category-change-current"><span>Текущая AI-категория</span><strong>{currentCategory || "-"}</strong></div>
+      <label>Category group
+        <select value={group} onChange={(event) => { setGroup(event.target.value); setCategory(""); setQuery(""); setOpen(false); setActiveIndex(0); }}>
+          <option value="">Выберите Category group</option>
+          {groups.map((item) => <option value={item} key={item}>{item}</option>)}
+        </select>
+      </label>
+      <label>Новая подкатегория
+        <div className="category-combobox" ref={comboboxRef}>
+          <Search size={16} aria-hidden="true" />
+          <input
+            role="combobox"
+            aria-expanded={open}
+            aria-controls="category-options"
+            value={query}
+            placeholder={group ? "Поиск по подкатегориям" : "Сначала выберите Category group"}
+            disabled={!group}
+            onFocus={() => setOpen(true)}
+            onChange={(event) => { setQuery(event.target.value); setCategory(""); setOpen(true); setActiveIndex(0); }}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown") { event.preventDefault(); setOpen(true); setActiveIndex((value) => Math.min(value + 1, matches.length - 1)); }
+              if (event.key === "ArrowUp") { event.preventDefault(); setActiveIndex((value) => Math.max(value - 1, 0)); }
+              if (event.key === "Enter" && open && matches[activeIndex]) { event.preventDefault(); choose(matches[activeIndex]); }
+              if (event.key === "Escape") { event.stopPropagation(); setOpen(false); }
+            }}
+          />
+          <ChevronDown size={16} aria-hidden="true" />
+          {open ? <div className="category-combobox-options" id="category-options" role="listbox">
+            {matches.length ? matches.map((item, index) => (
+              <button className={index === activeIndex ? "active" : ""} type="button" role="option" aria-selected={category === item} key={item} onMouseDown={(event) => event.preventDefault()} onClick={() => choose(item)}>{item}</button>
+            )) : <span>Категории не найдены</span>}
+          </div> : null}
+        </div>
+      </label>
+      <div className="category-change-result"><span>Новая подкатегория</span><strong>{category || "Выберите подкатегорию"}</strong></div>
+      {!autoSave ? <div className="category-change-actions">
+        <button className="secondary-btn" type="button" onClick={cancel}>Отмена</button>
+        <button className="primary-btn" type="button" disabled={!category} onClick={() => onSave(category, "")}>Сохранить изменение</button>
+      </div> : null}
+    </div>
+  );
+}
+
+function CategoryDiff({ previous, next }: { previous: string; next: string }) {
+  if (!previous || !next || previous.trim() === next.trim()) return null;
+  return (
+    <div className="category-review-diff">
+      <div className="old-value"><span>Было</span><strong>{previous}</strong></div>
+      <div className="new-value"><span>Стало</span><strong>{next}</strong></div>
+    </div>
+  );
+}
+
+function CategoryReviewCard({ row, editing, categoryOptionsByGroup, onEditCancel, onDirtyChange, onSave }: {
+  row: CategoryCheckRow;
+  editing: boolean;
+  categoryOptionsByGroup: Record<string, string[]>;
+  onEditCancel: () => void;
+  onDirtyChange: (dirty: boolean) => void;
+  onSave: (category: string, comment: string) => void;
+}) {
+  return (
+    <section className="category-review-card category-review-ai-card">
+      <div className="category-review-ai-head">
+        <div><strong>AI-категория</strong><small>Текущая предложенная категория</small></div>
+      </div>
+      <CategoryDiff previous={row.aiCategory} next={row.selectedCategory} />
+      {editing ? <CategoryChangeForm currentGroup={row.aiCategoryGroup} currentCategory={row.selectedCategory || row.aiCategory} categoryOptionsByGroup={categoryOptionsByGroup} onSave={onSave} onCancel={onEditCancel} onDirtyChange={onDirtyChange} autoSave /> : <div className="category-review-ai-values">
+        <div><span>Выбранная Category group</span><strong>{row.aiCategoryGroup || "Category group не определена"}</strong></div>
+      </div>}
+    </section>
+  );
+}
+
+function DrawerAccordion({ title, children }: { title: string; children: ReactNode }) {
+  return <details className="category-review-card category-review-more"><summary>{title}<ChevronDown size={17} /></summary>{children}</details>;
+}
+
+function DrawerNavigation({ position, total, onPrevious, onNext }: { position: number; total: number; onPrevious: () => void; onNext: () => void }) {
+  return (
+    <div className="category-review-navigation">
+      <button className="secondary-btn" type="button" onClick={onPrevious} disabled={position <= 0}><ChevronLeft size={16} /> Предыдущий</button>
+      <span className="category-review-position">{`${Math.max(0, position) + 1} / ${total}`}</span>
+      <button className="secondary-btn" type="button" onClick={onNext} disabled={position < 0 || position >= total - 1}>Следующий <ChevronRight size={16} /></button>
+    </div>
+  );
+}
+
+function DrawerFooterActions({ position, total, onPrevious, onNext }: {
+  position: number;
+  total: number;
+  onPrevious: () => void;
+  onNext: () => void;
+}) {
+  return <footer className="category-drawer-actions category-review-actions">
+    <DrawerNavigation position={position} total={total} onPrevious={onPrevious} onNext={onNext} />
+  </footer>;
+}
+
+function CategoryReviewDrawer({
+  row,
+  status,
+  history,
+  categoryOptionsByGroup,
+  open,
+  onSave,
+  position,
+  total,
+  onPrevious,
+  onNext,
+  onClose,
+}: {
+  row: CategoryCheckRow | null;
+  status: CategoryReviewStatus;
+  history: CategoryChangeEvent[];
+  categoryOptionsByGroup: Record<string, string[]>;
+  open: boolean;
+  onSave: (category: string, comment: string) => void;
+  position: number;
+  total: number;
+  onPrevious: () => void;
+  onNext: () => void;
+  onClose: () => void;
+}) {
+  const [editing, setEditing] = useState(true);
+  const [dirty, setDirty] = useState(false);
+  useEffect(() => { setEditing(true); setDirty(false); }, [row?.index, open]);
+  const requestClose = () => {
+    if (dirty && !window.confirm("Есть несохранённые изменения. Закрыть без сохранения?")) return;
+    onClose();
+  };
+  const requestNavigation = (navigate: () => void) => { setDirty(false); navigate(); };
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") requestClose(); };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  });
+  if (!open || !row) return null;
+  return (
+    <div className="category-drawer-backdrop category-review-backdrop" onClick={requestClose}>
+      <aside className="category-drawer category-details-drawer" onClick={(event) => event.stopPropagation()}>
+        <CategoryDrawerHeader onClose={requestClose} />
+        <StickyProductPreview row={row} status={status} />
+        <div className="category-drawer-body category-review-body">
+          <CategoryReviewCard key={row.index} row={row} editing={editing} categoryOptionsByGroup={categoryOptionsByGroup} onEditCancel={() => { setEditing(true); setDirty(false); }} onDirtyChange={setDirty} onSave={(category, comment) => { onSave(category, comment); setDirty(false); }} />
+          <DrawerAccordion title="История изменений категории">
+            {history.length === 0 ? <p>Истории изменений нет.</p> : (
+              <ul className="category-history-list">
+                {history.map((item, index) => (
+                  <li key={`${item.at}-${index}`}>
+                    <strong>{`${item.from || "-"} -> ${item.to || "-"}`}</strong>
+                    <span>{`${item.by} · ${new Date(item.at).toLocaleString()}`}</span>
+                    {item.comment ? <p>{item.comment}</p> : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </DrawerAccordion>
+        </div>
+        <DrawerFooterActions position={position} total={total} onPrevious={() => requestNavigation(onPrevious)} onNext={() => requestNavigation(onNext)} />
+      </aside>
+    </div>
+  );
+}
+
+function reviewStatusLabel(status: ProductReviewStatus): string {
+  if (status === "approved") return "Approved";
+  if (status === "modified") return "Modified";
+  if (status === "rejected") return "Rejected";
+  return "Pending";
+}
+
+function ProductReviewPage({ children }: { children: ReactNode }) {
+  return <section className="product-review-page">{children}</section>;
+}
+
+function ProductListItem({
+  row,
+  active,
+  selected,
+  onOpen,
+  onToggle,
+}: {
+  row: ProductReviewRow;
+  active: boolean;
+  selected: boolean;
+  onOpen: () => void;
+  onToggle: () => void;
+}) {
+  return (
+    <article className={`product-review-list-item ${active ? "active" : ""}`} data-product-index={row.index}>
+      <span className="product-review-list-checkbox">
+        <input type="checkbox" checked={selected} onChange={onToggle} aria-label={`Select ${row.sku}`} />
+      </span>
+      <button type="button" className="product-review-list-open" onClick={onOpen}>
+        {row.image ? <img src={row.image} alt="" /> : <span className="product-review-list-no-image">-</span>}
+      </button>
+      <button type="button" className="product-review-list-copy" onClick={onOpen}>
+        <strong title={row.title}>{row.title || "-"}</strong>
+        <small>{`SKU: ${row.sku || "-"}`}</small>
+        <em>{row.selectedCategory || row.aiCategory || "-"}</em>
+      </button>
+      <span className={`product-review-status ${row.reviewStatus}`}>{reviewStatusLabel(row.reviewStatus)}</span>
+    </article>
+  );
+}
+
+function ProductList({
+  rows,
+  selectedIndex,
+  selectedReviewIndexes,
+  onSelect,
+  onToggleSelect,
+  searchRef,
+  query,
+  setQuery,
+  filter,
+  setFilter,
+}: {
+  rows: ProductReviewRow[];
+  selectedIndex: number;
+  selectedReviewIndexes: number[];
+  onSelect: (index: number) => void;
+  onToggleSelect: (index: number) => void;
+  searchRef: Ref<HTMLInputElement>;
+  query: string;
+  setQuery: (value: string) => void;
+  filter: ReviewQueueFilter;
+  setFilter: (value: ReviewQueueFilter) => void;
+}) {
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const activeItem = listRef.current?.querySelector<HTMLElement>(`[data-product-index="${selectedIndex}"]`);
+    activeItem?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [selectedIndex, rows]);
+
+  return (
+    <aside className="product-review-list">
+      <div className="product-review-list-tools">
+        <div className="creator-search-wrap">
+          <Search size={16} className="creator-search-icon" />
+          <input ref={searchRef} className="creator-search-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search SKU, EAN, product" />
+        </div>
+        <select value={filter} onChange={(event) => setFilter(event.target.value as ReviewQueueFilter)}>
+          <option value="all">All</option>
+          <option value="pending">Pending</option>
+          <option value="approved">Approved</option>
+          <option value="modified">Modified</option>
+          <option value="rejected">Rejected</option>
+        </select>
+      </div>
+      <div ref={listRef} className="product-review-list-scroll">
+        {rows.length === 0 ? (
+          <div className="product-review-empty"><strong>No products found</strong><span>Try changing filters or search query</span></div>
+        ) : rows.map((row) => (
+          <ProductListItem
+            key={row.index}
+            row={row}
+            active={selectedIndex === row.index}
+            selected={selectedReviewIndexes.includes(row.index)}
+            onOpen={() => onSelect(row.index)}
+            onToggle={() => onToggleSelect(row.index)}
+          />
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+function ProductReviewHeader({ row, image }: { row: ProductReviewRow | null; image: string }) {
+  if (!row) {
+    return <div className="product-review-empty workspace"><strong>Select a product to review</strong></div>;
+  }
+  return (
+    <section className="product-review-header">
+      {image ? <img src={image} alt="" /> : <div className="product-review-header-empty">No image</div>}
+      <div>
+        <h2>{row.title || "-"}</h2>
+        <dl>
+          <div><dt>SKU</dt><dd>{row.sku || "-"}</dd></div>
+          <div><dt>EAN</dt><dd>{row.ean || "-"}</dd></div>
+          <div><dt>Price</dt><dd>{row.price || "-"}</dd></div>
+          <div><dt>Category</dt><dd>{row.aiCategoryGroup || "-"}</dd></div>
+          <div><dt>Subcategory</dt><dd>{row.selectedCategory || "-"}</dd></div>
+        </dl>
+      </div>
+    </section>
+  );
+}
+
+function DiffViewer({ aftercool }: { aftercool: ReturnType<typeof productAftercoolData> }) {
+  const rows = buildAftercoolRows(aftercool);
+  return (
+    <section className="product-review-section product-review-aftercool">
+      <div className="product-review-section-head"><h3>Aftercool Data</h3></div>
+      <div className="product-review-diff">
+        <div className="product-review-diff-head"><span>Field</span><span>Value</span></div>
+        {rows.map((item) => (
+          <div className="product-review-diff-row" key={item.label}>
+            <strong>{item.label}</strong>
+            <pre>{item.value}</pre>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ReviewTabs({ value, setValue }: { value: EditorTab; setValue: (value: EditorTab) => void }) {
+  return (
+    <div className="product-review-tabs">
+      {[
+        ["general", "Overview"],
+        ["attributes", "Attributes"],
+        ["diff", "Diff"],
+        ["json", "JSON"],
+      ].map(([key, label]) => (
+        <button key={key} className={value === key ? "active" : ""} type="button" onClick={() => setValue(key as EditorTab)}>{label}</button>
+      ))}
+    </div>
+  );
+}
+
+type AttributeCard = { index: number; name: string; values: string; group: string };
+
+function AttributeBadges({ invalid }: { invalid: boolean }) {
+  return invalid ? <span className="attribute-badge is-invalid">Invalid</span> : null;
+}
+
+function ExclusiveActionsMenu({ children, className = "", label }: { children: ReactNode; className?: string; label: string }) {
+  const menuRef = useRef<HTMLDetailsElement>(null);
+  const menuId = useId();
+
+  useEffect(() => {
+    const closeOtherMenu = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== menuId && menuRef.current) menuRef.current.open = false;
+    };
+    window.addEventListener("product-review-action-menu-open", closeOtherMenu);
+    return () => window.removeEventListener("product-review-action-menu-open", closeOtherMenu);
+  }, [menuId]);
+
+  return (
+    <details ref={menuRef} className={`attribute-actions-menu${className ? ` ${className}` : ""}`} onToggle={() => {
+      if (menuRef.current?.open) window.dispatchEvent(new CustomEvent("product-review-action-menu-open", { detail: menuId }));
+    }}>
+      <summary aria-label={label}><MoreVertical size={17} /></summary>
+      {children}
+    </details>
+  );
+}
+
+function AttributeActionsMenu({ onEdit, onDelete, value }: { onEdit: () => void; onDelete: () => void; value: string }) {
+  return (
+    <ExclusiveActionsMenu label="Attribute actions">
+      <div>
+        <button type="button" onClick={onEdit}><Pencil size={14} /> Edit</button>
+        {value ? <button type="button" onClick={() => void navigator.clipboard?.writeText(value)}><Copy size={14} /> Copy value</button> : null}
+        <button type="button" className="is-danger" onClick={onDelete}><Trash2 size={14} /> Delete</button>
+      </div>
+    </ExclusiveActionsMenu>
+  );
+}
+
+function OverviewActionsMenu({ onEdit, onCopy, canCopy = true, copied = false }: { onEdit: () => void; onCopy?: () => void; canCopy?: boolean; copied?: boolean }) {
+  return (
+    <ExclusiveActionsMenu className="overview-actions-menu" label="Field actions">
+      <div>
+        <button type="button" onClick={onEdit}><Pencil size={14} /> Edit</button>
+        {onCopy && canCopy ? <button type="button" onClick={onCopy}>{copied ? <Check size={14} /> : <Copy size={14} />} {copied ? "Copied" : "Copy value"}</button> : null}
+      </div>
+    </ExclusiveActionsMenu>
+  );
+}
+
+function AttributeFieldEditor({ value, setValue, onSave, onCancel }: { value: string; setValue: (value: string) => void; onSave: () => void; onCancel: () => void }) {
+  return (
+    <div className="attribute-field-editor">
+      <input autoFocus value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => {
+        if (event.key === "Enter") onSave();
+        if (event.key === "Escape") onCancel();
+      }} />
+      <div><button type="button" onClick={onSave}>Save</button><button type="button" onClick={onCancel}>Cancel</button></div>
+    </div>
+  );
+}
+
+function AttributeFieldCard({ attribute, isEditing, editingDraft, setEditingDraft, onEdit, onSave, onCancel, onDelete, invalid }: {
+  attribute: AttributeCard;
+  isEditing: boolean;
+  editingDraft: string;
+  setEditingDraft: (value: string) => void;
+  onEdit: () => void;
+  onSave: () => void;
+  onCancel: () => void;
+  onDelete: () => void;
+  invalid: boolean;
+}) {
+  return (
+    <article className={`attribute-field-card${invalid ? " is-invalid" : ""}`}>
+      <div className="attribute-field-card-head">
+        <span>{attribute.name || "Unnamed"}</span>
+        <AttributeBadges invalid={invalid} />
+        {!isEditing ? <AttributeActionsMenu onEdit={onEdit} onDelete={onDelete} value={attribute.values} /> : null}
+      </div>
+      {isEditing ? (
+        <AttributeFieldEditor value={editingDraft} setValue={setEditingDraft} onSave={onSave} onCancel={onCancel} />
+      ) : (
+        <button type="button" className={`attribute-field-value${attribute.values ? "" : " is-empty"}`} onClick={onEdit}>
+          {attribute.values || "Not provided"}
+        </button>
+      )}
+      {invalid ? <p className="attribute-field-error">Check this value before approval.</p> : null}
+    </article>
+  );
+}
+
+function AttributeGroup({ title, items, editingAttribute, editingDraft, setEditingDraft, startAttributeEdit, saveAttributeEdit, cancelAttributeEdit, deleteAttribute, invalidNames }: {
+  title: string;
+  items: AttributeCard[];
+  editingAttribute: { index: number; field: AttributeEditField } | null;
+  editingDraft: string;
+  setEditingDraft: (value: string) => void;
+  startAttributeEdit: (index: number, field: AttributeEditField, value: string) => void;
+  saveAttributeEdit: () => void;
+  cancelAttributeEdit: () => void;
+  deleteAttribute: (index: number) => void;
+  invalidNames: Set<string>;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const tone = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const filled = items.filter((item) => item.values.trim()).length;
+  return (
+    <section className={`attribute-group-card tone-${tone}`}>
+      <button type="button" className="attribute-group-header" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+        <span><strong>{title}</strong><small>{`${filled} / ${items.length} filled`}</small></span>
+        {expanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+      </button>
+      {expanded ? <div className="attribute-group-grid">{items.map((attribute) => (
+        <AttributeFieldCard
+          key={attribute.index}
+          attribute={attribute}
+          isEditing={editingAttribute?.index === attribute.index}
+          editingDraft={editingDraft}
+          setEditingDraft={setEditingDraft}
+          onEdit={() => startAttributeEdit(attribute.index, "values", attribute.values)}
+          onSave={saveAttributeEdit}
+          onCancel={cancelAttributeEdit}
+          onDelete={() => deleteAttribute(attribute.index)}
+          invalid={invalidNames.has(normalizeFieldToken(attribute.name))}
+        />
+      ))}</div> : null}
+    </section>
+  );
+}
+
+function MissingAttributeRow({ item, selected, onSelect }: { item: CategoryAttributeOption; selected: boolean; onSelect: () => void }) {
+  const priority = (item.relevance || "LOW").toUpperCase();
+  return (
+    <div className={`missing-attribute-row${selected ? " is-selected" : ""}`}>
+      <strong>{item.name}</strong><span>{item.unit || "—"}</span><span>{item.type || "—"}</span>
+      <span><i className={`priority-badge priority-${priority.toLowerCase()}`}>{priority}</i></span>
+      <button type="button" onClick={onSelect}>Add</button>
+    </div>
+  );
+}
+
+function MissingAttributesPanel({ availableAttributes, isLoading, error, selectedOption, valueOptions, newAttributeName, setNewAttributeName, newAttributeValue, setNewAttributeValue, addAttribute, open, setOpen }: {
+  availableAttributes: CategoryAttributeOption[]; isLoading: boolean; error: string; selectedOption: CategoryAttributeOption | null; valueOptions: string[];
+  newAttributeName: string; setNewAttributeName: (value: string) => void; newAttributeValue: string; setNewAttributeValue: (value: string) => void;
+  addAttribute: () => void; open: boolean; setOpen: (value: boolean) => void;
+}) {
+  const query = newAttributeName.trim().toLowerCase();
+  const visible = availableAttributes.filter((item) => !query || [item.name, item.description, item.relevance, item.unit, item.type].join(" ").toLowerCase().includes(query)).slice(0, 80);
+  return (
+    <section className="missing-attributes-panel">
+      <button type="button" className="missing-attributes-toggle" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <span><strong>Missing attributes</strong><small>{isLoading ? "Loading category attributes" : `${availableAttributes.length} available from category`}</small></span>
+        {open ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+      </button>
+      {open ? <div className="missing-attributes-content">
+        <div className="missing-attributes-form">
+          <input list="product-review-category-attributes" value={newAttributeName} onChange={(event) => setNewAttributeName(event.target.value)} placeholder="Search missing attributes..." aria-label="Search missing attributes" />
+          <datalist id="product-review-category-attributes">{availableAttributes.map((item) => <option value={item.name} key={item.name} />)}</datalist>
+          <input list="product-review-category-attribute-values" value={newAttributeValue} onChange={(event) => setNewAttributeValue(event.target.value)} placeholder={selectedOption?.unit ? `Value in ${selectedOption.unit}` : "Value"} aria-label="Attribute value" />
+          <datalist id="product-review-category-attribute-values">{valueOptions.map((value) => <option value={value} key={value} />)}</datalist>
+          <button className="primary-btn" type="button" onClick={addAttribute} disabled={!newAttributeName.trim() || !newAttributeValue.trim()}>Add</button>
+        </div>
+        {error ? <p className="attribute-field-error">{error}</p> : null}
+        <div className="missing-attribute-list">
+          <div className="missing-attribute-row is-head"><span>Attribute</span><span>Unit</span><span>Type</span><span>Priority</span><span /></div>
+          {visible.length ? visible.map((item) => <MissingAttributeRow key={item.name} item={item} selected={selectedOption?.name === item.name} onSelect={() => {
+            setNewAttributeName(item.name);
+            if ((item.allowedValues ?? []).length === 1) setNewAttributeValue(item.allowedValues?.[0] ?? "");
+          }} />) : <p className="missing-attributes-empty">{isLoading ? "Loading attributes..." : "No matching attributes."}</p>}
+        </div>
+      </div> : null}
+    </section>
+  );
+}
+
+function AttributesToolbar({ query, setQuery, group, setGroup, groups, onlyEmpty, setOnlyEmpty, onAdd }: { query: string; setQuery: (value: string) => void; group: string; setGroup: (value: string) => void; groups: string[]; onlyEmpty: boolean; setOnlyEmpty: (value: boolean) => void; onAdd: () => void }) {
+  return <div className="attributes-toolbar">
+    <label className="attributes-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search attributes..." aria-label="Search attributes" /></label>
+    <select value={group} onChange={(event) => setGroup(event.target.value)} aria-label="Filter by group"><option value="all">All groups</option>{groups.map((item) => <option key={item}>{item}</option>)}</select>
+    <label className="attributes-empty-toggle"><input type="checkbox" checked={onlyEmpty} onChange={(event) => setOnlyEmpty(event.target.checked)} /> Only empty</label>
+    <button type="button" className="attributes-add-button" onClick={onAdd}><Plus size={16} /> Add attribute</button>
+  </div>;
+}
+
+function AttributeEditor({
+  attributes,
+  categoryAttributes,
+  isLoadingCategoryAttributes,
+  categoryAttributesError,
+  newAttributeName,
+  setNewAttributeName,
+  newAttributeValue,
+  setNewAttributeValue,
+  addAttribute,
+  editingAttribute,
+  editingDraft,
+  setEditingDraft,
+  startAttributeEdit,
+  saveAttributeEdit,
+  cancelAttributeEdit,
+  deleteAttribute,
+  invalidAttributeNames,
+}: {
+  attributes: { index: number; name: string; values: string; group: string }[];
+  categoryAttributes: CategoryAttributeOption[];
+  isLoadingCategoryAttributes: boolean;
+  categoryAttributesError: string;
+  newAttributeName: string;
+  setNewAttributeName: (value: string) => void;
+  newAttributeValue: string;
+  setNewAttributeValue: (value: string) => void;
+  addAttribute: () => void;
+  editingAttribute: { index: number; field: AttributeEditField } | null;
+  editingDraft: string;
+  setEditingDraft: (value: string) => void;
+  startAttributeEdit: (index: number, field: AttributeEditField, value: string) => void;
+  saveAttributeEdit: () => void;
+  cancelAttributeEdit: () => void;
+  deleteAttribute: (index: number) => void;
+  invalidAttributeNames: Set<string>;
+}) {
+  const [query, setQuery] = useState("");
+  const [groupFilter, setGroupFilter] = useState("all");
+  const [onlyEmpty, setOnlyEmpty] = useState(false);
+  const [missingOpen, setMissingOpen] = useState(false);
+  const groups: Record<string, typeof attributes> = {
+    "Basic Information": [],
+    Dimensions: [],
+    Materials: [],
+    "Package Information": [],
+    "Additional Information": [],
+  };
+  for (const attr of attributes) {
+    const token = normalizeFieldToken(attr.name);
+    if (["category", "subcategory", "product type", "produktart", "room", "wohnraum", "zimmer"].some((key) => token.includes(key))) groups["Basic Information"].push(attr);
+    else if (["width", "height", "depth", "weight", "breite", "höhe", "tiefe"].some((key) => token.includes(key))) groups.Dimensions.push(attr);
+    else if (["material", "frame", "fabric", "filling", "gestell", "stoff"].some((key) => token.includes(key))) groups.Materials.push(attr);
+    else if (["set", "quantity", "parts", "anzahl", "teile"].some((key) => token.includes(key))) groups["Package Information"].push(attr);
+    else groups["Additional Information"].push(attr);
+  }
+  const existingNames = new Set(attributes.map((item) => item.name.trim().toLowerCase()).filter(Boolean));
+  const relevanceRank: Record<string, number> = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+  const availableAttributes = categoryAttributes
+    .filter((item) => item.name && !existingNames.has(item.name.trim().toLowerCase()))
+    .sort((left, right) => {
+      const leftRank = relevanceRank[(left.relevance || "LOW").toUpperCase()] ?? 3;
+      const rightRank = relevanceRank[(right.relevance || "LOW").toUpperCase()] ?? 3;
+      return leftRank - rightRank;
+    });
+  const selectedOption = categoryAttributes.find((item) => item.name.toLowerCase() === newAttributeName.trim().toLowerCase()) ?? null;
+  const valueOptions = selectedOption?.allowedValues ?? [];
+  const normalizedQuery = query.trim().toLowerCase();
+  const groupEntries = Object.entries(groups).map(([title, items]) => [title, items.filter((item) => {
+    if (onlyEmpty && item.values.trim()) return false;
+    return !normalizedQuery || `${item.name} ${item.values}`.toLowerCase().includes(normalizedQuery);
+  })] as const).filter(([title, items]) => items.length > 0 && (groupFilter === "all" || groupFilter === title));
+  return (
+    <div className="product-review-attributes">
+      <div className="attributes-title"><div><h3>Attributes</h3><p>{`${attributes.filter((item) => item.values.trim()).length} of ${attributes.length} filled`}</p></div></div>
+      <AttributesToolbar query={query} setQuery={setQuery} group={groupFilter} setGroup={setGroupFilter} groups={Object.keys(groups).filter((title) => groups[title].length > 0)} onlyEmpty={onlyEmpty} setOnlyEmpty={setOnlyEmpty} onAdd={() => setMissingOpen(true)} />
+      <MissingAttributesPanel availableAttributes={availableAttributes} isLoading={isLoadingCategoryAttributes} error={categoryAttributesError} selectedOption={selectedOption} valueOptions={valueOptions} newAttributeName={newAttributeName} setNewAttributeName={setNewAttributeName} newAttributeValue={newAttributeValue} setNewAttributeValue={setNewAttributeValue} addAttribute={addAttribute} open={missingOpen} setOpen={setMissingOpen} />
+      <div className="attribute-groups">{groupEntries.length ? groupEntries.map(([title, items]) => (
+        <AttributeGroup key={title} title={title} items={items} editingAttribute={editingAttribute} editingDraft={editingDraft} setEditingDraft={setEditingDraft} startAttributeEdit={startAttributeEdit} saveAttributeEdit={saveAttributeEdit} cancelAttributeEdit={cancelAttributeEdit} deleteAttribute={deleteAttribute} invalidNames={invalidAttributeNames} />
+      )) : <div className="attributes-empty-state">No attributes match these filters.</div>}</div>
+    </div>
+  );
+}
+
+function ErrorDrawer({ open, errors, onClose }: { open: boolean; errors: ParsedSkuError[]; onClose: () => void }) {
+  if (!open) return null;
+  return (
+    <div className="category-drawer-backdrop" onClick={onClose}>
+      <aside className="category-drawer" onClick={(event) => event.stopPropagation()}>
+        <div className="category-drawer-head"><h3>{`Errors (${errors.length})`}</h3><button type="button" onClick={onClose}><X size={18} /></button></div>
+        <div className="category-drawer-body">
+          {errors.length === 0 ? <p>No errors.</p> : errors.map((item, index) => (
+            <section className="product-review-error-card" key={`${item.sku}-${index}`}>
+              <strong>{item.code}</strong>
+              <span>{item.sku}</span>
+              <p>{item.message}</p>
+              <code>{item.jsonPath}</code>
+            </section>
+          ))}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function StickyActionBar({
+  onReject,
+  onSave,
+  onApprove,
+  onSubmit,
+  approved,
+  approvedCount,
+  totalCount,
+  allApproved,
+  disabled,
+}: {
+  onReject: () => void;
+  onSave: () => void;
+  onApprove: () => void;
+  onSubmit: () => void;
+  approved: boolean;
+  approvedCount: number;
+  totalCount: number;
+  allApproved: boolean;
+  disabled: boolean;
+}) {
+  return (
+    <div className="product-review-sticky-actions">
+      <div className="product-review-action-progress">
+        <span>Review progress</span>
+        <strong>{`${approvedCount} of ${totalCount} approved`}</strong>
+      </div>
+      <div className="product-review-action-buttons">
+        <button className="danger-btn" type="button" onClick={onReject} disabled={disabled}>Reject</button>
+        <button className="secondary-btn" type="button" onClick={onSave} disabled={disabled}>Save Draft</button>
+        <button className="primary-btn" type="button" onClick={onApprove} disabled={disabled}>{approved ? "Approved" : "Approve Product"}</button>
+        {allApproved ? <button className="primary-btn product-review-submit-btn" type="button" onClick={onSubmit} disabled={disabled}>Send to OTTO</button> : null}
+      </div>
+    </div>
+  );
+}
+
+function useBulkAttributeEdit() {
+  const nextRowId = useRef(2);
+  const [open, setOpen] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [rows, setRows] = useState<BulkAttributePatch[]>([{ rowId: 1, name: "", value: "" }]);
+  const updateRow = (rowId: number, patch: Partial<BulkAttributePatch>) => setRows((current) => current.map((row) => row.rowId === rowId ? { ...row, ...patch } : row));
+  const addRow = () => setRows((current) => [...current, { rowId: nextRowId.current++, name: "", value: "" }]);
+  const removeRow = (rowId: number) => setRows((current) => current.filter((row) => row.rowId !== rowId));
+  const reset = () => {
+    setOpen(false);
+    setConfirming(false);
+    setRows([{ rowId: nextRowId.current++, name: "", value: "" }]);
+  };
+  const validRows = rows.filter((row) => row.name.trim() && row.value.trim());
+  return { open, setOpen, confirming, setConfirming, rows, validRows, updateRow, addRow, removeRow, reset };
+}
+
+function BulkSelectionBar({ count, onBulkEdit, onApprove, onReject, onClear }: { count: number; onBulkEdit: () => void; onApprove: () => void; onReject: () => void; onClear: () => void }) {
+  if (count === 0) return null;
+  return (
+    <div className="bulk-selection-bar">
+      <strong>{`Selected: ${count} products`}</strong>
+      <div>
+        <button className="secondary-btn" type="button" onClick={onBulkEdit}>Bulk Edit Attributes</button>
+        <button className="danger-btn" type="button" onClick={onReject}>Reject Selected</button>
+        <button className="tertiary-btn" type="button" onClick={onClear}>Clear Selection</button>
+        <button className="primary-btn" type="button" onClick={onApprove}>Approve Selected</button>
+      </div>
+    </div>
+  );
+}
+
+function BulkAttributeRow({ row, options, onChange, onRemove }: { row: BulkAttributePatch; options: CategoryAttributeOption[]; onChange: (patch: Partial<BulkAttributePatch>) => void; onRemove: () => void }) {
+  const [attributeMenuOpen, setAttributeMenuOpen] = useState(false);
+  const selectedOption = options.find((item) => normalizeFieldToken(item.name) === normalizeFieldToken(row.name));
+  const valuesListId = `bulk-attribute-values-${row.rowId}`;
+  const query = normalizeFieldToken(row.name);
+  const visibleOptions = options.filter((item) => {
+    if (!query || selectedOption) return true;
+    return normalizeFieldToken(`${item.name} ${item.description ?? ""} ${item.type ?? ""} ${item.relevance ?? ""} ${item.unit ?? ""}`).includes(query);
+  }).slice(0, 80);
+  const selectAttribute = (option: CategoryAttributeOption) => {
+    onChange({
+      name: option.name,
+      attributeId: String(option.attributeId ?? option.id ?? "") || undefined,
+      attributeKey: option.attributeKey || undefined,
+      unit: option.unit || undefined,
+    });
+    setAttributeMenuOpen(false);
+  };
+  return <div className="bulk-attribute-row">
+    <div className="bulk-attribute-picker">
+      <div className="bulk-attribute-picker-input">
+        <input value={row.name} onFocus={() => setAttributeMenuOpen(true)} onBlur={() => window.setTimeout(() => setAttributeMenuOpen(false), 120)} onChange={(event) => {
+        const name = event.target.value;
+        const option = options.find((item) => normalizeFieldToken(item.name) === normalizeFieldToken(name));
+        onChange({
+          name,
+          attributeId: option ? String(option.attributeId ?? option.id ?? "") || undefined : undefined,
+          attributeKey: option?.attributeKey || undefined,
+          unit: option?.unit || undefined,
+        });
+        setAttributeMenuOpen(true);
+      }} placeholder="Search attribute..." aria-label="Attribute" aria-expanded={attributeMenuOpen} aria-autocomplete="list" />
+        <ChevronDown size={16} aria-hidden="true" />
+      </div>
+      {attributeMenuOpen ? <div className="bulk-attribute-options" role="listbox">
+        {visibleOptions.length ? visibleOptions.map((item) => {
+          const priority = (item.relevance || "LOW").toUpperCase();
+          const active = selectedOption === item;
+          return <button className={active ? "is-selected" : ""} type="button" role="option" aria-selected={active} key={`${item.attributeId ?? item.id ?? item.attributeKey ?? item.name}-${item.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => selectAttribute(item)}>
+            <span className="bulk-attribute-option-head"><strong>{item.name}</strong>{active ? <Check size={14} /> : null}</span>
+            {item.description ? <small>{item.description}</small> : <small className="is-empty">No description</small>}
+            <span className="bulk-attribute-requirements">
+              <i className={`priority-badge priority-${priority.toLowerCase()}`}>{priority}</i>
+              <i>{item.type || "Unknown type"}</i>
+              {item.unit ? <i>{`Unit: ${item.unit}`}</i> : null}
+              {item.multiValue ? <i>Multi-value</i> : <i>Single value</i>}
+            </span>
+          </button>;
+        }) : <div className="bulk-attribute-options-empty">No matching attributes</div>}
+      </div> : null}
+      {selectedOption ? <div className="bulk-selected-attribute-meta">
+        {selectedOption.description ? <p>{selectedOption.description}</p> : null}
+        <span className="bulk-attribute-requirements">
+          <i className={`priority-badge priority-${(selectedOption.relevance || "LOW").toLowerCase()}`}>{(selectedOption.relevance || "LOW").toUpperCase()}</i>
+          <i>{selectedOption.type || "Unknown type"}</i>
+          {selectedOption.unit ? <i>{`Unit: ${selectedOption.unit}`}</i> : null}
+          <i>{selectedOption.multiValue ? "Multi-value" : "Single value"}</i>
+        </span>
+      </div> : null}
+    </div>
+    <div>
+      <input list={valuesListId} value={row.value} onChange={(event) => onChange({ value: event.target.value })} placeholder={selectedOption?.unit ? `Value in ${selectedOption.unit}` : "Value"} aria-label="Value" />
+      <datalist id={valuesListId}>{(selectedOption?.allowedValues ?? []).map((value) => <option key={value} value={value} />)}</datalist>
+    </div>
+    <button type="button" onClick={onRemove} aria-label="Remove attribute"><Trash2 size={16} /></button>
+  </div>;
+}
+
+function BulkAttributeConfirmDialog({ count, attributes, onCancel, onApply }: { count: number; attributes: BulkAttributePatch[]; onCancel: () => void; onApply: () => void }) {
+  return <div className="bulk-confirm-backdrop" role="presentation" onClick={(event) => event.stopPropagation()}>
+    <section className="bulk-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="bulk-confirm-title">
+      <h3 id="bulk-confirm-title">Apply bulk changes?</h3>
+      <p>{`You are about to update ${count} products.`}</p>
+      <strong>Attributes to apply:</strong>
+      <ul>{attributes.map((attribute) => <li key={attribute.rowId}>{`${attribute.name} = ${attribute.value}`}</li>)}</ul>
+      <p>Existing values will be replaced.</p>
+      <div><button className="secondary-btn" type="button" onClick={onCancel}>Cancel</button><button className="primary-btn" type="button" onClick={onApply}>Apply Changes</button></div>
+    </section>
+  </div>;
+}
+
+function BulkAttributeEditDrawer({ count, options, isLoading, state, onClose, onApply }: {
+  count: number;
+  options: CategoryAttributeOption[];
+  isLoading: boolean;
+  state: ReturnType<typeof useBulkAttributeEdit>;
+  onClose: () => void;
+  onApply: (attributes: BulkAttributePatch[]) => void;
+}) {
+  if (!state.open) return null;
+  return <div className="category-drawer-backdrop bulk-attribute-backdrop" onClick={onClose}>
+    <aside className="category-drawer bulk-attribute-drawer" onClick={(event) => event.stopPropagation()}>
+      <div className="category-drawer-head"><div><h3>Bulk Edit Attributes</h3><p>Apply the same attributes to selected products. Existing values will be replaced.</p></div><button type="button" onClick={onClose}><X size={18} /></button></div>
+      <div className="category-drawer-body">
+        <section className="bulk-selected-products"><small>Selected products</small><strong>{`${count} products selected`}</strong></section>
+        <h4 className="bulk-attribute-builder-title">Attribute builder</h4>
+        <div className="bulk-attribute-columns"><span>Attribute</span><span>Value</span><span>Action</span></div>
+        <div className="bulk-attribute-rows">{state.rows.map((row) => <BulkAttributeRow key={row.rowId} row={row} options={options} onChange={(patch) => state.updateRow(row.rowId, patch)} onRemove={() => state.removeRow(row.rowId)} />)}</div>
+        {isLoading ? <div className="bulk-attribute-skeleton" aria-label="Loading category attributes"><span /><span /></div> : null}
+        <button className="bulk-add-row" type="button" onClick={state.addRow}><Plus size={15} /> Add another attribute</button>
+      </div>
+      <div className="bulk-attribute-footer"><button className="secondary-btn" type="button" onClick={onClose}>Cancel</button><button className="primary-btn" type="button" disabled={state.validRows.length === 0} onClick={() => state.setConfirming(true)}>{`Apply to ${count} products`}</button></div>
+    </aside>
+    {state.confirming ? <BulkAttributeConfirmDialog count={count} attributes={state.validRows} onCancel={() => state.setConfirming(false)} onApply={() => onApply(state.validRows)} /> : null}
+  </div>;
 }
 
 export default function CreatorPage() {
@@ -314,7 +1918,7 @@ export default function CreatorPage() {
   const [controller, setController] = useState<ControllerOption>("jv");
   const [fabrics, setFabrics] = useState<FabricOption[]>([]);
   const [shippingProfiles, setShippingProfiles] = useState<ShippingProfileOption[]>([]);
-  const [availableCategories, setAvailableCategories] = useState<string[]>([]);
+  const [categoryOptionsByGroup, setCategoryOptionsByGroup] = useState<Record<string, string[]>>({});
   const [selectedFabricId, setSelectedFabricId] = useState<string>("");
   const [state, setState] = useState<UploadState>("idle");
   const [isLoadingFabrics, setIsLoadingFabrics] = useState(false);
@@ -337,14 +1941,19 @@ export default function CreatorPage() {
   const [ottoErrors, setOttoErrors] = useState<OttoErrorRow[]>([]);
   const [lastSubmitTotal, setLastSubmitTotal] = useState(0);
   const [editorTab, setEditorTab] = useState<EditorTab>("general");
-  const [attributeQuery, setAttributeQuery] = useState("");
-  const [expandedAttributes, setExpandedAttributes] = useState<string[]>([]);
+  const [editingOverviewField, setEditingOverviewField] = useState<string | null>(null);
+  const [categoryAttributes, setCategoryAttributes] = useState<CategoryAttributeOption[]>([]);
+  const [isLoadingCategoryAttributes, setIsLoadingCategoryAttributes] = useState(false);
+  const [categoryAttributesError, setCategoryAttributesError] = useState("");
+  const [newAttributeName, setNewAttributeName] = useState("");
+  const [newAttributeValue, setNewAttributeValue] = useState("");
   const [editingAttribute, setEditingAttribute] = useState<{ index: number; field: AttributeEditField } | null>(null);
   const [editingDraft, setEditingDraft] = useState("");
-  const [showAllErrorCards, setShowAllErrorCards] = useState(false);
   const [tableQuery, setTableQuery] = useState("");
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [categoryStatusFilter, setCategoryStatusFilter] = useState<CategoryStatusFilter>("all");
+  const [categorySort, setCategorySort] = useState<CategorySortOption>("title");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [priceFrom, setPriceFrom] = useState("");
   const [priceTo, setPriceTo] = useState("");
@@ -357,16 +1966,47 @@ export default function CreatorPage() {
   const [tableStatusPhase, setTableStatusPhase] = useState<"pending" | "processing" | "result">("pending");
   const [selectedCategoryRowIndexes, setSelectedCategoryRowIndexes] = useState<number[]>([]);
   const [bulkCategoryValue, setBulkCategoryValue] = useState("");
+  const [isBulkCategoryDrawerOpen, setIsBulkCategoryDrawerOpen] = useState(false);
   const [confirmedCategoryRowIndexes, setConfirmedCategoryRowIndexes] = useState<number[]>([]);
+  const [skippedCategoryRowIndexes, setSkippedCategoryRowIndexes] = useState<number[]>([]);
+  const [categoryChangeHistoryByIndex, setCategoryChangeHistoryByIndex] = useState<Record<number, CategoryChangeEvent[]>>({});
+  const [categoryCommentsByIndex, setCategoryCommentsByIndex] = useState<Record<number, string>>({});
+  const [editingCategoryIndex, setEditingCategoryIndex] = useState<number | null>(null);
+  const [detailsCategoryIndex, setDetailsCategoryIndex] = useState<number | null>(null);
+  const [approvedComparisonRowIndexes, setApprovedComparisonRowIndexes] = useState<number[]>([]);
+  const [rejectedReviewRowIndexes, setRejectedReviewRowIndexes] = useState<number[]>([]);
+  const [selectedReviewRowIndexes, setSelectedReviewRowIndexes] = useState<number[]>([]);
+  const [bulkModifiedRowIndexes, setBulkModifiedRowIndexes] = useState<number[]>([]);
+  const [bulkToast, setBulkToast] = useState<{ message: string; error: boolean } | null>(null);
+  const [reviewQueueFilter, setReviewQueueFilter] = useState<ReviewQueueFilter>("all");
+  const [reviewSearchQuery, setReviewSearchQuery] = useState("");
+  const [isErrorDrawerOpen, setIsErrorDrawerOpen] = useState(false);
   const [taskProgress, setTaskProgress] = useState<TaskProgress>({ total: 0, completed: 0, percent: 0 });
+  const [preparationCounts, setPreparationCounts] = useState({ source: 0, mapped: 0, payload: 0 });
   const [realtimeMode, setRealtimeMode] = useState<"websocket" | "polling">("websocket");
+  const productsDraftSaveSkippedRef = useRef(false);
+  const serverDraftRestoreAttemptedRef = useRef(false);
+  const liveCategoryRowsCountRef = useRef(0);
+  const reviewSearchRef = useRef<HTMLInputElement>(null);
+  const bulkAttributeEdit = useBulkAttributeEdit();
+
+  useEffect(() => {
+    if (!bulkToast) return;
+    const timer = window.setTimeout(() => setBulkToast(null), 4500);
+    return () => window.clearTimeout(timer);
+  }, [bulkToast]);
 
   function setUiMessage(nextMessage: string) {
     setMessage(sanitizeUiMessage(nextMessage));
   }
 
-  function isItemProgressStep(step: string) {
-    return step.startsWith("ai_enrichment") || step === "building_category_preview";
+  function progressTitle(step: string) {
+    if (step === "building_category_preview") return "AI выбирает parent category";
+    if (step === "saving_snapshot") return "Сохраняю готовые категории";
+    if (step === "ai_enrichment_in_progress" || step === "ai_enrichment_queued") return "Создание товаров через AI";
+    if (step === "otto_create_queued" || step === "otto_create_in_progress") return "Отправка в OTTO";
+    if (step === "availability_in_progress") return "Отправка availability";
+    return "Подготовка данных";
   }
 
   function applyFrontendDraft(parsed: PrepareStatusResponse, options?: { preserveWorkflowStep?: boolean }) {
@@ -379,19 +2019,39 @@ export default function CreatorPage() {
     const storedConfirmedRows = Array.isArray(frontendDraft.confirmedCategoryRowIndexes)
       ? (frontendDraft.confirmedCategoryRowIndexes as number[])
       : [];
+    const storedApprovedComparisonRows = Array.isArray(frontendDraft.approvedComparisonRowIndexes)
+      ? (frontendDraft.approvedComparisonRowIndexes as number[])
+      : [];
+    const storedRejectedReviewRows = Array.isArray(frontendDraft.rejectedReviewRowIndexes)
+      ? (frontendDraft.rejectedReviewRowIndexes as number[])
+      : [];
+    const storedBulkModifiedRows = Array.isArray(frontendDraft.bulkModifiedRowIndexes)
+      ? (frontendDraft.bulkModifiedRowIndexes as number[])
+      : [];
+    const storedSkippedRows = Array.isArray(frontendDraft.skippedCategoryRowIndexes)
+      ? (frontendDraft.skippedCategoryRowIndexes as number[])
+      : [];
+    const storedCategoryHistory = asRecord(frontendDraft.categoryChangeHistoryByIndex) as Record<number, CategoryChangeEvent[]>;
+    const storedCategoryComments = asRecord(frontendDraft.categoryCommentsByIndex) as Record<number, string>;
     const storedOttoErrors = Array.isArray(frontendDraft.ottoErrors)
       ? (frontendDraft.ottoErrors as OttoErrorRow[])
       : [];
     const storedSummary = asRecord(frontendDraft.ottoSummary);
 
     setSelectedIndex(Number.isFinite(storedSelectedIndex) ? storedSelectedIndex : 0);
-    if (!options?.preserveWorkflowStep && (storedWorkflowStep === "categories" || storedWorkflowStep === "details")) {
+    if (!options?.preserveWorkflowStep && (storedWorkflowStep === "categories" || storedWorkflowStep === "compare" || storedWorkflowStep === "details")) {
       setWorkflowStep(storedWorkflowStep);
     }
     if (Object.keys(storedAiCategoryByIndex).length > 0) {
       setAiCategoryByIndex(storedAiCategoryByIndex);
     }
     setConfirmedCategoryRowIndexes(storedConfirmedRows);
+    setSkippedCategoryRowIndexes(storedSkippedRows);
+    setCategoryChangeHistoryByIndex(storedCategoryHistory);
+    setCategoryCommentsByIndex(storedCategoryComments);
+    setApprovedComparisonRowIndexes(storedApprovedComparisonRows);
+    setRejectedReviewRowIndexes(storedRejectedReviewRows);
+    setBulkModifiedRowIndexes(storedBulkModifiedRows);
     setTableStatusPhase(
       frontendDraft.tableStatusPhase === "processing" || frontendDraft.tableStatusPhase === "result"
         ? frontendDraft.tableStatusPhase
@@ -424,8 +2084,27 @@ export default function CreatorPage() {
       completed: Number((parsed as Record<string, unknown>)?.progress_completed ?? 0),
       percent: Number((parsed as Record<string, unknown>)?.progress_percent ?? 0),
     });
+    setPreparationCounts({
+      source: Number(parsed?.source_items ?? 0),
+      mapped: Number(parsed?.mapped_items ?? 0),
+      payload: Number(parsed?.payload_items ?? (Array.isArray(parsed?.products) ? parsed.products.length : 0)),
+    });
 
     const currentStepName = String(parsed?.current_step ?? "");
+    const liveRows = Array.isArray(parsed?.products) ? parsed.products : [];
+    if (liveRows.length > 0 && nextState === "IN_PROGRESS") {
+      if (currentStepName === "building_category_preview" && liveRows.length < liveCategoryRowsCountRef.current) return;
+      if (currentStepName === "building_category_preview") liveCategoryRowsCountRef.current = liveRows.length;
+      setProducts(liveRows);
+      // Partial products are compacted and can move to another array index while
+      // parallel normalization is still running. Rebuild the index-based review
+      // map from the same snapshot so stale categories cannot follow old indexes.
+      setAiCategoryByIndex(
+        Object.fromEntries(
+          liveRows.map((product, index) => [index, readAiCategoryReview(asRecord(product))]),
+        ),
+      );
+    }
     if ((nextState === "DONE" || nextState === "FAILED") && (currentStepName === "otto_create_done" || currentStepName === "availability_done" || currentStepName === "otto_create_failed")) {
       const update = asRecord(parsed?.otto_update_result);
       const failed = asRecord(parsed?.otto_failed_result);
@@ -481,9 +2160,13 @@ export default function CreatorPage() {
         applyFrontendDraft(parsed, { preserveWorkflowStep: true });
         setState("success");
         setSelectedIndex((current) => (current >= 0 && current < rows.length ? current : 0));
-        setWorkflowStep("details");
+        setWorkflowStep("compare");
         setTableStatusPhase("pending");
-        setUiMessage("AI-атрибуты и описания готовы. Проверьте товары перед финальной отправкой.");
+        setApprovedComparisonRowIndexes([]);
+        setRejectedReviewRowIndexes([]);
+        setSelectedReviewRowIndexes([]);
+        setBulkModifiedRowIndexes([]);
+        setUiMessage("AI-атрибуты и описания готовы. Сравните с Aftercool и approve-ните товары.");
         return;
       }
 
@@ -502,11 +2185,15 @@ export default function CreatorPage() {
       if (!asRecord((parsed as Record<string, unknown>)?.frontend_draft).aiCategoryByIndex) {
         setSelectedIndex(0);
         setConfirmedCategoryRowIndexes([]);
+        setSkippedCategoryRowIndexes([]);
+        setCategoryChangeHistoryByIndex({});
+        setCategoryCommentsByIndex({});
+        setApprovedComparisonRowIndexes([]);
         setWorkflowStep("categories");
         setTableStatusPhase("pending");
       }
       setState("success");
-      setUiMessage(`Подготовка завершена: source=${parsed?.source_items ?? 0}, mapped=${parsed?.mapped_items ?? 0}, payload=${parsed?.payload_items ?? rows.length}.`);
+      setUiMessage(`${parsed?.payload_items ?? rows.length} товаров готовы к проверке.`);
     }
     if (nextState === "FAILED") {
       setState("error");
@@ -587,6 +2274,36 @@ export default function CreatorPage() {
   ]);
 
   useEffect(() => {
+    if (!hydratedDraft || processId || serverDraftRestoreAttemptedRef.current) return;
+    serverDraftRestoreAttemptedRef.current = true;
+    let active = true;
+
+    async function restoreLatestAccountDraft() {
+      try {
+        const response = await fetch("/api/products/create-from-fabric/latest", {
+          method: "GET",
+          cache: "no-store",
+        });
+        const parsed = await readJsonResponse<PrepareStatusResponse>(response);
+        if (!active || !response.ok || !parsed || parsed.success === false || !parsed.process_id) return;
+
+        setProcessId(String(parsed.process_id));
+        setController(String((parsed as Record<string, unknown>).controller ?? "jv") as ControllerOption);
+        setSelectedFabricId(String((parsed as Record<string, unknown>).factory_id ?? ""));
+        applyProcessUpdate(parsed);
+        setUiMessage("Восстановлен незавершённый процесс создания с вашего аккаунта.");
+      } catch {
+        // A missing server draft is a valid clean-account state.
+      }
+    }
+
+    void restoreLatestAccountDraft();
+    return () => {
+      active = false;
+    };
+  }, [hydratedDraft, processId]);
+
+  useEffect(() => {
     if (!hydratedDraft || !processId || products.length > 0) return;
     let active = true;
 
@@ -612,6 +2329,11 @@ export default function CreatorPage() {
 
   useEffect(() => {
     if (!hydratedDraft || !processId || products.length === 0) return;
+    if (processState === "IN_PROGRESS") return;
+    if (!productsDraftSaveSkippedRef.current) {
+      productsDraftSaveSkippedRef.current = true;
+      return;
+    }
     if (currentStep.startsWith("ai_enrichment") && currentStep !== "ai_enrichment_done" && currentStep !== "ai_enrichment_failed") {
       return;
     }
@@ -621,12 +2343,41 @@ export default function CreatorPage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           products,
-          current_step: currentStep,
+        }),
+        cache: "no-store",
+      }).catch(() => {
+        // keep working locally if draft sync fails temporarily
+      });
+    }, 1400);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [
+    hydratedDraft,
+    processId,
+    processState,
+    products,
+  ]);
+
+  useEffect(() => {
+    if (!hydratedDraft || !processId || products.length === 0) return;
+    const timer = window.setTimeout(() => {
+      void fetch(`/api/products/create-from-fabric/${encodeURIComponent(processId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
           frontend_draft: {
             aiCategoryByIndex,
             selectedIndex,
             workflowStep,
             confirmedCategoryRowIndexes,
+            skippedCategoryRowIndexes,
+            categoryChangeHistoryByIndex,
+            categoryCommentsByIndex,
+            approvedComparisonRowIndexes,
+            rejectedReviewRowIndexes,
+            bulkModifiedRowIndexes,
             ottoProcessId,
             ottoSummary,
             ottoErrors,
@@ -638,7 +2389,7 @@ export default function CreatorPage() {
       }).catch(() => {
         // keep working locally if draft sync fails temporarily
       });
-    }, 900);
+    }, 600);
 
     return () => {
       window.clearTimeout(timer);
@@ -646,12 +2397,16 @@ export default function CreatorPage() {
   }, [
     hydratedDraft,
     processId,
-    products,
-    currentStep,
     aiCategoryByIndex,
     selectedIndex,
     workflowStep,
     confirmedCategoryRowIndexes,
+    skippedCategoryRowIndexes,
+    categoryChangeHistoryByIndex,
+    categoryCommentsByIndex,
+    approvedComparisonRowIndexes,
+    rejectedReviewRowIndexes,
+    bulkModifiedRowIndexes,
     ottoProcessId,
     ottoSummary,
     ottoErrors,
@@ -741,32 +2496,6 @@ export default function CreatorPage() {
   }, [controller]);
 
   useEffect(() => {
-    let active = true;
-    async function loadCategories() {
-      try {
-        const response = await fetch("/api/products/available-categories", {
-          method: "GET",
-          cache: "no-store",
-        });
-        const parsed = await readJsonResponse<CategoryListResponse>(response);
-        if (!active || !response.ok) return;
-        setAvailableCategories(
-          Array.isArray(parsed?.items)
-            ? parsed.items.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-            : [],
-        );
-      } catch {
-        if (!active) return;
-        setAvailableCategories([]);
-      }
-    }
-    void loadCategories();
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => {
     if (shippingProfiles.length === 0 || products.length === 0) return;
     const defaultProfileId = shippingProfiles[0]?.id ?? "";
     if (!defaultProfileId) return;
@@ -780,15 +2509,25 @@ export default function CreatorPage() {
   }, [shippingProfiles, products.length]);
 
   useEffect(() => {
-    if (!processId || processState !== "IN_PROGRESS" || realtimeMode !== "polling") return;
-    const timer = setInterval(async () => {
-      const response = await fetch(`/api/products/create-from-fabric/${processId}`, { method: "GET", cache: "no-store" });
-      const parsed = await readJsonResponse<PrepareStatusResponse>(response);
-      if (!response.ok || !parsed || parsed?.success === false) return;
-      applyProcessUpdate(parsed);
-    }, 1800);
-    return () => clearInterval(timer);
-  }, [processId, processState, realtimeMode]);
+    if (!processId || processState !== "IN_PROGRESS") return;
+    let active = true;
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/products/create-from-fabric/${processId}`, { method: "GET", cache: "no-store" });
+        const parsed = await readJsonResponse<PrepareStatusResponse>(response);
+        if (!active || !response.ok || !parsed || parsed?.success === false) return;
+        applyProcessUpdate(parsed);
+      } catch {
+        // WebSocket may still deliver updates; retry polling on the next interval.
+      }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), 1800);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [processId, processState]);
 
   useEffect(() => {
     if (!processId || processState !== "IN_PROGRESS" || typeof window === "undefined") return;
@@ -829,13 +2568,28 @@ export default function CreatorPage() {
     };
   }, [processId, processState]);
 
+  const shippingProfileNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const item of shippingProfiles) map.set(item.id, item.name);
+    return map;
+  }, [shippingProfiles]);
+
+  const errorCountByVariation = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const error of ottoErrors) {
+      const key = String(error.variation ?? "");
+      map.set(key, (map.get(key) ?? 0) + 1);
+    }
+    return map;
+  }, [ottoErrors]);
+
   const rows = useMemo(() => products.map((product, index) => {
     const description = asRecord(product.productDescription);
     const pricing = asRecord(product.pricing);
     const standardPrice = asRecord(pricing.standardPrice);
     const profileId = productShippingProfileId(asRecord(product));
-    const profileName = shippingProfiles.find((item) => item.id === profileId)?.name ?? "";
-    const rowErrors = ottoErrors.filter((error) => error.variation === String(product.sku ?? "")).length;
+    const profileName = shippingProfileNameById.get(profileId) ?? "";
+    const rowErrors = errorCountByVariation.get(String(product.sku ?? "")) ?? 0;
     const rowStatus =
       tableStatusPhase === "pending"
         ? "pending"
@@ -857,15 +2611,25 @@ export default function CreatorPage() {
       asRecord(product),
     );
     const aiCategory = String(aiReview.category ?? "");
-    const aiConfidence = Number(aiReview.confidence ?? 0);
+    const aiCategoryGroup = String(aiReview.categoryGroup ?? "");
+    const confidence = Number(product.aiCategoryConfidence ?? product.categoryConfidence ?? (aiCategoryGroup ? 100 : 0));
+    const sourceCategory = String(
+      product.sourceCategory ??
+      product.originalCategory ??
+      product.Produktkategorie ??
+      product.productCategory ??
+      "",
+    );
     return {
       index,
       image: firstImage(product),
       title,
       sku: String(product.sku ?? ""),
+      sourceCategory,
       aiCategory,
-      aiConfidence,
+      aiCategoryGroup,
       selectedCategory: String(description.category ?? ""),
+      confidence: Number.isFinite(confidence) ? confidence : 0,
       shippingProfileId: profileId,
       shippingProfileName: profileName,
       ean: String(product.ean ?? ""),
@@ -875,24 +2639,114 @@ export default function CreatorPage() {
       errors: rowErrors,
       status: rowStatus as "passed" | "failed" | "processing" | "pending",
     };
-  }), [products, aiCategoryByIndex, ottoErrors, tableStatusPhase, shippingProfiles]);
+  }), [products, aiCategoryByIndex, errorCountByVariation, tableStatusPhase, shippingProfileNameById]);
 
   const categories = useMemo(
-    () => Array.from(new Set(rows.map((row) => row.selectedCategory || row.aiCategory).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    () => Array.from(new Set(rows.map((row) => row.selectedCategory || row.aiCategoryGroup || row.aiCategory).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
     [rows],
   );
 
+  const requestedCategoryGroups = useMemo(
+    () => Array.from(new Set(rows.map((row) => row.aiCategoryGroup.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    [rows],
+  );
+
+  useEffect(() => {
+    const missingGroups = requestedCategoryGroups.filter((group) => !categoryOptionsByGroup[group]);
+    if (missingGroups.length === 0) return;
+
+    let active = true;
+    async function loadCategoryGroupOptions() {
+      const params = new URLSearchParams();
+      for (const group of missingGroups) params.append("category_group", group);
+      try {
+        const response = await fetch(`/api/products/category-group-categories?${params.toString()}`, {
+          method: "GET",
+          cache: "no-store",
+        });
+        const parsed = await readJsonResponse<CategoryGroupCategoriesResponse>(response);
+        if (!active || !response.ok) return;
+        const nextEntries: Record<string, string[]> = {};
+        const categoriesByGroupKey = new Map<string, string[]>();
+        for (const item of Array.isArray(parsed?.items) ? parsed.items : []) {
+          const group = String(item.categoryGroup ?? "").trim();
+          if (!group) continue;
+          const categories = Array.isArray(item.categories)
+            ? item.categories.filter((category): category is string => typeof category === "string" && category.trim().length > 0)
+            : [];
+          const options = categories.length > 0 ? categories : [group];
+          nextEntries[group] = options;
+          categoriesByGroupKey.set(group.toLowerCase(), options);
+        }
+        for (const group of missingGroups) {
+          nextEntries[group] = categoriesByGroupKey.get(group.toLowerCase()) ?? [group];
+        }
+        setCategoryOptionsByGroup((prev) => ({ ...prev, ...nextEntries }));
+      } catch {
+        if (!active) return;
+      }
+    }
+    void loadCategoryGroupOptions();
+    return () => {
+      active = false;
+    };
+  }, [requestedCategoryGroups, categoryOptionsByGroup]);
+
   const filteredRows = useMemo(() => {
     const query = tableQuery.trim().toLowerCase();
-    return rows.filter((row) => {
-      if (categoryFilter !== "all" && row.selectedCategory !== categoryFilter && row.aiCategory !== categoryFilter) return false;
+    const skippedSet = new Set(skippedCategoryRowIndexes);
+    const confirmedSet = new Set(confirmedCategoryRowIndexes);
+    const isCategoryMode = workflowStep === "categories";
+    const filtered = rows.filter((row) => {
+      if (!isCategoryMode && categoryFilter !== "all" && row.selectedCategory !== categoryFilter && row.aiCategoryGroup !== categoryFilter && row.aiCategory !== categoryFilter) return false;
+      const manuallyChanged = row.selectedCategory.trim() !== row.aiCategory.trim();
+      const status: CategoryReviewStatus = skippedSet.has(row.index)
+        ? "skipped"
+        : manuallyChanged
+          ? confirmedSet.has(row.index)
+            ? "manually_confirmed"
+            : "manually_changed"
+          : confirmedSet.has(row.index)
+            ? "confirmed"
+            : "requires_review";
+      if (isCategoryMode) {
+        if (categoryStatusFilter === "confirmed" && status !== "confirmed" && status !== "manually_confirmed") return false;
+        if (categoryStatusFilter !== "all" && categoryStatusFilter !== "confirmed" && status !== categoryStatusFilter) return false;
+      }
       if (!query) return true;
-      return [row.sku, row.aiCategory, row.selectedCategory, row.title, row.productReference, row.productLine, row.ean]
+      return [row.sku, row.aiCategoryGroup, row.aiCategory, row.selectedCategory, row.title, row.productReference, row.productLine, row.ean, row.sourceCategory]
         .join(" ")
         .toLowerCase()
         .includes(query);
     });
-  }, [rows, tableQuery, categoryFilter]);
+    if (!isCategoryMode) return filtered;
+    return [...filtered].sort((a, b) => {
+      if (categorySort === "title") return a.title.localeCompare(b.title);
+      const statusOrder: Record<CategoryReviewStatus, number> = {
+        requires_review: 0,
+        manually_changed: 1,
+        skipped: 2,
+        confirmed: 3,
+        manually_confirmed: 3,
+      };
+      const statusFor = (row: CategoryCheckRow): CategoryReviewStatus => {
+        const manuallyChanged = row.selectedCategory.trim() !== row.aiCategory.trim();
+        if (skippedSet.has(row.index)) return "skipped";
+        if (manuallyChanged) return confirmedSet.has(row.index) ? "manually_confirmed" : "manually_changed";
+        return confirmedSet.has(row.index) ? "confirmed" : "requires_review";
+      };
+      return statusOrder[statusFor(a)] - statusOrder[statusFor(b)];
+    });
+  }, [
+    rows,
+    tableQuery,
+    categoryFilter,
+    workflowStep,
+    skippedCategoryRowIndexes,
+    confirmedCategoryRowIndexes,
+    categoryStatusFilter,
+    categorySort,
+  ]);
 
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
   const safePage = Math.min(page, totalPages);
@@ -900,21 +2754,46 @@ export default function CreatorPage() {
   const paginationItems = buildPagination(safePage, totalPages);
   const selectedCategoryIndexSet = useMemo(() => new Set(selectedCategoryRowIndexes), [selectedCategoryRowIndexes]);
   const confirmedCategoryIndexSet = useMemo(() => new Set(confirmedCategoryRowIndexes), [confirmedCategoryRowIndexes]);
+  const skippedCategoryIndexSet = useMemo(() => new Set(skippedCategoryRowIndexes), [skippedCategoryRowIndexes]);
+  const rowByIndex = useMemo(() => {
+    const map = new Map<number, (typeof rows)[number]>();
+    for (const row of rows) map.set(row.index, row);
+    return map;
+  }, [rows]);
+  const selectedCategoryGroups = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          selectedCategoryRowIndexes
+            .map((index) => rowByIndex.get(index)?.aiCategoryGroup.trim() ?? "")
+            .filter(Boolean),
+        ),
+      ).sort((a, b) => a.localeCompare(b)),
+    [rowByIndex, selectedCategoryRowIndexes],
+  );
+  const bulkCategoryOptions = useMemo(() => {
+    if (selectedCategoryGroups.length !== 1) return [];
+    return categoryOptionsByGroup[selectedCategoryGroups[0]] ?? [];
+  }, [categoryOptionsByGroup, selectedCategoryGroups]);
   const allFilteredRowsSelected = filteredRows.length > 0 && filteredRows.every((row) => selectedCategoryIndexSet.has(row.index));
-  const missingCategoryCount = rows.filter((row) => !row.selectedCategory.trim()).length;
-  const isCategoryStage = workflowStep === "categories" && products.length > 0;
+  const missingCategoryCount = rows.filter((row) => !skippedCategoryIndexSet.has(row.index) && !row.selectedCategory.trim()).length;
+  const isEnrichmentLoading = processState === "IN_PROGRESS" && currentStep.startsWith("ai_enrichment");
+  const isCategoryStage = !isEnrichmentLoading && workflowStep === "categories" && (products.length > 0 || processState === "IN_PROGRESS");
   const selectedConfirmableCount = useMemo(
     () =>
       selectedCategoryRowIndexes.filter((index) => {
-        const row = rows.find((item) => item.index === index);
-        return Boolean(row?.selectedCategory.trim());
+        const row = rowByIndex.get(index);
+        return Boolean(row?.selectedCategory.trim()) && !skippedCategoryIndexSet.has(index);
       }).length,
-    [rows, selectedCategoryRowIndexes],
+    [rowByIndex, selectedCategoryRowIndexes, skippedCategoryIndexSet],
   );
   const categoryRowStatuses = useMemo<Record<number, CategoryReviewStatus>>(
     () =>
       Object.fromEntries(
         rows.map((row) => {
+          if (skippedCategoryIndexSet.has(row.index)) {
+            return [row.index, "skipped"];
+          }
           const manuallyChanged = row.selectedCategory.trim() !== row.aiCategory.trim();
           const isConfirmed = confirmedCategoryIndexSet.has(row.index);
           const status: CategoryReviewStatus = manuallyChanged
@@ -927,31 +2806,93 @@ export default function CreatorPage() {
           return [row.index, status];
         }),
       ),
-    [rows, confirmedCategoryIndexSet],
+    [rows, confirmedCategoryIndexSet, skippedCategoryIndexSet],
   );
   const categoryKpis = useMemo(() => {
     let confirmed = 0;
     let requiresReview = 0;
     let manuallyChanged = 0;
+    let skipped = 0;
     for (const row of rows) {
       const status = categoryRowStatuses[row.index];
       if (status === "confirmed" || status === "manually_confirmed") confirmed += 1;
       if (status === "manually_changed") manuallyChanged += 1;
       if (status === "requires_review") requiresReview += 1;
+      if (status === "skipped") skipped += 1;
     }
     return {
       total: rows.length,
       confirmed,
       requiresReview,
       manuallyChanged,
+      skipped,
     };
   }, [rows, categoryRowStatuses]);
 
+  useEffect(() => {
+    if (!bulkCategoryValue) return;
+    if (!bulkCategoryOptions.includes(bulkCategoryValue)) {
+      setBulkCategoryValue("");
+    }
+  }, [bulkCategoryOptions, bulkCategoryValue]);
+
   const selectedProduct = asRecord(products[selectedIndex]);
+  const editingCategoryRow = editingCategoryIndex === null ? null : rowByIndex.get(editingCategoryIndex) ?? null;
+  const detailsCategoryRow = detailsCategoryIndex === null ? null : rowByIndex.get(detailsCategoryIndex) ?? null;
+  const detailsCategoryStatus = detailsCategoryIndex === null ? "requires_review" : categoryRowStatuses[detailsCategoryIndex] ?? "requires_review";
+  const detailsCategoryHistory = detailsCategoryIndex === null ? [] : categoryChangeHistoryByIndex[detailsCategoryIndex] ?? [];
+  const detailsCategoryPosition = detailsCategoryIndex === null ? -1 : filteredRows.findIndex((row) => row.index === detailsCategoryIndex);
+  const navigateCategoryDetails = (position: number) => {
+    const target = filteredRows[position];
+    if (!target) return;
+    setDetailsCategoryIndex(target.index);
+    setSelectedIndex(target.index);
+    setPage(Math.floor(position / pageSize) + 1);
+  };
+  const selectedAftercoolData = productAftercoolData(selectedProduct);
+  const approvedComparisonIndexSet = useMemo(() => new Set(approvedComparisonRowIndexes), [approvedComparisonRowIndexes]);
+  const rejectedReviewIndexSet = useMemo(() => new Set(rejectedReviewRowIndexes), [rejectedReviewRowIndexes]);
+  const bulkModifiedIndexSet = useMemo(() => new Set(bulkModifiedRowIndexes), [bulkModifiedRowIndexes]);
+  const comparisonApprovedCount = rows.filter((row) => approvedComparisonIndexSet.has(row.index)).length;
+  const allComparisonsApproved = rows.length > 0 && comparisonApprovedCount === rows.length;
+  const reviewRows = useMemo<ProductReviewRow[]>(() => {
+    const query = reviewSearchQuery.trim().toLowerCase();
+    return rows
+      .map((row) => {
+        const reviewStatus: ProductReviewStatus = rejectedReviewIndexSet.has(row.index)
+          ? "rejected"
+          : bulkModifiedIndexSet.has(row.index) || (categoryChangeHistoryByIndex[row.index]?.length ?? 0) > 0
+              ? "modified"
+              : approvedComparisonIndexSet.has(row.index)
+                ? "approved"
+                : "pending";
+        return { ...row, reviewStatus };
+      })
+      .filter((row) => {
+        if (reviewQueueFilter !== "all" && row.reviewStatus !== reviewQueueFilter) return false;
+        if (!query) return true;
+        return [row.sku, row.ean, row.title, row.productReference].join(" ").toLowerCase().includes(query);
+      });
+  }, [rows, reviewSearchQuery, reviewQueueFilter, rejectedReviewIndexSet, approvedComparisonIndexSet, bulkModifiedIndexSet, categoryChangeHistoryByIndex]);
+  const selectedReviewStatus: ProductReviewStatus = rejectedReviewIndexSet.has(selectedIndex)
+    ? "rejected"
+    : bulkModifiedIndexSet.has(selectedIndex) || (categoryChangeHistoryByIndex[selectedIndex]?.length ?? 0) > 0
+        ? "modified"
+        : approvedComparisonIndexSet.has(selectedIndex)
+          ? "approved"
+          : "pending";
+  const selectedReviewRowForRender = useMemo<ProductReviewRow | null>(() => {
+    const row = rowByIndex.get(selectedIndex);
+    return row ? { ...row, reviewStatus: selectedReviewStatus } : null;
+  }, [rowByIndex, selectedIndex, selectedReviewStatus]);
+  const selectedAttributeCategory = selectedReviewRowForRender?.selectedCategory || selectedReviewRowForRender?.aiCategory || "";
+  const selectedAttributeCategoryGroup = selectedReviewRowForRender?.aiCategoryGroup || "";
   const selectedSku = normalizeSku(String(selectedProduct.sku ?? ""));
   const selectedDescription = asRecord(selectedProduct.productDescription);
   const selectedPricing = asRecord(selectedProduct.pricing);
   const selectedStandardPrice = asRecord(selectedPricing.standardPrice);
+  const selectedCurrency = String(selectedStandardPrice.currency ?? selectedPricing.currency ?? "").trim();
+  const selectedCurrencyLabel = selectedCurrency.toUpperCase() === "EUR" ? "€" : selectedCurrency;
   const selectedImage = firstImage(selectedProduct);
   const selectedBulletPoints = Array.isArray(selectedDescription.bulletPoints)
     ? selectedDescription.bulletPoints.map((item) => String(item))
@@ -959,6 +2900,10 @@ export default function CreatorPage() {
   const selectedAttributes = Array.isArray(selectedDescription.attributes)
     ? selectedDescription.attributes
     : [];
+
+  useEffect(() => {
+    setEditingOverviewField(null);
+  }, [selectedIndex]);
   const attributeCards = useMemo(() => {
     return selectedAttributes.map((item, index) => {
       const attr = asRecord(item);
@@ -972,24 +2917,6 @@ export default function CreatorPage() {
       };
     });
   }, [selectedAttributes]);
-  const filteredAttributeCards = useMemo(() => {
-    const term = attributeQuery.trim().toLowerCase();
-    if (!term) return attributeCards;
-    return attributeCards.filter((item) => {
-      return item.name.toLowerCase().includes(term) || item.values.toLowerCase().includes(term);
-    });
-  }, [attributeCards, attributeQuery]);
-  const groupedAttributeCards = useMemo(() => {
-    const groups: Record<string, typeof filteredAttributeCards> = {
-      "Основные характеристики": [],
-      "Комплектация": [],
-      "Дополнительно": [],
-    };
-    for (const item of filteredAttributeCards) {
-      groups[item.group].push(item);
-    }
-    return groups;
-  }, [filteredAttributeCards]);
   const parsedOttoErrors = useMemo<ParsedSkuError[]>(() => {
     return ottoErrors.map((item) => {
       const jsonPath = String(item.jsonPath ?? "");
@@ -1018,6 +2945,39 @@ export default function CreatorPage() {
     }
     return tokens;
   }, [selectedProductErrors]);
+  const invalidAttributeNames = useMemo(() => new Set(attributeCards
+    .filter((attribute) => {
+      const name = normalizeFieldToken(attribute.name);
+      return name && selectedErrorFieldTokens.some((token) => token.includes(name) || name.includes(token));
+    })
+    .map((attribute) => normalizeFieldToken(attribute.name))), [attributeCards, selectedErrorFieldTokens]);
+  const bulkAttributeOptions = useMemo(() => {
+    const byIdentity = new Map<string, CategoryAttributeOption>();
+    for (const option of categoryAttributes) {
+      const identity = String(option.attributeId ?? option.id ?? option.attributeKey ?? normalizeFieldToken(option.name));
+      if (option.name && identity) byIdentity.set(identity, option);
+    }
+    for (const productIndex of selectedReviewRowIndexes) {
+      const description = asRecord(asRecord(products[productIndex]).productDescription);
+      const attributes = Array.isArray(description.attributes) ? description.attributes : [];
+      for (const item of attributes) {
+        const attribute = asRecord(item);
+        const name = String(attribute.name ?? "").trim();
+        if (!name) continue;
+        const attributeId = String(attribute.attribute_id ?? attribute.attributeId ?? "").trim() || undefined;
+        const attributeKey = String(attribute.attribute_key ?? attribute.attributeKey ?? "").trim() || undefined;
+        const identity = attributeId ?? attributeKey ?? normalizeFieldToken(name);
+        if (!byIdentity.has(identity)) {
+          byIdentity.set(identity, { name, attributeId, attributeKey, unit: String(attribute.unit ?? "").trim() || undefined });
+        }
+      }
+    }
+    const rank: Record<string, number> = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+    return Array.from(byIdentity.values()).sort((left, right) => {
+      const priority = (rank[String(left.relevance ?? "LOW").toUpperCase()] ?? 3) - (rank[String(right.relevance ?? "LOW").toUpperCase()] ?? 3);
+      return priority || left.name.localeCompare(right.name);
+    });
+  }, [categoryAttributes, products, selectedReviewRowIndexes]);
   const errorCardsBySku = useMemo(() => {
     const grouped: Record<string, ParsedSkuError[]> = {};
     for (const item of parsedOttoErrors) {
@@ -1032,9 +2992,6 @@ export default function CreatorPage() {
       fields: Array.from(new Set(list.map((entry) => entry.field).filter(Boolean))),
     }));
   }, [parsedOttoErrors]);
-  const visibleErrorCards = useMemo(() => {
-    return showAllErrorCards ? errorCardsBySku : errorCardsBySku.slice(0, 2);
-  }, [errorCardsBySku, showAllErrorCards]);
   const kpiTotal = useMemo(() => {
     const candidate = lastSubmitTotal > 0 ? lastSubmitTotal : rows.length;
     return Math.max(0, candidate);
@@ -1063,11 +3020,98 @@ export default function CreatorPage() {
   }, [issues, parsedOttoErrors]);
 
   useEffect(() => {
-    setAttributeQuery("");
-    setExpandedAttributes([]);
     setEditingAttribute(null);
     setEditingDraft("");
+    setNewAttributeName("");
+    setNewAttributeValue("");
   }, [selectedIndex]);
+
+  useEffect(() => {
+    if (workflowStep === "categories") return;
+    let active = true;
+    async function loadCategoryAttributes() {
+      if (!selectedAttributeCategory && !selectedAttributeCategoryGroup) {
+        setCategoryAttributes([]);
+        setCategoryAttributesError("");
+        return;
+      }
+      setIsLoadingCategoryAttributes(true);
+      setCategoryAttributesError("");
+      try {
+        const params = new URLSearchParams();
+        if (selectedAttributeCategory) params.set("category", selectedAttributeCategory);
+        if (selectedAttributeCategoryGroup) params.set("category_group", selectedAttributeCategoryGroup);
+        const response = await fetch(`/api/products/category-attributes?${params.toString()}`, {
+          method: "GET",
+          cache: "no-store",
+        });
+        const parsed = await readJsonResponse<CategoryAttributesResponse>(response);
+        if (!active) return;
+        if (!response.ok) {
+          setCategoryAttributes([]);
+          setCategoryAttributesError(readApiErrorMessage(parsed, "Could not load category attributes."));
+          return;
+        }
+        const items = Array.isArray(parsed?.items) ? parsed.items : [];
+        setCategoryAttributes(items.filter((item) => item.name));
+      } catch {
+        if (!active) return;
+        setCategoryAttributes([]);
+        setCategoryAttributesError("Could not load category attributes.");
+      } finally {
+        if (active) setIsLoadingCategoryAttributes(false);
+      }
+    }
+    void loadCategoryAttributes();
+    return () => {
+      active = false;
+    };
+  }, [workflowStep, selectedAttributeCategory, selectedAttributeCategoryGroup]);
+
+  useEffect(() => {
+    if (workflowStep === "categories") return;
+    function onKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName?.toLowerCase();
+      const isTyping = tagName === "input" || tagName === "textarea" || tagName === "select" || target?.isContentEditable;
+      if (event.ctrlKey && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        reviewSearchRef.current?.focus();
+        return;
+      }
+      if (isTyping) return;
+      if (event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        approveReviewProduct(selectedIndex);
+      }
+      if (event.key.toLowerCase() === "r") {
+        event.preventDefault();
+        rejectReviewProduct(selectedIndex);
+      }
+      if (event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        saveReviewDraft();
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setSelectedIndex((current) => {
+          const currentPosition = reviewRows.findIndex((row) => row.index === current);
+          if (currentPosition <= 0) return reviewRows[0]?.index ?? current;
+          return reviewRows[currentPosition - 1].index;
+        });
+      }
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setSelectedIndex((current) => {
+          const currentPosition = reviewRows.findIndex((row) => row.index === current);
+          if (currentPosition < 0) return reviewRows[0]?.index ?? current;
+          return reviewRows[Math.min(reviewRows.length - 1, currentPosition + 1)]?.index ?? current;
+        });
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [workflowStep, selectedIndex, reviewRows, selectedReviewRowIndexes]);
 
   async function copyText(value: string, field: string) {
     if (!value || value === "-") {
@@ -1122,6 +3166,7 @@ export default function CreatorPage() {
       return next;
     });
     setConfirmedCategoryRowIndexes((prev) => prev.filter((item) => item !== rowIndex));
+    setSkippedCategoryRowIndexes((prev) => prev.filter((item) => item !== rowIndex));
   }
 
   function toggleCategorySelection(rowIndex: number) {
@@ -1143,6 +3188,7 @@ export default function CreatorPage() {
 
   function applyBulkCategory() {
     if (!bulkCategoryValue || selectedCategoryRowIndexes.length === 0) return;
+    if (!bulkCategoryOptions.includes(bulkCategoryValue)) return;
     const selectedSet = new Set(selectedCategoryRowIndexes);
     setProducts((prev) =>
       prev.map((item, index) =>
@@ -1153,6 +3199,7 @@ export default function CreatorPage() {
     );
     setConfirmedCategoryRowIndexes((prev) => prev.filter((item) => !selectedSet.has(item)));
     setUiMessage(`Категория применена к ${selectedCategoryRowIndexes.length} товарам.`);
+    setIsBulkCategoryDrawerOpen(false);
   }
 
   function confirmCategoryRows(rowIndexes: number[]) {
@@ -1160,11 +3207,19 @@ export default function CreatorPage() {
     const eligible = rowIndexes.filter((index) => {
       const row = rows.find((item) => item.index === index);
       if (!row) return false;
-      return row.selectedCategory.trim().length > 0;
+      return row.selectedCategory.trim().length > 0 && !skippedCategoryIndexSet.has(index);
     });
     if (eligible.length === 0) return;
     setConfirmedCategoryRowIndexes((prev) => Array.from(new Set([...prev, ...eligible])).sort((a, b) => a - b));
     setUiMessage(`Подтверждено категорий: ${eligible.length}.`);
+  }
+
+  function skipCategoryRows(rowIndexes: number[]) {
+    if (rowIndexes.length === 0) return;
+    setSkippedCategoryRowIndexes((prev) => Array.from(new Set([...prev, ...rowIndexes])).sort((a, b) => a - b));
+    setConfirmedCategoryRowIndexes((prev) => prev.filter((item) => !rowIndexes.includes(item)));
+    setSelectedCategoryRowIndexes((prev) => prev.filter((item) => !rowIndexes.includes(item)));
+    setUiMessage(`Пропущено товаров: ${rowIndexes.length}.`);
   }
 
   function unconfirmCategoryRows(rowIndexes: number[]) {
@@ -1174,6 +3229,106 @@ export default function CreatorPage() {
     const confirmedSet = new Set(confirmedIndexes);
     setConfirmedCategoryRowIndexes((prev) => prev.filter((item) => !confirmedSet.has(item)));
     setUiMessage(`Снято подтверждение с категорий: ${confirmedIndexes.length}.`);
+  }
+
+  function saveCategoryEdit(rowIndex: number, category: string, comment: string) {
+    const row = rowByIndex.get(rowIndex);
+    if (!row || !category.trim()) return;
+    const previous = row.selectedCategory || row.aiCategory || "";
+    updateRowCategory(rowIndex, category.trim());
+    setCategoryCommentsByIndex((prev) => ({ ...prev, [rowIndex]: comment.trim() }));
+    setCategoryChangeHistoryByIndex((prev) => ({
+      ...prev,
+      [rowIndex]: [
+        ...(prev[rowIndex] ?? []),
+        {
+          at: new Date().toISOString(),
+          by: currentUser?.email ?? "unknown",
+          from: previous,
+          to: category.trim(),
+          comment: comment.trim() || undefined,
+        },
+      ],
+    }));
+    setEditingCategoryIndex(null);
+    setUiMessage("Категория изменена. Подтвердите товар в таблице.");
+  }
+
+  function setComparisonApproved(rowIndex: number, approved: boolean) {
+    setApprovedComparisonRowIndexes((prev) => {
+      const next = new Set(prev);
+      if (approved) next.add(rowIndex);
+      else next.delete(rowIndex);
+      return Array.from(next).sort((a, b) => a - b);
+    });
+    setProducts((prev) => {
+      const next = [...prev];
+      const product = asRecord(next[rowIndex]);
+      const comparison = asRecord(product.aftercoolComparison);
+      next[rowIndex] = {
+        ...product,
+        aftercoolComparison: {
+          ...comparison,
+          approved,
+        },
+      };
+      return next;
+    });
+  }
+
+  function approveReviewProduct(rowIndex: number) {
+    if (rowIndex < 0 || rowIndex >= products.length) return;
+    setRejectedReviewRowIndexes((prev) => prev.filter((item) => item !== rowIndex));
+    setBulkModifiedRowIndexes((prev) => prev.filter((item) => item !== rowIndex));
+    setComparisonApproved(rowIndex, true);
+  }
+
+  function rejectReviewProduct(rowIndex: number) {
+    if (rowIndex < 0 || rowIndex >= products.length) return;
+    setComparisonApproved(rowIndex, false);
+    setRejectedReviewRowIndexes((prev) => Array.from(new Set([...prev, rowIndex])).sort((a, b) => a - b));
+    setUiMessage("Товар помечен как rejected.");
+  }
+
+  function saveReviewDraft() {
+    setUiMessage("Draft сохранен локально и синхронизируется с процессом.");
+  }
+
+  function toggleReviewSelection(rowIndex: number) {
+    setSelectedReviewRowIndexes((prev) =>
+      prev.includes(rowIndex) ? prev.filter((item) => item !== rowIndex) : [...prev, rowIndex].sort((a, b) => a - b),
+    );
+  }
+
+  function approveSelectedReviewProducts() {
+    for (const index of selectedReviewRowIndexes) approveReviewProduct(index);
+    setSelectedReviewRowIndexes([]);
+  }
+
+  function rejectSelectedReviewProducts() {
+    for (const index of selectedReviewRowIndexes) rejectReviewProduct(index);
+    setSelectedReviewRowIndexes([]);
+  }
+
+  function applyBulkAttributeChanges(attributes: BulkAttributePatch[]) {
+    const result = bulkUpsertProductAttributes(products, selectedReviewRowIndexes, attributes);
+    setProducts(result.products);
+    if (result.updatedIndexes.length > 0) {
+      setBulkModifiedRowIndexes((current) => Array.from(new Set([...current, ...result.updatedIndexes])).sort((left, right) => left - right));
+      setRejectedReviewRowIndexes((current) => current.filter((index) => !result.updatedIndexes.includes(index)));
+      setApprovedComparisonRowIndexes((current) => current.filter((index) => !result.updatedIndexes.includes(index)));
+    }
+    bulkAttributeEdit.reset();
+    if (result.failures.length === 0) {
+      const successMessage = `Updated ${result.updatedIndexes.length} products successfully.`;
+      setUiMessage(successMessage);
+      setBulkToast({ message: successMessage, error: false });
+    } else {
+      const details = result.failures.map((failure) => `#${failure.productIndex + 1}: ${failure.reason}`).join("; ");
+      const partialMessage = `Updated ${result.updatedIndexes.length} of ${selectedReviewRowIndexes.length} products. ${result.failures.length} failed. ${details}`;
+      setUiMessage(partialMessage);
+      setBulkToast({ message: partialMessage, error: true });
+    }
   }
 
   function fieldHasError(keywords: string[]): boolean {
@@ -1218,6 +3373,41 @@ export default function CreatorPage() {
     setEditingDraft("");
   }
 
+  function cancelAttributeEdit() {
+    setEditingAttribute(null);
+    setEditingDraft("");
+  }
+
+  function addAttribute() {
+    const name = newAttributeName.trim();
+    const values = newAttributeValue
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (!name || values.length === 0) return;
+    const option = categoryAttributes.find((item) => item.name.toLowerCase() === name.toLowerCase()) ?? null;
+    setProducts((prev) => {
+      const copy = [...prev];
+      const current = asRecord(copy[selectedIndex]);
+      const desc = asRecord(current.productDescription);
+      const attrs = Array.isArray(desc.attributes) ? [...desc.attributes] : [];
+      attrs.push({
+        name: option?.name ?? name,
+        values,
+        additional: true,
+        ...(option?.unit ? { unit: option.unit } : {}),
+      });
+      copy[selectedIndex] = updateProductField(
+        current,
+        ["productDescription", "attributes"],
+        attrs,
+      );
+      return copy;
+    });
+    setNewAttributeName("");
+    setNewAttributeValue("");
+  }
+
   function deleteAttribute(attributeIndex: number) {
     setProducts((prev) => {
       const copy = [...prev];
@@ -1247,6 +3437,8 @@ export default function CreatorPage() {
     setUiMessage("Процесс подготовки запущен...");
     setIssues([]);
     setProducts([]);
+    productsDraftSaveSkippedRef.current = false;
+    liveCategoryRowsCountRef.current = 0;
     setAiCategoryByIndex({});
     setProcessId("");
     setWorkflowStep("categories");
@@ -1260,13 +3452,26 @@ export default function CreatorPage() {
     setTableStatusPhase("pending");
     setLastSubmitTotal(0);
     setConfirmedCategoryRowIndexes([]);
+    setSkippedCategoryRowIndexes([]);
+    setCategoryChangeHistoryByIndex({});
+    setCategoryCommentsByIndex({});
+    setEditingCategoryIndex(null);
+    setDetailsCategoryIndex(null);
+    setApprovedComparisonRowIndexes([]);
+    setRejectedReviewRowIndexes([]);
+    setSelectedReviewRowIndexes([]);
+    setBulkModifiedRowIndexes([]);
     setTaskProgress({ total: 0, completed: 0, percent: 0 });
+    setPreparationCounts({ source: 0, mapped: 0, payload: 0 });
     setRealtimeMode("websocket");
     try {
       const response = await fetch("/api/products/create-from-fabric", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ controller, factory_id: selectedFabricId }),
+        body: JSON.stringify({
+          controller,
+          factory_id: selectedFabricId,
+        }),
         cache: "no-store",
       });
       const parsed = await readJsonResponse<CreateFromFabricResponse>(response);
@@ -1296,6 +3501,13 @@ export default function CreatorPage() {
       setUiMessage("Подтвердите все неотмеченные категории или измените их вручную перед созданием товаров.");
       return;
     }
+    const skippedSet = new Set(skippedCategoryRowIndexes);
+    const productsForEnrichment = products.filter((_, index) => !skippedSet.has(index));
+    if (productsForEnrichment.length === 0) {
+      setState("error");
+      setUiMessage("Все товары пропущены. Нет товаров для создания.");
+      return;
+    }
     setState("loading");
     setUiMessage("Категории подтверждены. Запускаю создание товаров и AI-генерацию...");
     try {
@@ -1303,7 +3515,7 @@ export default function CreatorPage() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          products,
+          products: productsForEnrichment,
           controller,
           factory_id: selectedFabricId,
         }),
@@ -1317,7 +3529,13 @@ export default function CreatorPage() {
       }
       setProcessState("IN_PROGRESS");
       setCurrentStep("ai_enrichment_queued");
-      setTaskProgress({ total: products.length, completed: 0, percent: 0 });
+      setProducts(productsForEnrichment);
+      setSelectedIndex(0);
+      setApprovedComparisonRowIndexes([]);
+      setRejectedReviewRowIndexes([]);
+      setSelectedReviewRowIndexes([]);
+      setBulkModifiedRowIndexes([]);
+      setTaskProgress({ total: productsForEnrichment.length, completed: 0, percent: 0 });
       setRealtimeMode("websocket");
       setUiMessage("Создание товаров запущено. Дожидаюсь генерации атрибутов, описаний и bullet points...");
     } catch (caughtError) {
@@ -1328,6 +3546,11 @@ export default function CreatorPage() {
 
   async function submitEditedProducts() {
     if (!processId || products.length === 0) return;
+    if (!allComparisonsApproved) {
+      setState("error");
+      setUiMessage(`Approve-ните сравнение для всех товаров: ${comparisonApprovedCount} из ${rows.length}.`);
+      return;
+    }
     setState("loading");
     setUiMessage("Загрузить: отправляю все продукты в OTTO...");
     setOttoSummary(null);
@@ -1493,6 +3716,15 @@ export default function CreatorPage() {
     setTableStatusPhase("pending");
     setLastSubmitTotal(0);
     setConfirmedCategoryRowIndexes([]);
+    setSkippedCategoryRowIndexes([]);
+    setCategoryChangeHistoryByIndex({});
+    setCategoryCommentsByIndex({});
+    setEditingCategoryIndex(null);
+    setDetailsCategoryIndex(null);
+    setApprovedComparisonRowIndexes([]);
+    setRejectedReviewRowIndexes([]);
+    setSelectedReviewRowIndexes([]);
+    setBulkModifiedRowIndexes([]);
     setTaskProgress({ total: 0, completed: 0, percent: 0 });
     setRealtimeMode("websocket");
     setSelectedFabricId((prev) =>
@@ -1523,10 +3755,23 @@ export default function CreatorPage() {
     >
       <div className={`creator-workspace creator-ref-workspace ${isCategoryStage ? "is-category-stage" : ""}`}>
         {error ? <p className="helper-banner">{error}</p> : null}
-        <section className={`creator-ref-top-grid ${isCategoryStage ? "is-category-stage" : ""}`}>
+        {isEnrichmentLoading ? (
+          <section className="product-enrichment-loading" role="status" aria-live="polite">
+            <RefreshCw className="spin" size={34} aria-hidden="true" />
+            <div>
+              <h2>Подготавливаем данные товаров</h2>
+              <p>Загружаем описания, атрибуты и изображения. Работа с товарами станет доступна после завершения подготовки.</p>
+            </div>
+            <div className="product-enrichment-loading-progress" aria-hidden="true">
+              <span style={{ width: `${Math.max(0, Math.min(100, Math.round(taskProgress.percent || 0)))}%` }} />
+            </div>
+            <strong>{`${Math.max(0, Math.round(taskProgress.percent || 0))}%`}</strong>
+          </section>
+        ) : (
+        <section className={`creator-ref-top-grid ${isCategoryStage ? "is-category-stage" : "is-preparation-stage"}`}>
           <article className="creator-ref-card creator-ref-card-action">
-            <h2>Подготовка по Fabric</h2>
-            <p className="creator-ref-card-subtitle">Выберите Controller и Fabric для запуска загрузки товаров.</p>
+            <h2>Загрузка товаров</h2>
+            <p className="creator-ref-card-subtitle">Выберите источник и подготовьте товары к проверке.</p>
             <div className="creator-mode-switch">
               <label>Controller
                 <select value={controller} onChange={(event) => setController(event.target.value as ControllerOption)} disabled={state === "loading"}>
@@ -1547,12 +3792,12 @@ export default function CreatorPage() {
                 aria-label="Обновить список фабрик"
               >
                 <RefreshCw size={14} className={isRefreshingFabrics ? "spin" : ""} />
-                {isRefreshingFabrics ? "Обновляю..." : "Обновить"}
+                {isRefreshingFabrics ? "Обновляю..." : "Обновить список"}
               </button>
             </div>
             <div className="creator-ref-launch-actions">
               <Button className="creator-ref-launch-btn" size="lg" type="button" onClick={handleCreate} disabled={state === "loading" || !selectedFabricId}>
-                {state === "loading" ? "Запуск..." : "Выставить товары"}
+                {state === "loading" ? "Подготовка..." : "Подготовить товары"}
               </Button>
               <Button className="creator-ref-reset-btn" variant="secondary" size="lg" type="button" onClick={() => void handleClear()} disabled={!processId && state === "idle" && products.length === 0}>
                 Сбросить
@@ -1562,253 +3807,114 @@ export default function CreatorPage() {
               <span className="creator-ref-inline-alert-icon" aria-hidden="true">
                 {state === "error" ? <AlertCircle size={16} /> : state === "success" ? <Check size={16} /> : "i"}
               </span>
-              <p>{message}</p>
+              <p>{state === "success" && products.length > 0 ? `${products.length} товаров готовы к проверке` : message}</p>
             </div>
           </article>
 
           <article className="creator-ref-card creator-ref-card-main">
-            <div className="creator-ref-main-head">
-              <h2>{isCategoryStage ? "Проверка категорий" : "Последняя загрузка"}</h2>
-            </div>
-            <div className="creator-ref-status-line">
-              <span className="creator-ref-status-label">Статус</span>
-              <Badge
-                className={`creator-ref-status-badge creator-ref-status-badge-animated ${
-                  processState === "DONE"
-                    ? "done"
-                    : processState === "FAILED"
-                      ? "failed"
-                      : "progress"
-                }`}
-              >
-                {processState}
-              </Badge>
-            </div>
-            <div className={`creator-ref-metrics ${isCategoryStage ? "is-category-kpi" : ""}`}>
-              {isCategoryStage ? (
-                <>
-                  <Card className="metric neutral">
-                    <span className="metric-icon"><Box size={18} /></span>
-                    <small>Всего</small>
-                    <strong>{categoryKpis.total}</strong>
-                  </Card>
-                  <Card className="metric success">
-                    <span className="metric-icon"><Check size={18} /></span>
-                    <small>Подтверждено</small>
-                    <strong>{categoryKpis.confirmed}</strong>
-                  </Card>
-                  <Card className="metric warning">
-                    <span className="metric-icon"><AlertCircle size={18} /></span>
-                    <small>Требуют проверки</small>
-                    <strong>{categoryKpis.requiresReview}</strong>
-                  </Card>
-                  <Card className="metric error">
-                    <span className="metric-icon"><RefreshCw size={18} /></span>
-                    <small>Изменено вручную</small>
-                    <strong>{categoryKpis.manuallyChanged}</strong>
-                  </Card>
-                </>
-              ) : (
-                <>
-                  <Card className="metric success">
-                    <span className="metric-icon"><Check size={18} /></span>
-                    <small>Успешно</small>
-                    <strong>{kpiSucceeded}</strong>
-                  </Card>
-                  <Card className="metric error">
-                    <span className="metric-icon"><X size={18} /></span>
-                    <small>Ошибки</small>
-                    <strong>{kpiFailed}</strong>
-                  </Card>
-                  <Card className="metric neutral">
-                    <span className="metric-icon"><Box size={18} /></span>
-                    <small>Всего</small>
-                    <strong>{kpiTotal}</strong>
-                  </Card>
-                </>
-              )}
-            </div>
-            {processState === "IN_PROGRESS" ? (
-              <div className="creator-ref-progress">
-                <div className="creator-ref-progress-head">
-                  <strong>{currentStep === "ai_enrichment_in_progress" || currentStep === "ai_enrichment_queued" ? "Создание товаров через AI" : "Подготовка данных"}</strong>
-                  <span>
-                    {isItemProgressStep(currentStep) && taskProgress.total > 0
-                      ? `${Math.min(taskProgress.completed, taskProgress.total)} / ${taskProgress.total}`
-                      : `${Math.max(0, Math.round(taskProgress.percent))}%`}
-                  </span>
-                </div>
-                <div className="creator-ref-progress-track" aria-hidden="true">
-                  <span style={{ width: `${Math.max(0, Math.min(100, Math.round(taskProgress.percent || 0)))}%` }} />
-                </div>
-                <p>{realtimeMode === "websocket" ? "Live updates через WebSocket" : "Live updates через polling fallback"}</p>
-              </div>
-            ) : null}
-            <div className="creator-ref-runtime">
-              <div className="creator-ref-runtime-row">
-                <span>Otto Process ID</span>
-                <code>{ottoProcessId || "-"}</code>
-                <button
-                  type="button"
-                  className={`creator-runtime-copy-btn ${
-                    copiedRuntimeField === "otto_process_id"
-                      ? "is-copied"
-                      : runtimeCopyErrorField === "otto_process_id"
-                        ? "is-error"
-                        : ""
-                  }`}
-                  onClick={() => void copyText(ottoProcessId || "-", "otto_process_id")}
-                  disabled={!ottoProcessId}
-                >
-                  {copiedRuntimeField === "otto_process_id" ? <Check size={14} /> : <Copy size={14} />}
-                  <span>
-                    {copiedRuntimeField === "otto_process_id"
-                      ? "Скопировано"
-                      : runtimeCopyErrorField === "otto_process_id"
-                        ? "Ошибка"
-                        : "Копировать"}
-                  </span>
-                </button>
-              </div>
-              <div className="creator-ref-runtime-row">
-                <span>Process ID</span>
-                <code>{processId || "-"}</code>
-                <button
-                  type="button"
-                  className={`creator-runtime-copy-btn ${
-                    copiedRuntimeField === "process_id"
-                      ? "is-copied"
-                      : runtimeCopyErrorField === "process_id"
-                        ? "is-error"
-                        : ""
-                  }`}
-                  onClick={() => void copyText(processId || "-", "process_id")}
-                  disabled={!processId}
-                >
-                  {copiedRuntimeField === "process_id" ? <Check size={14} /> : <Copy size={14} />}
-                  <span>
-                    {copiedRuntimeField === "process_id"
-                      ? "Скопировано"
-                      : runtimeCopyErrorField === "process_id"
-                        ? "Ошибка"
-                        : "Копировать"}
-                  </span>
-                </button>
-              </div>
-              <p>Шаг: <strong>{currentStep}</strong> · <strong>{Math.max(0, Math.round(stepElapsed))}s</strong></p>
-              {stuckMessage ? <p className="helper-banner error">{stuckMessage}</p> : null}
-            </div>
-          </article>
-
-          {!isCategoryStage ? (
-            <article className="creator-ref-card creator-ref-card-errors">
-              <div className="creator-ref-errors-head">
-                <h2>{`Ошибки (${errorCardsBySku.length})`}</h2>
-                {errorCardsBySku.length > 2 ? (
-                  <button type="button" className="creator-ref-show-all" onClick={() => setShowAllErrorCards((prev) => !prev)}>
-                    {showAllErrorCards ? "Скрыть" : "Показать все"}
-                  </button>
-                ) : null}
-              </div>
-              <div className="creator-ref-errors-list">
-                {visibleErrorCards.map((item) => (
-                  <Card className="creator-ref-error-card" key={item.sku}>
-                    <div className="creator-ref-error-row-top">
-                      <span className="creator-ref-error-icon"><AlertCircle size={16} /></span>
-                      <p className="creator-ref-error-title clamp-2">{item.firstMessage}</p>
+            {isCategoryStage ? (
+              <>
+                <CategoryCheckSummary categoryKpis={categoryKpis} processState={processState} />
+                <CategoryCheckProgress
+                  currentStep={currentStep}
+                  processState={processState}
+                  progressPercent={taskProgress.percent}
+                  progressLabel={progressTitle(currentStep)}
+                  preparationCounts={preparationCounts}
+                  realtimeMode={realtimeMode}
+                  processId={processId}
+                  ottoProcessId={ottoProcessId}
+                  stepElapsed={stepElapsed}
+                  heartbeatLag={heartbeatLag}
+                  copiedRuntimeField={copiedRuntimeField}
+                  runtimeCopyErrorField={runtimeCopyErrorField}
+                  copyText={(value, field) => void copyText(value, field)}
+                />
+                {stuckMessage ? <p className="helper-banner error">{stuckMessage}</p> : null}
+              </>
+            ) : (
+              <>
+                {processState === "IDLE" && products.length === 0 ? (
+                  <div className="creator-preparation-empty">
+                    <span className="creator-preparation-empty-icon"><Box size={22} /></span>
+                    <div>
+                      <h2>Подготовка товаров</h2>
+                      <p>Выберите Controller и Fabric, затем запустите подготовку. Здесь появится текущий статус обработки.</p>
                     </div>
-                    <p className="creator-ref-error-meta">{`SKU: ${item.sku} • Ошибок: ${item.count}`}</p>
-                    <div className="creator-ref-error-actions">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const sourceSku = normalizeSku(item.sku);
-                          const row = rows.find((rowItem) => normalizeSku(rowItem.sku) === sourceSku);
-                          if (row) setSelectedIndex(row.index);
-                        }}
-                      >
-                        Открыть товар
-                      </button>
-                    </div>
-                  </Card>
-                ))}
-                {!showAllErrorCards && errorCardsBySku.length > 2 ? (
-                  <button className="creator-ref-more-errors" type="button" onClick={() => setShowAllErrorCards(true)}>
-                    {`Еще ${errorCardsBySku.length - 2} ошибки`}
-                  </button>
-                ) : null}
-                {errorCardsBySku.length === 0 ? (
-                  <p className="helper-banner info">Ошибок не обнаружено.</p>
-                ) : null}
-              </div>
-            </article>
-          ) : null}
-        </section>
-
-        {isCategoryStage ? (
-        <section className="creator-ref-main-grid creator-ref-main-grid-category">
-          <Card className="creator-category-card">
-            <div className="creator-category-head">
-              <div className="creator-category-intro">
-                <h2>Подтвердите категории</h2>
-              </div>
-            </div>
-
-            <div className="creator-category-toolbar">
-              <div className="creator-category-toolbar-summary">
-                <p>Категории</p>
-                <span>{selectedCategoryRowIndexes.length > 0 ? `Выбрано: ${selectedCategoryRowIndexes.length}` : "Массовое изменение"}</span>
-              </div>
-              <div className="creator-category-bulk">
-                <select value={bulkCategoryValue} onChange={(event) => setBulkCategoryValue(event.target.value)} disabled={availableCategories.length === 0}>
-                  <option value="">{availableCategories.length === 0 ? "Нет категорий" : "Категория для выбранных"}</option>
-                  {availableCategories.map((item) => <option key={item} value={item}>{item}</option>)}
-                </select>
-                <button className="secondary-btn" type="button" onClick={applyBulkCategory} disabled={!bulkCategoryValue || selectedCategoryRowIndexes.length === 0}>
-                  Применить
-                </button>
-                <button
-                  className="secondary-btn"
-                  type="button"
-                  onClick={() => confirmCategoryRows(selectedCategoryRowIndexes)}
-                  disabled={selectedConfirmableCount === 0}
-                >
-                  {selectedConfirmableCount > 0
-                    ? `Подтвердить (${selectedConfirmableCount})`
-                    : "Подтвердить"}
-                </button>
-              </div>
-              <div className="creator-category-toolbar-actions">
-                <div className="creator-category-toolbar-search">
-                  <div className="creator-search-wrap">
-                    <Search size={16} className="creator-search-icon" />
-                    <input
-                      className="creator-search-input"
-                      placeholder="Поиск по названию, EAN"
-                      type="search"
-                      value={tableQuery}
-                      onChange={(event) => {
-                        setTableQuery(event.target.value);
-                        setPage(1);
-                      }}
-                    />
+                    <Badge className="creator-ref-status-badge pending">Ожидание запуска</Badge>
                   </div>
-                  <div className="creator-table-popover-wrap">
-                    <button className="creator-table-top-btn" type="button" onClick={() => setIsFilterOpen((prev) => !prev)}>
-                      <Funnel size={16} color="currentColor" fill={isFilterOpen ? "#111111" : "#ffffff"} />
-                      Фильтр
-                    </button>
-                    {isFilterOpen ? (
-                      <div className="creator-table-popover">
-                        <p>Категория</p>
-                        <select value={categoryFilter} onChange={(event) => { setCategoryFilter(event.target.value); setPage(1); }}>
-                          <option value="all">Все категории</option>
-                          {availableCategories.map((item) => <option key={item} value={item}>{item}</option>)}
-                        </select>
+                ) : (
+                  <>
+                    <div className="creator-ref-main-head">
+                      <h2>Последняя загрузка</h2>
+                    </div>
+                    <div className="creator-ref-status-line">
+                      <span className="creator-ref-status-label">Статус</span>
+                      <Badge
+                        className={`creator-ref-status-badge creator-ref-status-badge-animated ${
+                          processState === "DONE"
+                            ? "done"
+                            : processState === "FAILED"
+                              ? "failed"
+                              : "progress"
+                        }`}
+                      >
+                        {processState}
+                      </Badge>
+                    </div>
+                    <div className="creator-ref-metrics">
+                    <Card className="metric neutral">
+                      <span className="metric-icon"><Box size={18} /></span>
+                      <small>Всего</small>
+                      <strong>{kpiTotal}</strong>
+                    </Card>
+                    <Card className="metric success">
+                      <span className="metric-icon"><Check size={18} /></span>
+                      <small>Успешно</small>
+                      <strong>{kpiSucceeded}</strong>
+                    </Card>
+                    <Card className="metric error">
+                      <span className="metric-icon"><X size={18} /></span>
+                      <small>Ошибки</small>
+                      <strong>{kpiFailed}</strong>
+                    </Card>
+                    </div>
+                    {processState === "IN_PROGRESS" ? (
+                      <div className="creator-ref-progress">
+                        <div className="creator-ref-progress-head">
+                          <strong>{progressTitle(currentStep)}</strong>
+                          <span>{`${Math.max(0, Math.round(taskProgress.percent))}%`}</span>
+                        </div>
+                        <div className="creator-ref-progress-track" aria-hidden="true">
+                          <span style={{ width: `${Math.max(0, Math.min(100, Math.round(taskProgress.percent || 0)))}%` }} />
+                        </div>
+                        <p>{realtimeMode === "websocket" ? "Live updates через WebSocket" : "Live updates через polling fallback"}</p>
                       </div>
                     ) : null}
-                  </div>
-                </div>
+                  </>
+                )}
+              </>
+            )}
+          </article>
+        </section>
+        )}
+
+        {isCategoryStage ? (
+        <section className="category-check-page">
+          {state === "error" ? (
+            <div className="category-check-alert">
+              <AlertCircle size={16} />
+              <span>{message}</span>
+              <button type="button" onClick={handleCreate} disabled={!selectedFabricId}>Повторить</button>
+            </div>
+          ) : null}
+          <Card className="category-check-panel">
+            <div className="category-check-panel-head">
+              <div>
+                <h2>Категории товаров</h2>
+                <p>{processState === "IN_PROGRESS" ? "Live updates включены. Новые строки появляются по мере готовности." : "Проверьте, подтвердите или измените категории перед генерацией данных."}</p>
+              </div>
+              <div className="category-check-panel-actions">
                 <button className="secondary-btn creator-category-reset-btn" type="button" onClick={handleClear}>
                   <Trash2 size={14} aria-hidden="true" />
                   Начать заново
@@ -1819,487 +3925,278 @@ export default function CreatorPage() {
                 </button>
               </div>
             </div>
-
-            {pagedRows.length === 0 ? (
-              <div className="creator-products-empty">
-                <Package size={28} />
-                <strong>Нет товаров</strong>
-                <p>Выберите Fabric и запустите подготовку товаров.</p>
-              </div>
-            ) : (
-              <div className="creator-ref-table-scroll">
-                <table className="creator-ref-table">
-                  <thead>
-                    <tr>
-                      <th>
-                        <input type="checkbox" checked={allFilteredRowsSelected} onChange={toggleAllFilteredRows} aria-label="Выбрать все товары" />
-                      </th>
-                      <th>Preview</th>
-                      <th>Товар</th>
-                      <th>AI Категория</th>
-                      <th>Уверенность</th>
-                      <th>Проверка</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pagedRows.map((row) => {
-                      const isSelected = selectedCategoryIndexSet.has(row.index);
-                      const reviewStatus = categoryRowStatuses[row.index];
-                      const confidenceColorClass =
-                        row.aiConfidence >= 95
-                          ? "high"
-                          : row.aiConfidence >= 80
-                            ? "medium"
-                            : "low";
-                      return (
-                        <tr
-                          key={row.index}
-                          className={selectedIndex === row.index ? "is-selected" : ""}
-                          onClick={() => setSelectedIndex(row.index)}
-                        >
-                          <td data-label="Выбор" onClick={(event) => event.stopPropagation()}>
-                            <label className="creator-category-checkbox">
-                              <input
-                                type="checkbox"
-                                checked={isSelected}
-                                onChange={() => toggleCategorySelection(row.index)}
-                                aria-label={`Выбрать товар ${row.title || row.ean || row.sku || row.index}`}
-                              />
-                            </label>
-                          </td>
-                          <td data-label="Preview">
-                            {row.image ? (
-                              <img className="creator-ref-thumb" src={row.image} alt={row.title || row.sku || `product-${row.index}`} />
-                            ) : (
-                              <span className="creator-ref-thumb creator-ref-thumb-empty">-</span>
-                            )}
-                          </td>
-                          <td data-label="Товар">
-                            <div className="creator-category-title-cell">
-                              <span>{`EAN: ${row.ean || "-"}`}</span>
-                              <strong>{row.title || "-"}</strong>
-                            </div>
-                          </td>
-                          <td data-label="AI Категория">
-                            <div className="creator-category-select-cell">
-                              <select
-                                value={row.selectedCategory || ""}
-                                onClick={(event) => event.stopPropagation()}
-                                onChange={(event) => updateRowCategory(row.index, event.target.value)}
-                                disabled={state === "loading" || availableCategories.length === 0}
-                              >
-                                <option value="">{availableCategories.length === 0 ? "Нет категорий" : "Выберите категорию"}</option>
-                                {availableCategories.map((item) => <option key={item} value={item}>{item}</option>)}
-                              </select>
-                              <span className="creator-category-ai-hint">{`AI: ${row.aiCategory || "Не определена"}`}</span>
-                            </div>
-                          </td>
-                          <td data-label="Уверенность">
-                            <div className={`creator-confidence ${confidenceColorClass}`}>
-                              <strong>{`${Math.max(0, Math.min(100, Math.round(row.aiConfidence || 0)))}%`}</strong>
-                              <div className="creator-confidence-track" aria-hidden="true">
-                                <span style={{ width: `${Math.max(0, Math.min(100, Math.round(row.aiConfidence || 0)))}%` }} />
-                              </div>
-                            </div>
-                          </td>
-                          <td data-label="Проверка">
-                            <div className="creator-category-review-inline" onClick={(event) => event.stopPropagation()}>
-                              <div className={`creator-category-status ${reviewStatus}`}>
-                                {reviewStatus === "confirmed" ? (
-                                  <CheckCircle2 size={16} aria-hidden="true" />
-                                ) : reviewStatus === "manually_confirmed" ? (
-                                  <Pencil size={16} aria-hidden="true" />
-                                ) : reviewStatus === "manually_changed" ? (
-                                  <Pencil size={16} aria-hidden="true" />
-                                ) : (
-                                  <TriangleAlert size={16} aria-hidden="true" />
-                                )}
-                                <span>
-                                  {reviewStatus === "confirmed"
-                                    ? "Подтверждено"
-                                    : reviewStatus === "manually_confirmed"
-                                      ? "Подтверждено вручную"
-                                      : reviewStatus === "manually_changed"
-                                        ? "Изменено вручную"
-                                        : "Требует проверки"}
-                                </span>
-                              </div>
-                              <button
-                                className="secondary-btn"
-                                type="button"
-                                onClick={() => (
-                                  reviewStatus === "confirmed" || reviewStatus === "manually_confirmed"
-                                    ? unconfirmCategoryRows([row.index])
-                                    : confirmCategoryRows([row.index])
-                                )}
-                              >
-                                {reviewStatus === "confirmed" || reviewStatus === "manually_confirmed"
-                                  ? "Отменить подтверждение"
-                                  : "Подтвердить"}
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            <div className="creator-products-pagination">
-              <div className="creator-products-pagination-left">
-                <select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}>
-                  {[10, 25, 50, 100].map((item) => <option key={item} value={item}>{`${item} на странице`}</option>)}
-                </select>
-                <span>{`${filteredRows.length === 0 ? 0 : (safePage - 1) * pageSize + 1}-${Math.min(safePage * pageSize, filteredRows.length)} из ${filteredRows.length}`}</span>
-              </div>
-              <div className="creator-products-pagination-right">
-                <button type="button" disabled={safePage <= 1} onClick={() => setPage((prev) => Math.max(1, prev - 1))}><ChevronLeft size={14} /></button>
-                {paginationItems.map((item, idx) => typeof item === "number" ? (
-                  <button key={`${item}-${idx}`} type="button" className={item === safePage ? "active" : ""} onClick={() => setPage(item)}>{item}</button>
-                ) : (
-                  <span key={`${item}-${idx}`}>...</span>
-                ))}
-                <button type="button" disabled={safePage >= totalPages} onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}><ChevronRight size={14} /></button>
-              </div>
-            </div>
+            <CategoryCheckToolbar
+              tableQuery={tableQuery}
+              setTableQuery={setTableQuery}
+              statusFilter={categoryStatusFilter}
+              setStatusFilter={setCategoryStatusFilter}
+              categorySort={categorySort}
+              setCategorySort={setCategorySort}
+              setPage={setPage}
+            />
+            <CategoryCheckBatchActions
+              selectedCount={selectedCategoryRowIndexes.length}
+              selectedConfirmableCount={selectedConfirmableCount}
+              editSelected={() => setIsBulkCategoryDrawerOpen(true)}
+              confirmSelected={() => confirmCategoryRows(selectedCategoryRowIndexes)}
+              skipSelected={() => skipCategoryRows(selectedCategoryRowIndexes)}
+              resetSelected={() => {
+                setSelectedCategoryRowIndexes([]);
+                setIsBulkCategoryDrawerOpen(false);
+                setBulkCategoryValue("");
+              }}
+            />
+            <CategoryCheckTable
+              rows={pagedRows}
+              categoryRowStatuses={categoryRowStatuses}
+              selectedCategoryIndexSet={selectedCategoryIndexSet}
+              allFilteredRowsSelected={allFilteredRowsSelected}
+              toggleAllFilteredRows={toggleAllFilteredRows}
+              toggleCategorySelection={toggleCategorySelection}
+              confirmCategoryRows={confirmCategoryRows}
+              openDetails={setDetailsCategoryIndex}
+              selectedIndex={selectedIndex}
+              setSelectedIndex={setSelectedIndex}
+              pageSize={pageSize}
+              setPageSize={setPageSize}
+              safePage={safePage}
+              totalPages={totalPages}
+              paginationItems={paginationItems}
+              setPage={setPage}
+              filteredCount={filteredRows.length}
+              state={state}
+              processState={processState}
+              rowNumberStart={(safePage - 1) * pageSize}
+            />
           </Card>
+          <CategoryEditDrawer
+            row={editingCategoryRow}
+            categoryOptionsByGroup={categoryOptionsByGroup}
+            open={editingCategoryIndex !== null}
+            onSave={(category, comment) => {
+              if (editingCategoryIndex !== null) saveCategoryEdit(editingCategoryIndex, category, comment);
+            }}
+            onClose={() => setEditingCategoryIndex(null)}
+          />
+          <BulkCategoryEditDrawer
+            open={isBulkCategoryDrawerOpen}
+            count={selectedCategoryRowIndexes.length}
+            groups={selectedCategoryGroups}
+            options={bulkCategoryOptions}
+            value={bulkCategoryValue}
+            setValue={setBulkCategoryValue}
+            onClose={() => setIsBulkCategoryDrawerOpen(false)}
+            onApply={applyBulkCategory}
+          />
+          <CategoryReviewDrawer
+            row={detailsCategoryRow}
+            status={detailsCategoryStatus}
+            history={detailsCategoryHistory}
+            categoryOptionsByGroup={categoryOptionsByGroup}
+            open={detailsCategoryIndex !== null}
+            onSave={(category, comment) => {
+              if (detailsCategoryIndex !== null) saveCategoryEdit(detailsCategoryIndex, category, comment);
+            }}
+            position={detailsCategoryPosition}
+            total={filteredRows.length}
+            onPrevious={() => navigateCategoryDetails(detailsCategoryPosition - 1)}
+            onNext={() => navigateCategoryDetails(detailsCategoryPosition + 1)}
+            onClose={() => setDetailsCategoryIndex(null)}
+          />
         </section>
         ) : null}
 
-        {workflowStep === "details" ? (
-        <section className="creator-ref-main-grid creator-ref-main-grid-details">
-              <aside className="creator-ref-editor">
-                <div className="creator-ref-editor-head">
-                  <h3>Редактор товара</h3>
-                </div>
-                <div className="saas-editor-image-wrap">
-                  {selectedImage ? <img className="saas-editor-image" src={selectedImage} alt={String(selectedProduct.sku ?? "preview")} /> : <div className="saas-editor-image saas-editor-image-empty">No image</div>}
-                </div>
-                <div className="saas-editor-grid creator-ref-editor-grid">
-                  <label className={fieldHasError(["sku"]) ? "creator-field-error" : ""}>SKU<input value={String(selectedProduct.sku ?? "")} onChange={(event) => updateSelected(["sku"], event.target.value)} /></label>
-                  <label className={fieldHasError(["ean"]) ? "creator-field-error" : ""}>EAN<input value={String(selectedProduct.ean ?? "")} onChange={(event) => updateSelected(["ean"], event.target.value)} /></label>
-                  <label className={fieldHasError(["reference", "productreference"]) ? "creator-field-error" : ""}>Product Reference<input value={String(selectedProduct.productReference ?? "")} onChange={(event) => updateSelected(["productReference"], event.target.value)} /></label>
-                  <label className={fieldHasError(["category", "kategorie"]) ? "creator-field-error" : ""}>Category<input value={String(selectedDescription.category ?? "")} onChange={(event) => updateSelected(["productDescription", "category"], event.target.value)} /></label>
-                  <label className={fieldHasError(["price", "preis", "amount"]) ? "creator-field-error" : ""}>Price
-                    <input
-                      value={String(selectedStandardPrice.amount ?? "")}
-                      onChange={(event) => {
-                        const value = event.target.value.trim();
-                        const amount = value === "" ? 0 : Number(value);
-                        if (Number.isNaN(amount)) return;
-                        setProducts((prev) => {
-                          const next = [...prev];
-                          next[selectedIndex] = updateProductField(asRecord(next[selectedIndex]), ["pricing", "standardPrice", "amount"], amount);
-                          return next;
-                        });
-                      }}
-                    />
-                  </label>
-                  <label className={fieldHasError(["productline", "line"]) ? "creator-field-error" : ""}>Product Line<input value={String(selectedDescription.productLine ?? "")} onChange={(event) => updateSelected(["productDescription", "productLine"], event.target.value)} /></label>
-                </div>
-                <div className="creator-ref-tabs">
-                  <button className={editorTab === "general" ? "active" : ""} onClick={() => setEditorTab("general")} type="button">Основное</button>
-                  <button className={editorTab === "attributes" ? "active" : ""} onClick={() => setEditorTab("attributes")} type="button">Атрибуты</button>
-                  <button className={editorTab === "json" ? "active" : ""} onClick={() => setEditorTab("json")} type="button">JSON</button>
-                </div>
-                {editorTab === "general" ? (
-                  <div className="saas-editor-grid">
-                    <label className={fieldHasError(["bullet", "point"]) ? "creator-field-error" : ""}>Bullet Points (one per line)
-                      <textarea
-                        value={selectedBulletPoints.join("\n")}
-                        onChange={(event) => {
-                          const next = event.target.value
-                            .split("\n")
-                            .map((line) => line.trim())
-                            .filter(Boolean);
-                          setProducts((prev) => {
-                            const copy = [...prev];
-                            copy[selectedIndex] = updateProductField(
-                              asRecord(copy[selectedIndex]),
-                              ["productDescription", "bulletPoints"],
-                              next,
-                            );
-                            return copy;
-                          });
-                        }}
-                        rows={6}
-                      />
-                    </label>
-                  </div>
-                ) : null}
-                {editorTab === "attributes" ? (
-                  <div className="creator-attributes-v3">
-                    <div className="creator-attributes-v3-toolbar">
-                      <input
-                        type="search"
-                        value={attributeQuery}
-                        onChange={(event) => setAttributeQuery(event.target.value)}
-                        placeholder="Поиск атрибута..."
-                      />
-                    </div>
-                    {filteredAttributeCards.length === 0 ? <p>Ничего не найдено.</p> : null}
-                    {(["Основные характеристики", "Комплектация", "Дополнительно"] as const).map((groupName) => (
-                      groupedAttributeCards[groupName].length > 0 ? (
-                        <section key={groupName} className="creator-attributes-v3-group">
-                          <h4>{groupName}</h4>
-                          <div className="creator-attributes-v3-grid">
-                            {groupedAttributeCards[groupName].map((attribute) => {
-                              const key = `${attribute.index}`;
-                              const isExpanded = expandedAttributes.includes(key);
-                              const isValueEditing = editingAttribute?.index === attribute.index && editingAttribute.field === "values";
-                              const valueIsLong = attribute.values.length > 90;
-                              const attrName = normalizeFieldToken(attribute.name);
-                              const isAttributeError = selectedErrorFieldTokens.some((fieldToken) =>
-                                fieldToken.includes(attrName) || attrName.includes(fieldToken),
-                              );
+        {!isEnrichmentLoading && workflowStep !== "categories" ? (
+          <ProductReviewPage>
+            {bulkToast ? <div className={`bulk-edit-toast${bulkToast.error ? " is-error" : ""}`} role="status">{bulkToast.error ? <AlertCircle size={16} /> : <Check size={16} />}{bulkToast.message}</div> : null}
+            <BulkSelectionBar
+              count={selectedReviewRowIndexes.length}
+              onBulkEdit={() => bulkAttributeEdit.setOpen(true)}
+              onApprove={approveSelectedReviewProducts}
+              onReject={rejectSelectedReviewProducts}
+              onClear={() => setSelectedReviewRowIndexes([])}
+            />
+            <div className="product-review-layout">
+              <ProductList
+                rows={reviewRows}
+                selectedIndex={selectedIndex}
+                selectedReviewIndexes={selectedReviewRowIndexes}
+                onSelect={setSelectedIndex}
+                onToggleSelect={toggleReviewSelection}
+                searchRef={reviewSearchRef}
+                query={reviewSearchQuery}
+                setQuery={setReviewSearchQuery}
+                filter={reviewQueueFilter}
+                setFilter={setReviewQueueFilter}
+              />
+              <main className="product-review-workspace">
+                {products.length === 0 ? (
+                  <div className="product-review-empty workspace"><strong>Select a product to review</strong></div>
+                ) : (
+                  <>
+                    <ProductReviewHeader row={selectedReviewRowForRender} image={selectedImage} />
+                    {selectedProductErrors.length > 0 ? (
+                      <button className="product-review-error-indicator" type="button" onClick={() => setIsErrorDrawerOpen(true)}>
+                        <AlertCircle size={16} />
+                        {`Errors (${selectedProductErrors.length})`}
+                      </button>
+                    ) : null}
+                    <ReviewTabs value={editorTab} setValue={setEditorTab} />
+                    {editorTab === "general" ? (
+                      <div className="product-overview-grid">
+                        <section className="product-overview-card product-overview-identifiers">
+                          <div className="product-overview-card-head"><h3>Identifiers</h3></div>
+                          <div className="product-overview-fields">
+                            {[
+                              { key: "sku", label: "SKU", value: String(selectedProduct.sku ?? ""), path: ["sku"] },
+                              { key: "ean", label: "EAN", value: String(selectedProduct.ean ?? ""), path: ["ean"] },
+                              { key: "product-reference", label: "Product Reference", value: String(selectedProduct.productReference ?? ""), path: ["productReference"] },
+                            ].map((field) => {
+                              const copyKey = `overview-${field.key}`;
+                              const editing = editingOverviewField === field.key;
                               return (
-                                <Card className={`creator-attributes-v3-card ${isAttributeError ? "is-error" : ""}`} key={`attr-${attribute.index}`}>
-                                  <div className="creator-attributes-v3-name-wrap">
-                                    <p className="creator-attributes-v3-name">{attribute.name || "Без названия"}</p>
-                                    <button
-                                      type="button"
-                                      className="creator-attributes-v3-delete"
-                                      onClick={() => deleteAttribute(attribute.index)}
-                                      aria-label="Удалить атрибут"
-                                      title="Удалить атрибут"
-                                    >
-                                      <Trash2 size={14} />
-                                    </button>
+                                <div className="product-overview-field attribute-field-card" key={field.key}>
+                                  <div className="product-overview-field-head attribute-field-card-head">
+                                    <span>{field.label}</span>
+                                    {!editing ? <OverviewActionsMenu onEdit={() => setEditingOverviewField(field.key)} onCopy={() => void copyText(field.value, copyKey)} canCopy={Boolean(field.value)} copied={copiedRuntimeField === copyKey} /> : null}
                                   </div>
-                                  <div className="creator-attributes-v3-value-wrap">
-                                    {isValueEditing ? (
-                                      <input
-                                        autoFocus
-                                        value={editingDraft}
-                                        onBlur={saveAttributeEdit}
-                                        onChange={(event) => setEditingDraft(event.target.value)}
-                                        onKeyDown={(event) => {
-                                          if (event.key === "Enter") saveAttributeEdit();
-                                          if (event.key === "Escape") {
-                                            setEditingAttribute(null);
-                                            setEditingDraft("");
-                                          }
-                                        }}
-                                      />
-                                    ) : (
-                                      <>
-                                        <button
-                                          type="button"
-                                          className={`creator-attributes-v3-value ${isExpanded ? "expanded" : ""}`}
-                                          onClick={() => startAttributeEdit(attribute.index, "values", attribute.values)}
-                                        >
-                                          {attribute.values || "—"}
-                                        </button>
-                                        {valueIsLong ? (
-                                          <button
-                                            type="button"
-                                            className="creator-attributes-v3-expand"
-                                            onClick={() =>
-                                              setExpandedAttributes((prev) =>
-                                                prev.includes(key)
-                                                  ? prev.filter((item) => item !== key)
-                                                  : [...prev, key],
-                                              )
-                                            }
-                                          >
-                                            {isExpanded ? "Свернуть" : "Показать полностью"}
-                                          </button>
-                                        ) : null}
-                                      </>
-                                    )}
-                                  </div>
-                                </Card>
+                                  {editing ? (
+                                    <div className="attribute-field-editor"><input autoFocus value={field.value} onChange={(event) => updateSelected(field.path, event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} /><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
+                                  ) : (
+                                    <button type="button" className={`attribute-field-value${field.value ? "" : " is-empty"}`} onClick={() => setEditingOverviewField(field.key)}>{field.value || "Not provided"}</button>
+                                  )}
+                                </div>
                               );
                             })}
                           </div>
                         </section>
-                      ) : null
-                    ))}
-                  </div>
-                ) : null}
-                {editorTab === "json" ? (
-                  <div className="saas-editor-grid">
-                    <label>Attributes (JSON array)
-                      <textarea
-                        value={JSON.stringify(selectedAttributes, null, 2)}
-                        onChange={(event) => {
-                          try {
-                            const parsed = JSON.parse(event.target.value);
-                            if (!Array.isArray(parsed)) return;
-                            setProducts((prev) => {
-                              const copy = [...prev];
-                              copy[selectedIndex] = updateProductField(
-                                asRecord(copy[selectedIndex]),
-                                ["productDescription", "attributes"],
-                                parsed,
-                              );
-                              return copy;
-                            });
-                          } catch {
-                            // let user type invalid JSON temporarily without crashing
-                          }
-                        }}
-                        rows={12}
-                      />
-                    </label>
-                  </div>
-                ) : null}
-              </aside>
 
-              <Card className="creator-products-card">
-                <div className="creator-products-head">
-                  <div>
-                    <h2 className="text-xl font-semibold">Товары</h2>
-                    <p className="text-sm text-[var(--muted-fg)]">{`${filteredRows.length} товаров`}</p>
-                  </div>
-                  <div className="creator-products-controls">
-                    <div className="creator-search-wrap">
-                      <Search size={16} className="creator-search-icon" />
-                      <input
-                        className="creator-search-input"
-                        placeholder="Поиск по SKU, категории или артикулу..."
-                        type="search"
-                        value={tableQuery}
-                        onChange={(event) => {
-                          setTableQuery(event.target.value);
-                          setPage(1);
-                        }}
-                      />
-                    </div>
-                    <div className="creator-table-popover-wrap">
-                      <button className="creator-table-top-btn" type="button" onClick={() => setIsFilterOpen((prev) => !prev)}>
-                        <Funnel
-                          size={16}
-                          color="currentColor"
-                          fill={isFilterOpen ? "#111111" : "#ffffff"}
-                        />
-                        Фильтр
-                      </button>
-                      {isFilterOpen ? (
-                        <div className="creator-table-popover">
-                          <p>Статус</p>
-                          <select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}>
-                            <option value="all">Все</option>
-                            <option value="passed">Passed</option>
-                            <option value="failed">Failed</option>
-                            <option value="processing">Processing</option>
-                            <option value="pending">Pending</option>
-                          </select>
-                          <p>Категория</p>
-                          <select value={categoryFilter} onChange={(event) => { setCategoryFilter(event.target.value); setPage(1); }}>
-                            <option value="all">Все категории</option>
-                            {categories.map((item) => <option key={item} value={item}>{item}</option>)}
-                          </select>
-                          <p>Диапазон цены</p>
-                          <div className="creator-popover-price-grid">
-                            <input placeholder="От" value={priceFrom} onChange={(event) => { setPriceFrom(event.target.value); setPage(1); }} />
-                            <input placeholder="До" value={priceTo} onChange={(event) => { setPriceTo(event.target.value); setPage(1); }} />
+                        <section className="product-overview-card">
+                          <div className="product-overview-card-head"><h3>Product Info</h3></div>
+                          <div className="product-overview-field attribute-field-card">
+                            <div className="product-overview-field-head attribute-field-card-head">
+                              <span>Product Line</span>
+                              {editingOverviewField !== "product-line" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("product-line")} /> : null}
+                            </div>
+                            {editingOverviewField === "product-line" ? (
+                              <div className="attribute-field-editor"><input autoFocus value={String(selectedDescription.productLine ?? "")} onChange={(event) => updateSelected(["productDescription", "productLine"], event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} /><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
+                            ) : (
+                              <button type="button" className={`attribute-field-value${String(selectedDescription.productLine ?? "").trim() ? "" : " is-empty"}`} onClick={() => setEditingOverviewField("product-line")}>{String(selectedDescription.productLine ?? "").trim() || "Not provided"}</button>
+                            )}
                           </div>
-                          <p>Наличие ошибок</p>
-                          <select value={errorFilter} onChange={(event) => { setErrorFilter(event.target.value as "all" | "with_errors" | "only_success"); setPage(1); }}>
-                            <option value="all">Все</option>
-                            <option value="with_errors">Только с ошибками</option>
-                            <option value="only_success">Только успешные</option>
-                          </select>
-                        </div>
-                      ) : null}
-                    </div>
-                    <div className="creator-products-head-actions">
-                      <button className="secondary-btn" type="button" onClick={handleClear}>Очистить</button>
-                      <button className="primary-btn" type="button" onClick={submitEditedProducts}>Загрузить</button>
-                    </div>
-                  </div>
-                </div>
+                        </section>
 
-                <div className="creator-products-grid-head">
-                  <span>Preview</span>
-                  <span>SKU</span>
-                  <span>Delivery Profile</span>
-                  <span className="is-right">Price</span>
-                  <span className="creator-status-head">Status</span>
-                </div>
+                        <section className="product-overview-card product-overview-pricing">
+                          <div className="product-overview-card-head"><h3>Pricing</h3></div>
+                          <div className="product-overview-field attribute-field-card">
+                            <div className="product-overview-field-head attribute-field-card-head">
+                              <span>Price</span>
+                              {editingOverviewField !== "price" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("price")} /> : null}
+                            </div>
+                            {editingOverviewField === "price" ? (
+                              <div className="attribute-field-editor"><div className="product-overview-price-input">
+                                <input autoFocus inputMode="decimal" value={String(selectedStandardPrice.amount ?? "")} onChange={(event) => {
+                                  const amount = Number(event.target.value.trim() || 0);
+                                  if (Number.isNaN(amount)) return;
+                                  setProducts((prev) => {
+                                    const next = [...prev];
+                                    next[selectedIndex] = updateProductField(asRecord(next[selectedIndex]), ["pricing", "standardPrice", "amount"], amount);
+                                    return next;
+                                  });
+                                }} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} />
+                                {selectedCurrencyLabel ? <span>{selectedCurrencyLabel}</span> : null}
+                              </div><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
+                            ) : (
+                              <button type="button" className={`attribute-field-value${selectedStandardPrice.amount === undefined || selectedStandardPrice.amount === null || selectedStandardPrice.amount === "" ? " is-empty" : ""}`} onClick={() => setEditingOverviewField("price")}>{selectedStandardPrice.amount === undefined || selectedStandardPrice.amount === null || selectedStandardPrice.amount === "" ? "Not provided" : `${String(selectedStandardPrice.amount)}${selectedCurrencyLabel ? ` ${selectedCurrencyLabel}` : ""}`}</button>
+                            )}
+                          </div>
+                        </section>
 
-                {pagedRows.length === 0 ? (
-                  <div className="creator-products-empty">
-                    <Package size={28} />
-                    <strong>Нет товаров</strong>
-                    <p>Выберите Fabric и запустите подготовку товаров.</p>
-                  </div>
-                ) : (
-                  pagedRows.map((row) => (
-                    <div
-                      key={row.index}
-                      className={`creator-products-row ${selectedIndex === row.index ? "is-selected" : ""}`}
-                      onClick={() => setSelectedIndex(row.index)}
-                    >
-                      <span className="creator-products-preview" data-label="Preview">
-                        {row.image ? (
-                          <img className="creator-ref-thumb" src={row.image} alt={row.sku || `product-${row.index}`} />
-                        ) : (
-                          <span className="creator-ref-thumb creator-ref-thumb-empty">-</span>
-                        )}
-                      </span>
-                      <span className="creator-products-sku" data-label="SKU">
-                        <strong>{row.sku || "-"}</strong>
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            navigator.clipboard.writeText(row.sku || "");
-                            setCopiedSkuIndex(row.index);
-                            window.setTimeout(() => setCopiedSkuIndex(null), 1200);
-                          }}
-                        >
-                          <Copy size={14} />
-                          {copiedSkuIndex === row.index ? <em>Скопировано</em> : null}
-                        </button>
-                      </span>
-                      <span className="creator-products-delivery" data-label="Delivery Profile" title={row.shippingProfileName || "-"}>
-                        <select
-                          value={row.shippingProfileId}
-                          onClick={(event) => event.stopPropagation()}
-                          onChange={(event) => updateRowShippingProfile(row.index, event.target.value)}
-                          disabled={state === "loading" || shippingProfiles.length === 0}
-                        >
-                          {shippingProfiles.length === 0 ? <option value="">Нет профилей</option> : null}
-                          {shippingProfiles.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                        </select>
-                      </span>
-                      <span className="creator-products-price" data-label="Price">{row.price || "-"}</span>
-                      <span className="creator-products-status" data-label="Status">
-                        <Badge
-                          className={`creator-ref-status-pill ${row.status}`}
-                          variant={row.status === "passed" ? "success" : row.status === "failed" ? "outline" : "secondary"}
-                        >
-                          <span className="creator-ref-status-dot" aria-hidden="true" />
-                          {rowStatusLabel(row.status)}
-                        </Badge>
-                      </span>
-                    </div>
-                  ))
+                        <section className="product-overview-card product-overview-generated">
+                          <div className="product-overview-card-head">
+                            <h3>Generated Content</h3>
+                            {editingOverviewField !== "bullet-points" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("bullet-points")} /> : <button type="button" onClick={() => setEditingOverviewField(null)}>Done</button>}
+                          </div>
+                          <div className="product-overview-field product-overview-bullets">
+                            <span>Bullet Points</span>
+                            {editingOverviewField === "bullet-points" ? (
+                              <textarea autoFocus value={selectedBulletPoints.join("\n")} onChange={(event) => {
+                                const next = event.target.value.split("\n").map((line) => line.trim()).filter(Boolean);
+                                setProducts((prev) => {
+                                  const copy = [...prev];
+                                  copy[selectedIndex] = updateProductField(asRecord(copy[selectedIndex]), ["productDescription", "bulletPoints"], next);
+                                  return copy;
+                                });
+                              }} />
+                            ) : selectedBulletPoints.length > 0 ? (
+                              <ul>{selectedBulletPoints.map((bulletPoint, index) => <li key={`${index}-${bulletPoint}`}>{bulletPoint}</li>)}</ul>
+                            ) : (
+                              <div className="product-overview-empty"><strong>No generated content</strong><span>Bullet points have not been generated yet.</span></div>
+                            )}
+                          </div>
+                        </section>
+                      </div>
+                    ) : null}
+                    {editorTab === "attributes" ? (
+                      <AttributeEditor
+                        attributes={attributeCards}
+                        categoryAttributes={categoryAttributes}
+                        isLoadingCategoryAttributes={isLoadingCategoryAttributes}
+                        categoryAttributesError={categoryAttributesError}
+                        newAttributeName={newAttributeName}
+                        setNewAttributeName={setNewAttributeName}
+                        newAttributeValue={newAttributeValue}
+                        setNewAttributeValue={setNewAttributeValue}
+                        addAttribute={addAttribute}
+                        editingAttribute={editingAttribute}
+                        editingDraft={editingDraft}
+                        setEditingDraft={setEditingDraft}
+                        startAttributeEdit={startAttributeEdit}
+                        saveAttributeEdit={saveAttributeEdit}
+                        cancelAttributeEdit={cancelAttributeEdit}
+                        deleteAttribute={deleteAttribute}
+                        invalidAttributeNames={invalidAttributeNames}
+                      />
+                    ) : null}
+                    {editorTab === "json" ? (
+                      <section className="product-review-section">
+                        <div className="product-review-section-head"><h3>Raw Payload</h3></div>
+                        <textarea className="product-review-json" value={JSON.stringify(selectedProduct, null, 2)} readOnly rows={18} />
+                      </section>
+                    ) : null}
+                    {editorTab === "diff" ? <DiffViewer aftercool={selectedAftercoolData} /> : null}
+                  </>
                 )}
-
-                <div className="creator-products-pagination">
-                  <div className="creator-products-pagination-left">
-                    <select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}>
-                      {[10, 25, 50, 100].map((item) => <option key={item} value={item}>{`${item} на странице`}</option>)}
-                    </select>
-                    <span>{`${filteredRows.length === 0 ? 0 : (safePage - 1) * pageSize + 1}-${Math.min(safePage * pageSize, filteredRows.length)} из ${filteredRows.length}`}</span>
-                  </div>
-                  <div className="creator-products-pagination-right">
-                    <button type="button" disabled={safePage <= 1} onClick={() => setPage((prev) => Math.max(1, prev - 1))}><ChevronLeft size={14} /></button>
-                    {paginationItems.map((item, idx) => typeof item === "number" ? (
-                      <button key={`${item}-${idx}`} type="button" className={item === safePage ? "active" : ""} onClick={() => setPage(item)}>{item}</button>
-                    ) : (
-                      <span key={`${item}-${idx}`}>...</span>
-                    ))}
-                    <button type="button" disabled={safePage >= totalPages} onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}><ChevronRight size={14} /></button>
-                  </div>
-                </div>
-              </Card>
-        </section>
+              </main>
+            </div>
+            <StickyActionBar
+              onReject={() => rejectReviewProduct(selectedIndex)}
+              onSave={saveReviewDraft}
+              onApprove={() => approveReviewProduct(selectedIndex)}
+              onSubmit={submitEditedProducts}
+              approved={approvedComparisonIndexSet.has(selectedIndex)}
+              approvedCount={comparisonApprovedCount}
+              totalCount={rows.length}
+              allApproved={allComparisonsApproved}
+              disabled={products.length === 0 || state === "loading"}
+            />
+            <ErrorDrawer open={isErrorDrawerOpen} errors={selectedProductErrors} onClose={() => setIsErrorDrawerOpen(false)} />
+            <BulkAttributeEditDrawer
+              count={selectedReviewRowIndexes.length}
+              options={bulkAttributeOptions}
+              isLoading={isLoadingCategoryAttributes}
+              state={bulkAttributeEdit}
+              onClose={bulkAttributeEdit.reset}
+              onApply={applyBulkAttributeChanges}
+            />
+            <CategoryEditDrawer
+              row={rowByIndex.get(selectedIndex) ?? null}
+              categoryOptionsByGroup={categoryOptionsByGroup}
+              open={editingCategoryIndex === selectedIndex}
+              onSave={(category, comment) => saveCategoryEdit(selectedIndex, category, comment)}
+              onClose={() => setEditingCategoryIndex(null)}
+            />
+          </ProductReviewPage>
         ) : null}
       </div>
     </AppWorkspaceShell>

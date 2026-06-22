@@ -236,6 +236,10 @@ class OttoClient:
     async def get_categories(self, payload: dict) -> OttoCategoryResponse:
         """Fetch category values from OTTO category-group responses."""
 
-        response_data = await self._request("GET", "/v5/products/categories", params=payload)
-        
+        response_data = await self._request(
+            "GET", "/v5/products/categories", params=payload
+        )
+        if isinstance(response_data, list):
+            response_data = {"categoryGroups": response_data}
+
         return parse(OttoCategoryResponse, response_data)

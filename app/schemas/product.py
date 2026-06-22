@@ -157,7 +157,7 @@ class Product(BaseModel):
     sku: str
     ean: Optional[str] = None
     aiCategory: Optional[str] = None
-    aiCategoryConfidence: int = 0
+    aiCategoryGroup: Optional[str] = None
     productDescription: ProductDescription
     pricing: Pricing
     mediaAssets: List[MediaAsset]

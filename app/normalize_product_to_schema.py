@@ -21,7 +21,14 @@ def _pick_text(*values: Any) -> str | None:
 def _parse_float(value: Any, default: float = 0.0) -> float:
     if value is None:
         return default
-    text = str(value).strip().replace(",", ".")
+    text = re.sub(r"[^\d,.-]", "", str(value).strip())
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text:
+        text = text.replace(",", ".")
     match = re.search(r"-?\d+(?:\.\d+)?", text)
     if not match:
         return default
@@ -140,7 +147,16 @@ def build_normalized_product(
 ) -> dict[str, Any]:
     """Build the minimal valid product payload used by the factory flow."""
     specifics = _parse_specifics(source.get("CustomItemSpecifics"))
-    ean = _pick_text(source.get("EAN"), source.get("ean"), source.get("sku")) or ""
+    ean = (
+        _pick_text(
+            source.get("EAN"),
+            source.get("ean"),
+            specifics.get("EAN"),
+            specifics.get("ean"),
+            source.get("sku"),
+        )
+        or ""
+    )
     title = _pick_text(source.get("Artikelbeschreibung"), source.get("title"), ean)
     category = (
         _pick_text(
@@ -151,6 +167,11 @@ def build_normalized_product(
         or "Regal"
     )
     description = description_html or _description(source, specifics)
+    price = _parse_float(source.get("Startpreis"), 0.0)
+    if price <= 0:
+        raise ValueError(
+            f"Positive product price is missing for EAN/SKU {ean or 'unknown'}"
+        )
 
     return {
         "productReference": ean,
@@ -169,7 +190,7 @@ def build_normalized_product(
         },
         "pricing": {
             "standardPrice": {
-                "amount": _parse_float(source.get("Startpreis"), 0.0),
+                "amount": price,
                 "currency": "EUR",
             },
             "vat": "FULL",

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import xml.etree.ElementTree as ET
 from datetime import UTC, date, datetime
 from io import BytesIO
 from pathlib import Path
@@ -26,6 +27,7 @@ from fastapi.responses import JSONResponse
 from openpyxl import load_workbook
 from sqlalchemy import asc, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.arq_app import enqueue_job
 from app.core.configs import settings
@@ -36,6 +38,9 @@ from app.dependencies import (
     require_role,
 )
 from app.mapper.normalizer import build_normalized_product
+from app.models.attributes import Attribute
+from app.models.categories import Category
+from app.models.category_group import CategoryGroup
 from app.models.product_import_tasks import ProductImportTask
 from app.models.products import Product
 from app.schemas.enums import Controller, RoleEnum, SortOrderEnum
@@ -306,6 +311,26 @@ def _pick_text(*values: Any) -> str | None:
     return None
 
 
+def _extract_specifics_text(xml_data: Any, key: str) -> str | None:
+    if not isinstance(xml_data, str) or not xml_data.strip():
+        return None
+
+    try:
+        root = ET.fromstring(xml_data)
+    except ET.ParseError:
+        return None
+
+    for item in root.iter():
+        children = list(item)
+        if len(children) < 2:
+            continue
+        name = (children[0].text or "").strip()
+        value = (children[1].text or "").strip()
+        if name == key and value:
+            return value
+    return None
+
+
 def _ensure_product_identity(
     *,
     normalized: dict[str, Any],
@@ -313,7 +338,12 @@ def _ensure_product_identity(
     mapped_item: dict[str, Any] | None,
     index: int,
 ) -> None:
-    source_ean = _pick_text(source_item.get("EAN"), source_item.get("ean"))
+    source_ean = _pick_text(
+        source_item.get("EAN"),
+        source_item.get("ean"),
+        _extract_specifics_text(source_item.get("CustomItemSpecifics"), "EAN"),
+        _extract_specifics_text(source_item.get("CustomItemSpecifics"), "ean"),
+    )
     if not source_ean:
         fallback = _pick_text(
             normalized.get("ean"),
@@ -372,6 +402,50 @@ def _save_final_edited_payloads_snapshot(
     return file_path
 
 
+async def _load_category_group_contexts() -> dict[str, dict[str, Any]]:
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(CategoryGroup)
+            .options(
+                selectinload(CategoryGroup.categories),
+                selectinload(CategoryGroup.attributes).selectinload(
+                    Attribute.allowed_values
+                ),
+            )
+            .order_by(CategoryGroup.name.asc())
+        )
+        groups = result.scalars().unique().all()
+
+        contexts: dict[str, dict[str, Any]] = {}
+        for group in groups:
+            categories = sorted(
+                [category.name for category in group.categories if category.name],
+                key=str.casefold,
+            )
+            attributes = []
+            for attr in group.attributes:
+                attributes.append(
+                    {
+                        "name": attr.name,
+                        "description": attr.description,
+                        "type": attr.type,
+                        "multiValue": attr.multi_value,
+                        "relevance": attr.relevance,
+                        "unit": attr.unit,
+                        "allowedValues": [
+                            item.value for item in attr.allowed_values if item.value
+                        ],
+                    }
+                )
+            contexts[group.name] = {
+                "categoryGroup": group.name,
+                "categories": categories,
+                "attributes": attributes,
+            }
+
+        return contexts
+
+
 async def _build_factory_prepared_products(
     *,
     payload: ProductFactoryCreateRequestDTO,
@@ -379,6 +453,7 @@ async def _build_factory_prepared_products(
     product_service: ProductService,
     mapping_progress_callback: Any | None = None,
     mapping_total_callback: Any | None = None,
+    normalized_item_callback: Any | None = None,
 ) -> tuple[list[ProductPayload], int, int, list[str], list[dict[str, Any]]]:
     from app.mapper.product_mapper import ProductMapper
 
@@ -414,12 +489,29 @@ async def _build_factory_prepared_products(
         step_name="fetch_afterbuy_products",
         timeout_sec=FACTORY_FETCH_TIMEOUT_SEC,
         fn=lambda: afterbuy.get_products_by_factory_id(
-            payload.controller, int(payload.factory_id)
+            payload.controller,
+            int(payload.factory_id),
         ),
     )
     source_items = [
         item.model_dump(mode="json", exclude_none=True) for item in source.products
     ]
+
+    try:
+        await _run_step_with_timeout(
+            step_name="fetch_stammartikel_descriptions",
+            timeout_sec=FACTORY_FETCH_TIMEOUT_SEC,
+            fn=lambda: afterbuy.enrich_items_with_stammartikel_description(
+                controller=payload.controller,
+                items=source_items,
+            ),
+        )
+    except Exception as exc:
+        issues.append(f"stammartikel descriptions skipped: {exc}")
+        MAPPER_LOGGER.warning(
+            "step=fetch_stammartikel_descriptions_failed error=%s", exc
+        )
+
     if mapping_total_callback is not None:
         await mapping_total_callback(len(source_items))
     MAPPER_LOGGER.info("step=fetch_afterbuy_products count=%s", len(source_items))
@@ -431,15 +523,117 @@ async def _build_factory_prepared_products(
     )
     _flush_logger(PREPARED_UPLOAD_LOGGER)
 
+    category_group_contexts = await _run_step_with_timeout(
+        step_name="load_local_category_group_contexts",
+        timeout_sec=FACTORY_FETCH_TIMEOUT_SEC,
+        fn=_load_category_group_contexts,
+    )
+    MAPPER_LOGGER.info(
+        "step=load_local_category_group_contexts groups=%s",
+        len(category_group_contexts),
+    )
+
+    normalized_results: list[ProductPayload | None] = [None] * len(source_items)
+    normalize_semaphore = asyncio.Semaphore(FACTORY_PRODUCT_CONCURRENCY)
+
+    async def _build_and_publish_normalized_one(
+        index: int,
+        source_item: dict[str, Any],
+        mapped_item: dict[str, Any] | None,
+    ) -> None:
+        try:
+            if isinstance(normalized_results[index], ProductPayload):
+                return
+            ean = source_item.get("EAN") or source_item.get("ean")
+            MAPPER_LOGGER.info("step=normalize_start index=%s ean=%s", index, ean)
+            async with normalize_semaphore:
+                normalized = await asyncio.wait_for(
+                    asyncio.to_thread(build_normalized_product, source_item),
+                    timeout=FACTORY_NORMALIZE_TIMEOUT_SEC,
+                )
+            PREPARED_UPLOAD_LOGGER.info(
+                "step=normalize_preview index=%s body=%s",
+                index,
+                json.dumps(normalized, ensure_ascii=False),
+            )
+            _flush_logger(PREPARED_UPLOAD_LOGGER)
+
+            product_description = normalized.get("productDescription")
+            if isinstance(product_description, dict):
+                if isinstance(mapped_item, dict):
+                    category_group = mapped_item.get("categoryGroup")
+                    if category_group:
+                        normalized["aiCategoryGroup"] = category_group
+                    if mapped_item.get("category"):
+                        product_description["category"] = mapped_item["category"]
+                normalized["aiCategory"] = product_description.get("category")
+                product_description["description"] = None
+                product_description["bulletPoints"] = []
+                product_description["attributes"] = []
+
+            _ensure_product_identity(
+                normalized=normalized,
+                source_item=source_item,
+                mapped_item=mapped_item,
+                index=index,
+            )
+            if isinstance(normalized.get("mediaAssets"), list):
+                normalized["mediaAssets"] = _shape_media_assets_for_schema(
+                    normalized["mediaAssets"]
+                )
+
+            PREPARED_UPLOAD_LOGGER.info(
+                "step=final_product_body_candidate index=%s body=%s",
+                index,
+                json.dumps(normalized, ensure_ascii=False),
+            )
+            _flush_logger(PREPARED_UPLOAD_LOGGER)
+
+            normalized_model = ProductPayload.model_validate(normalized)
+            normalized_results[index] = normalized_model
+            if normalized_item_callback is not None:
+                await normalized_item_callback(
+                    index,
+                    normalized_model.model_dump(mode="json", exclude_none=True),
+                )
+            MAPPER_LOGGER.info(
+                "step=normalize_done index=%s ean=%s sku=%s",
+                index,
+                ean,
+                normalized.get("sku"),
+            )
+        except Exception as exc:
+            msg = f"normalize index={index} failed: {exc}"
+            issues.append(msg)
+            MAPPER_LOGGER.exception("step=normalize_error message=%s", msg)
+            PREPARED_UPLOAD_LOGGER.info(
+                "step=normalize_error index=%s error=%s",
+                index,
+                json.dumps(
+                    {"message": str(exc), "source_item": source_item},
+                    ensure_ascii=False,
+                ),
+            )
+            _flush_logger(PREPARED_UPLOAD_LOGGER)
+
+    async def _publish_mapped_item(index: int, mapped_item: dict[str, Any]) -> None:
+        if index >= len(source_items) or not isinstance(source_items[index], dict):
+            return
+        await _build_and_publish_normalized_one(index, source_items[index], mapped_item)
+
     mapper = ProductMapper(
         products=source_items,
         controller=payload.controller.value,
         otto_client=product_service.client,
+        category_group_contexts=category_group_contexts,
     )
     mapped_result = await _run_step_with_timeout(
         step_name="map_products",
         timeout_sec=FACTORY_MAP_TIMEOUT_SEC,
-        fn=lambda: mapper.payload_deploy(on_item_finished=mapping_progress_callback),
+        fn=lambda: mapper.payload_deploy(
+            on_item_finished=mapping_progress_callback,
+            on_item_mapped=_publish_mapped_item,
+        ),
     )
     mapped_items = (
         mapped_result.get("items", []) if isinstance(mapped_result, dict) else []
@@ -468,84 +662,15 @@ async def _build_factory_prepared_products(
     )
     _flush_logger(PREPARED_UPLOAD_LOGGER)
 
-    normalized_results: list[ProductPayload | None] = [None] * len(source_items)
-    normalize_semaphore = asyncio.Semaphore(FACTORY_PRODUCT_CONCURRENCY)
-
     async def _normalize_one(index: int, source_item: dict[str, Any]) -> None:
-        try:
-            ean = source_item.get("EAN") or source_item.get("ean")
-            MAPPER_LOGGER.info("step=normalize_start index=%s ean=%s", index, ean)
-            async with normalize_semaphore:
-                normalized = await asyncio.wait_for(
-                    asyncio.to_thread(build_normalized_product, source_item),
-                    timeout=FACTORY_NORMALIZE_TIMEOUT_SEC,
-                )
-            PREPARED_UPLOAD_LOGGER.info(
-                "step=normalize_preview index=%s body=%s",
-                index,
-                json.dumps(normalized, ensure_ascii=False),
-            )
-            _flush_logger(PREPARED_UPLOAD_LOGGER)
-
-            mapped_item = None
-            if index < len(mapped_items) and isinstance(mapped_items[index], dict):
-                mapped_item = mapped_items[index]
-                product_description = normalized.get("productDescription")
-                if isinstance(product_description, dict):
-                    if mapped_item.get("category"):
-                        product_description["category"] = mapped_item["category"]
-                    normalized["aiCategory"] = mapped_item.get("category")
-                    normalized["aiCategoryConfidence"] = int(
-                        mapped_item.get("categoryConfidence") or 0
-                    )
-                    product_description["description"] = None
-                    product_description["bulletPoints"] = []
-                    product_description["attributes"] = []
-            elif isinstance(normalized.get("productDescription"), dict):
-                product_description = normalized["productDescription"]
-                normalized["aiCategory"] = product_description.get("category")
-                normalized["aiCategoryConfidence"] = 0
-                product_description["description"] = None
-                product_description["bulletPoints"] = []
-                product_description["attributes"] = []
-            _ensure_product_identity(
-                normalized=normalized,
-                source_item=source_item,
-                mapped_item=mapped_item,
-                index=index,
-            )
-            if isinstance(normalized.get("mediaAssets"), list):
-                normalized["mediaAssets"] = _shape_media_assets_for_schema(
-                    normalized["mediaAssets"]
-                )
-
-            PREPARED_UPLOAD_LOGGER.info(
-                "step=final_product_body_candidate index=%s body=%s",
-                index,
-                json.dumps(normalized, ensure_ascii=False),
-            )
-            _flush_logger(PREPARED_UPLOAD_LOGGER)
-
-            normalized_results[index] = ProductPayload.model_validate(normalized)
-            MAPPER_LOGGER.info(
-                "step=normalize_done index=%s ean=%s sku=%s",
-                index,
-                ean,
-                normalized.get("sku"),
-            )
-        except Exception as exc:
-            msg = f"normalize index={index} failed: {exc}"
-            issues.append(msg)
-            MAPPER_LOGGER.exception("step=normalize_error message=%s", msg)
-            PREPARED_UPLOAD_LOGGER.info(
-                "step=normalize_error index=%s error=%s",
-                index,
-                json.dumps(
-                    {"message": str(exc), "source_item": source_item},
-                    ensure_ascii=False,
-                ),
-            )
-            _flush_logger(PREPARED_UPLOAD_LOGGER)
+        mapped_item = (
+            mapped_items[index]
+            if index < len(mapped_items) and isinstance(mapped_items[index], dict)
+            else None
+        )
+        if mapped_item is None and normalized_results[index] is None:
+            return
+        await _build_and_publish_normalized_one(index, source_item, mapped_item)
 
     await asyncio.gather(
         *[
@@ -618,7 +743,7 @@ async def _run_factory_prepare_task(
             current["heartbeat_at"] = now.isoformat()
             current["updated_at"] = now.isoformat()
             MAPPER_LOGGER.info(
-                "step=heartbeat process_id=%s current_step=%s heartbeat_count=%s",
+                "Пульс есть: process_id=%s current_step=%s heartbeat_count=%s",
                 process_id,
                 current.get("current_step"),
                 current["heartbeat_count"],
@@ -659,6 +784,24 @@ async def _run_factory_prepare_task(
             current["progress_total"] = max(0, total)
             current["progress_completed"] = 0
             current["progress_percent"] = 0
+            current["products"] = []
+            current["partial_products_by_index"] = {}
+            current["updated_at"] = datetime.now(UTC).isoformat()
+            await _save_factory_task_state(process_id, current)
+
+    async def _append_normalized_item(index: int, product: dict[str, Any]) -> None:
+        async with progress_lock:
+            current = await _get_factory_task_state(process_id) or {}
+            by_index_raw = current.get("partial_products_by_index")
+            by_index = by_index_raw if isinstance(by_index_raw, dict) else {}
+            by_index[str(index)] = product
+            current["partial_products_by_index"] = by_index
+            current["products"] = [
+                by_index[key]
+                for key in sorted(by_index, key=lambda value: int(value))
+                if isinstance(by_index.get(key), dict)
+            ]
+            current["payload_items"] = len(current["products"])
             current["updated_at"] = datetime.now(UTC).isoformat()
             await _save_factory_task_state(process_id, current)
 
@@ -676,9 +819,10 @@ async def _run_factory_prepare_task(
             product_service=product_service,
             mapping_progress_callback=_track_mapping_progress,
             mapping_total_callback=_set_mapping_total,
+            normalized_item_callback=_append_normalized_item,
         )
         MAPPER_LOGGER.info(
-            "step=category_preview_ready process_id=%s source_items=%s mapped_items=%s payload_items=%s",
+            "Категории готовы для предпросмотра: process_id=%s source_items=%s mapped_items=%s payload_items=%s",
             process_id,
             source_count,
             mapped_count,
@@ -718,7 +862,9 @@ async def _run_factory_prepare_task(
                     item.model_dump(mode="json", exclude_none=True)
                     for item in products_payload
                 ],
+                "partial_products_by_index": {},
                 "snapshot_path": snapshot_path.as_posix(),
+                "current_step": "category_preview_done",
                 "finished_at": datetime.now(UTC).isoformat(),
                 "heartbeat_at": datetime.now(UTC).isoformat(),
                 "updated_at": datetime.now(UTC).isoformat(),
@@ -1384,12 +1530,12 @@ async def get_db_products(
 async def get_db_product_categories(
     db: AsyncSession = Depends(get_db),
 ):
-    """Return distinct non-empty product categories from the local DB."""
+    """Return OTTO subcategories from the local category cache."""
     stmt = (
-        select(func.trim(Product.product_category))
-        .where(Product.product_category.is_not(None))
+        select(func.trim(Category.name))
+        .where(Category.name.is_not(None))
         .distinct()
-        .order_by(func.trim(Product.product_category).asc())
+        .order_by(func.trim(Category.name).asc())
     )
     result = await db.execute(stmt)
     raw_items = result.scalars().all()
@@ -1413,6 +1559,99 @@ async def get_db_product_categories(
         "items": unique_items,
         "total": len(unique_items),
     }
+
+
+@router.get("/db/category-groups/categories")
+async def get_db_category_group_categories(
+    category_group: list[str] = Query(default=[]),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return local OTTO subcategories only for the requested CategoryGroups."""
+    requested_groups: list[str] = []
+    seen_groups: set[str] = set()
+    for item in category_group:
+        normalized = str(item or "").strip()
+        if not normalized:
+            continue
+        key = normalized.casefold()
+        if key in seen_groups:
+            continue
+        seen_groups.add(key)
+        requested_groups.append(normalized)
+
+    if not requested_groups:
+        return {"items": [], "total": 0}
+
+    stmt = (
+        select(CategoryGroup)
+        .options(selectinload(CategoryGroup.categories))
+        .where(func.lower(CategoryGroup.name).in_([item.casefold() for item in requested_groups]))
+        .order_by(CategoryGroup.name.asc())
+    )
+    result = await db.execute(stmt)
+    groups = result.scalars().unique().all()
+
+    items: list[dict[str, Any]] = []
+    for group in groups:
+        categories = sorted(
+            {
+                str(category.name).strip()
+                for category in group.categories
+                if category.name and str(category.name).strip()
+            },
+            key=str.casefold,
+        )
+        if not categories:
+            categories = [str(group.name).strip()]
+        items.append({"categoryGroup": group.name, "categories": categories})
+
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/db/category-attributes")
+async def get_db_category_attributes(
+    category: str | None = Query(default=None),
+    category_group: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return local OTTO attributes for a product category or CategoryGroup."""
+    normalized_category = str(category or "").strip()
+    normalized_group = str(category_group or "").strip()
+    if not normalized_category and not normalized_group:
+        return {"items": [], "total": 0, "categoryGroup": None}
+
+    stmt = (
+        select(CategoryGroup)
+        .options(selectinload(CategoryGroup.attributes).selectinload(Attribute.allowed_values))
+        .order_by(CategoryGroup.name.asc())
+    )
+    if normalized_category:
+        stmt = stmt.join(Category).where(func.lower(Category.name) == normalized_category.casefold())
+    else:
+        stmt = stmt.where(func.lower(CategoryGroup.name) == normalized_group.casefold())
+
+    result = await db.execute(stmt)
+    group = result.scalars().unique().first()
+    if group is None:
+        return {"items": [], "total": 0, "categoryGroup": None}
+
+    items = [
+        {
+            "name": attr.name,
+            "description": attr.description,
+            "type": attr.type,
+            "multiValue": attr.multi_value,
+            "relevance": attr.relevance,
+            "unit": attr.unit,
+            "allowedValues": sorted(
+                {item.value for item in attr.allowed_values if item.value},
+                key=str.casefold,
+            ),
+        }
+        for attr in sorted(group.attributes, key=lambda item: item.name.casefold())
+        if attr.name
+    ]
+    return {"items": items, "total": len(items), "categoryGroup": group.name}
 
 
 async def _get_otto_product_categories(
@@ -1705,6 +1944,7 @@ async def get_db_product(
 async def create_product_task_from_factory(
     payload: ProductFactoryCreateRequestDTO,
     afterbuy: AfterbuyService = Depends(get_afterbuy_login),
+    current_user=Depends(require_role([RoleEnum.SEO])),
     product_service: ProductService = Depends(get_product_service),
 ):
     run_id = payload.run_id or str(uuid4())
@@ -1726,7 +1966,11 @@ async def create_product_task_from_factory(
         "progress_completed": 0,
         "progress_percent": 0,
     }
-    await _save_factory_task_state(run_id, task)
+    await _save_factory_task_state(
+        run_id,
+        task,
+        created_by_user_id=current_user.id,
+    )
 
     await enqueue_job(
         "prepare_factory_products_task",
@@ -1746,6 +1990,61 @@ async def create_product_task_from_factory(
         process_id=run_id,
         process_state="IN_PROGRESS",
     )
+
+
+@router.get("/tasks/create-from-factory/latest")
+async def get_latest_factory_prepare_task(
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_role([RoleEnum.SEO])),
+):
+    final_steps = {
+        "otto_create_done",
+        "availability_done",
+        "otto_create_failed",
+        "availability_failed",
+    }
+    stmt = (
+        select(FactoryTaskState)
+        .where(FactoryTaskState.created_by_user_id == current_user.id)
+        .where(
+            or_(
+                FactoryTaskState.current_step.is_(None),
+                FactoryTaskState.current_step.notin_(final_steps),
+            )
+        )
+        .order_by(FactoryTaskState.updated_at.desc())
+        .limit(1)
+    )
+    record = (await db.execute(stmt)).scalars().first()
+    if record is None:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"success": False, "message": "No saved creation draft"},
+        )
+
+    process_id = record.process_id
+    task = await _get_factory_task_state(process_id)
+    if task is None:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"success": False, "message": "Saved creation draft not found"},
+        )
+    (
+        task,
+        heartbeat_lag_sec,
+        step_elapsed_sec,
+        is_stuck,
+    ) = await _mark_factory_task_stale_if_needed(process_id, task)
+    return {
+        "success": True,
+        "process_id": process_id,
+        "process_state": task.get("status"),
+        "heartbeat_lag_sec": heartbeat_lag_sec,
+        "step_elapsed_sec": step_elapsed_sec,
+        "stuck": is_stuck or bool(task.get("stuck")),
+        "stuck_message": task.get("stuck_message"),
+        **task,
+    }
 
 
 @router.get("/tasks/create-from-factory/{process_id}")
@@ -1793,6 +2092,7 @@ async def delete_factory_prepare_task(process_id: str):
 async def save_factory_prepare_task_draft(
     process_id: str,
     payload: dict[str, Any],
+    current_user=Depends(require_role([RoleEnum.SEO])),
 ):
     task = await _get_factory_task_state(process_id)
     if task is None:
@@ -1840,7 +2140,11 @@ async def save_factory_prepare_task_draft(
     task["frontend_draft"] = frontend_draft
     task["updated_at"] = datetime.now(UTC).isoformat()
 
-    await _save_factory_task_state(process_id, task)
+    await _save_factory_task_state(
+        process_id,
+        task,
+        created_by_user_id=current_user.id,
+    )
     return {
         "success": True,
         "process_id": process_id,
@@ -1891,6 +2195,76 @@ async def factory_prepare_task_ws(websocket: WebSocket, process_id: str):
         return
 
 
+def _compact_source_specifics(source_item: dict[str, Any] | None) -> dict[str, str]:
+    if not isinstance(source_item, dict):
+        return {}
+    xml_data = source_item.get("CustomItemSpecifics")
+    if not isinstance(xml_data, str) or not xml_data.strip():
+        return {}
+    try:
+        root = ET.fromstring(xml_data)
+    except ET.ParseError:
+        return {}
+
+    result: dict[str, str] = {}
+    for item in root.findall("NameValueList"):
+        name = item.findtext("Name")
+        if not name:
+            continue
+        values = [
+            value.text.strip()
+            for value in item.findall("Value")
+            if value.text and value.text.strip()
+        ]
+        if values:
+            result[name.strip()] = ", ".join(values)
+    return result
+
+
+def _build_aftercool_comparison(
+    *,
+    source_item: dict[str, Any] | None,
+    generated_product: dict[str, Any],
+) -> dict[str, Any]:
+    source = source_item if isinstance(source_item, dict) else {}
+    specifics = _compact_source_specifics(source)
+    description = (
+        generated_product.get("productDescription")
+        if isinstance(generated_product.get("productDescription"), dict)
+        else {}
+    )
+    generated_attrs = description.get("attributes")
+    aftercool_attrs = [
+        {"name": key, "values": [value]}
+        for key, value in sorted(specifics.items(), key=lambda item: item[0].casefold())
+        if key and value
+    ]
+
+    return {
+        "approved": False,
+        "aftercool": {
+            "title": source.get("Artikelbeschreibung"),
+            "description": (
+                source.get("StammartikelBeschreibungDetailsHtml")
+                or source.get("TranslatedDescription")
+                or source.get("Description")
+                or source.get("Beschreibung")
+            ),
+            "attributes": aftercool_attrs,
+            "price": source.get("Startpreis"),
+            "ean": source.get("EAN") or source.get("ean") or specifics.get("EAN"),
+        },
+        "generated": {
+            "title": description.get("productLine"),
+            "description": description.get("description"),
+            "bulletPoints": description.get("bulletPoints") or [],
+            "attributes": generated_attrs if isinstance(generated_attrs, list) else [],
+            "category": description.get("category"),
+            "ean": generated_product.get("ean"),
+        },
+    }
+
+
 async def _run_factory_enrichment_task(
     *,
     process_id: str,
@@ -1916,10 +2290,12 @@ async def _run_factory_enrichment_task(
         task.get("controller") or payload.get("controller") or "jv"
     ).lower()
     controller = Controller(controller_value)
+    category_group_contexts = await _load_category_group_contexts()
     ai_mapper = ProductMapper(
         products=[],
         controller=controller.value,
         otto_client=product_service.client,
+        category_group_contexts=category_group_contexts,
     )
 
     now = datetime.now(UTC).isoformat()
@@ -1933,8 +2309,8 @@ async def _run_factory_enrichment_task(
     task["progress_total"] = len(products)
     task["progress_completed"] = 0
     task["progress_percent"] = 0
-    task.pop("products", None)
-    task.pop("source_items_raw", None)
+    task["products"] = products
+    task["partial_products_by_index"] = {}
     await _save_factory_task_state(process_id, task)
 
     MAPPER_LOGGER.info(
@@ -1987,10 +2363,24 @@ async def _run_factory_enrichment_task(
                 timeout=FACTORY_AI_ENRICH_ITEM_TIMEOUT_SEC,
             )
             enriched_model = ProductPayload.model_validate(enriched_payload)
-            enriched_products[index] = enriched_model.model_dump(
+            enriched_dump = enriched_model.model_dump(
                 mode="json", exclude_none=True
             )
+            enriched_dump["aftercoolComparison"] = _build_aftercool_comparison(
+                source_item=source_item,
+                generated_product=enriched_dump,
+            )
+            enriched_products[index] = enriched_dump
             async with progress_lock:
+                by_index_raw = task.get("partial_products_by_index")
+                by_index = by_index_raw if isinstance(by_index_raw, dict) else {}
+                by_index[str(index)] = enriched_dump
+                task["partial_products_by_index"] = by_index
+                current_products = task.get("products")
+                next_products = list(current_products) if isinstance(current_products, list) else list(products)
+                if index < len(next_products):
+                    next_products[index] = enriched_dump
+                task["products"] = next_products
                 task["progress_completed"] = int(task.get("progress_completed", 0)) + 1
                 task["progress_percent"] = int(
                     round((task["progress_completed"] / max(1, len(products))) * 100)
@@ -2017,10 +2407,20 @@ async def _run_factory_enrichment_task(
                         await _enrich_one(index, item)
                     except Exception as exc:
                         fallback_model = ProductPayload.model_validate(item)
-                        enriched_products[index] = fallback_model.model_dump(
+                        fallback_dump = fallback_model.model_dump(
                             mode="json",
                             exclude_none=True,
                         )
+                        fallback_dump["aftercoolComparison"] = _build_aftercool_comparison(
+                            source_item=(
+                                source_items[index]
+                                if index < len(source_items)
+                                and isinstance(source_items[index], dict)
+                                else None
+                            ),
+                            generated_product=fallback_dump,
+                        )
+                        enriched_products[index] = fallback_dump
                         message = f"AI enrichment failed at index={index} sku={fallback_model.sku}: {exc}"
                         item_failures.append(message)
                         MAPPER_LOGGER.exception(
@@ -2032,6 +2432,15 @@ async def _run_factory_enrichment_task(
                             exc,
                         )
                         async with progress_lock:
+                            by_index_raw = task.get("partial_products_by_index")
+                            by_index = by_index_raw if isinstance(by_index_raw, dict) else {}
+                            by_index[str(index)] = fallback_dump
+                            task["partial_products_by_index"] = by_index
+                            current_products = task.get("products")
+                            next_products = list(current_products) if isinstance(current_products, list) else list(products)
+                            if index < len(next_products):
+                                next_products[index] = fallback_dump
+                            task["products"] = next_products
                             task["progress_completed"] = (
                                 int(task.get("progress_completed", 0)) + 1
                             )
@@ -2062,6 +2471,7 @@ async def _run_factory_enrichment_task(
         task["products"] = [
             item for item in enriched_products if isinstance(item, dict)
         ]
+        task["partial_products_by_index"] = {}
         task["current_step"] = "ai_enrichment_done"
         task["current_step_started_at"] = datetime.now(UTC).isoformat()
         task["updated_at"] = task["current_step_started_at"]
@@ -2165,6 +2575,8 @@ async def enrich_factory_prepared_products(
         task["progress_total"] = len(products)
         task["progress_completed"] = 0
         task["progress_percent"] = 0
+        task["products"] = products
+        task["partial_products_by_index"] = {}
         await _save_factory_task_state(process_id, task)
 
     await enqueue_job(

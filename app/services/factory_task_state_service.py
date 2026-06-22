@@ -4,6 +4,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from redis import asyncio as redis_asyncio
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient
+except ImportError:  # pragma: no cover - optional dependency fallback
+    AsyncIOMotorClient = None
 
 from app.core.configs import settings
 from app.database import SessionLocal
@@ -13,6 +17,8 @@ from app.models.factory_task_states import FactoryTaskState
 class FactoryTaskStateService:
     def __init__(self) -> None:
         self._redis = None
+        self._mongo_client = None
+        self._mongo_collection = None
         self._logger = logging.getLogger("factory_task_state")
 
     async def _get_redis(self):
@@ -28,6 +34,28 @@ class FactoryTaskStateService:
             self._redis = None
         return self._redis
 
+    async def _get_mongo_collection(self):
+        if not settings.mongodb_url or AsyncIOMotorClient is None:
+            return None
+        if self._mongo_collection is not None:
+            return self._mongo_collection
+        try:
+            self._mongo_client = AsyncIOMotorClient(settings.mongodb_url)
+            database = self._mongo_client[settings.mongodb_database]
+            self._mongo_collection = database[
+                settings.mongodb_factory_tasks_collection
+            ]
+            await self._mongo_collection.create_index("process_id", unique=True)
+            await self._mongo_collection.create_index("created_by_user_id")
+            await self._mongo_collection.create_index("controller")
+            await self._mongo_collection.create_index("factory_id")
+            await self._mongo_collection.create_index("status")
+            await self._mongo_collection.create_index("current_step")
+        except Exception:
+            self._logger.debug("mongo_init_failed")
+            self._mongo_collection = None
+        return self._mongo_collection
+
     @staticmethod
     def _cache_key(process_id: str) -> str:
         return f"factory-task-state:{process_id}"
@@ -39,6 +67,17 @@ class FactoryTaskStateService:
         return task
 
     async def get_task(self, process_id: str) -> dict[str, Any] | None:
+        mongo_collection = await self._get_mongo_collection()
+        if mongo_collection is not None:
+            try:
+                document = await mongo_collection.find_one({"process_id": process_id})
+                if isinstance(document, dict):
+                    payload = document.get("task_payload")
+                    if isinstance(payload, dict):
+                        return self._normalize_task(process_id, payload)
+            except Exception:
+                self._logger.debug("mongo_get_failed process_id=%s", process_id)
+
         redis_client = await self._get_redis()
         if redis_client is not None:
             try:
@@ -106,10 +145,48 @@ class FactoryTaskStateService:
                 record.finished_at = now if status in {"DONE", "FAILED"} else None
             await session.commit()
 
+        mongo_collection = await self._get_mongo_collection()
+        if mongo_collection is not None:
+            try:
+                await mongo_collection.update_one(
+                    {"process_id": process_id},
+                    {
+                        "$set": {
+                            "process_id": process_id,
+                            "created_by_user_id": created_by_user_id,
+                            "controller": str(controller) if controller else None,
+                            "factory_id": (
+                                str(factory_id) if factory_id is not None else None
+                            ),
+                            "status": status,
+                            "current_step": str(current_step)
+                            if current_step
+                            else None,
+                            "task_payload": normalized,
+                            "error_message": error_message,
+                            "updated_at": now,
+                            "finished_at": now
+                            if status in {"DONE", "FAILED"}
+                            else None,
+                        },
+                        "$setOnInsert": {"created_at": now},
+                    },
+                    upsert=True,
+                )
+            except Exception:
+                self._logger.debug("mongo_save_failed process_id=%s", process_id)
+
         await self.cache_task(process_id, normalized)
         return normalized
 
     async def delete_task(self, process_id: str) -> None:
+        mongo_collection = await self._get_mongo_collection()
+        if mongo_collection is not None:
+            try:
+                await mongo_collection.delete_one({"process_id": process_id})
+            except Exception:
+                self._logger.debug("mongo_delete_failed process_id=%s", process_id)
+
         redis_client = await self._get_redis()
         if redis_client is not None:
             try:

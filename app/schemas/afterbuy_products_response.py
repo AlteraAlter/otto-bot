@@ -6,15 +6,17 @@ from app.schemas.afterbuy_enums import Kind
 
 
 class ProductBase(BaseModel):
-    Artikelbeschreibung: str | None = None
-    Description: str | None = None
-    TranslatedDescription: str | None = None
-    PictureURL: str | None = None
-    pictureurls: str | None = None
-    CustomItemSpecifics: str | None = None
-    Menge: str | None = None
-    Startpreis: str | None = None
-    Currency: str | None = None
+    Artikelbeschreibung: Optional[str] = None
+    Beschreibung: Optional[str] = None
+    Description: Optional[str] = None
+    TranslatedDescription: Optional[str] = None
+    PictureURL: Optional[str] = None
+    pictureurls: Optional[str] = None
+    CustomItemSpecifics: Optional[str] = None
+    I_stammartikel: Optional[str] = None
+    Menge: Optional[str] = None
+    Startpreis: Optional[str] = None
+    Currency: Optional[str] = None
 
     model_config = ConfigDict(extra="ignore")
 

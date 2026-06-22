@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     afterbuy_username: str
     afterbuy_password: str
     redis_url: str = "redis://127.0.0.1:6379/0"
+    mongodb_url: str | None = None
+    mongodb_database: str = "otto_bot"
+    mongodb_factory_tasks_collection: str = "factory_task_states"
 
     # ARQ settings
     arq_redis_url: str | None = None

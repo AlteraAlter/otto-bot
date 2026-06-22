@@ -25,10 +25,13 @@ class DescriptionGenerator:
         - Explain how the product fits into a living space.
         - Highlight practical benefits when supported by product data.
         - Mention important materials and visual characteristics when available.
+        - If StammartikelBeschreibungDetailsHtml is present, use it as a trusted
+        source for product details, materials, colors and dimensions.
 
         Do NOT:
 
         - Repeat bullet points word for word.
+        - Copy HTML tags or raw tab/panel text into the description.
         - List attributes one after another.
         - Turn the description into a specification sheet.
         - Mention EAN.

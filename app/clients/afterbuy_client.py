@@ -91,7 +91,13 @@ class AfterbuyClient:
         result = response.json()
         return FactoriesFetchResponse(factory=result.get("items"))
 
-    async def get_products_by_factory_id(self, session, controller, factory_id):
+    async def get_products_by_factory_id(
+        self,
+        session,
+        controller,
+        factory_id,
+        limit: int | None = None,
+    ):
         """Получает фильтрованные данные по контроллеру и фабрике"""
 
         response = await self.send_request(
@@ -102,7 +108,7 @@ class AfterbuyClient:
                 "dataset": "lister",
                 "factory_id": factory_id,
                 "include_row": 1,
-                "limit": 0,
+                "limit": limit if limit is not None else 0,
             },
             cookies={"session": session},
         )
@@ -114,3 +120,38 @@ class AfterbuyClient:
         products = [ProductBase.model_validate(data) for data in raw_datas if data]
 
         return ProductFetchResponse(products=products)
+
+    async def get_lister_row_by_query(
+        self,
+        *,
+        session: str,
+        account: str,
+        query: str,
+    ) -> dict[str, Any] | None:
+        """Fetch one lister row by the Afterbuy full-text query."""
+        response = await self.send_request(
+            "GET",
+            "/api/products",
+            params={
+                "account": account,
+                "dataset": "lister",
+                "include_row": 1,
+                "limit": 1,
+                "q": query,
+            },
+            cookies={"session": session},
+        )
+        response.raise_for_status()
+
+        items = response.json().get("items")
+        if not isinstance(items, list) or not items:
+            return None
+
+        first_item = items[0]
+        if not isinstance(first_item, dict):
+            return None
+
+        row = first_item.get("row")
+        if row is None:
+            row = first_item
+        return row if isinstance(row, dict) else None

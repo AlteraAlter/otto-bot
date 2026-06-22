@@ -1,15 +1,16 @@
 import asyncio
+import hashlib
+import json
 import logging
-import xml
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
-from xxlimited import Str
+from typing import Any
 
 import httpx
+from pydantic import BaseModel
 
 from app.clients.otto_client import OttoClient
 from app.core.configs import settings
-from app.schemas.product_query import CategoryQuery
 from app.utils.attribute_generator import AttributeGenerator
 from app.utils.bullet_point_generator import BulletPointGenerator
 from app.utils.category_classifier import CategoryClassifier
@@ -18,6 +19,49 @@ from app.utils.gpt_helper import GPTHelper
 
 PRODUCT_AI_CONCURRENCY = 10
 
+AI_SOURCE_SPECIFIC_KEYS = {
+    "Abteilung",
+    "Anzahl der Einheiten",
+    "Anzahl der Sitzplätze",
+    "Anzahl der Teile",
+    "Ausführung",
+    "Ausrichtung",
+    "Besonderheiten",
+    "Breite",
+    "Farbe",
+    "Form",
+    "Füllmaterial",
+    "Gestellmaterial",
+    "Härtegrad",
+    "Holzart",
+    "Holzton",
+    "Höhe",
+    "Länge",
+    "Material",
+    "Montage erforderlich",
+    "Muster",
+    "Polsterstoff",
+    "Produktart",
+    "Rahmenfarbe",
+    "Sitzhöhe",
+    "Sitztiefe",
+    "Stil",
+    "Stil der Armlehne",
+    "Stil der Rückenlehne",
+    "Tiefe",
+    "Tischplattenmaterial",
+    "Zimmer",
+}
+AI_SOURCE_EXCLUDED_KEYS = {
+    "EAN",
+    "Herstellergarantie",
+    "Herstellernummer",
+    "Marke",
+    "Personalisiert",
+    "Verpackung",
+    "Zusätzlich benötigte Teile",
+}
+
 
 class ProductMapper:
     def __init__(
@@ -25,12 +69,15 @@ class ProductMapper:
         products: list[dict],
         controller: str,
         otto_client: OttoClient | None = None,
+        category_group_contexts: dict[str, dict[str, Any]] | None = None,
     ):
         self.products = products
         self._gpt = GPTHelper(settings.gpt_key)
+        self.category_group_contexts = category_group_contexts or {}
 
         self.classifier: CategoryClassifier = CategoryClassifier(
-            self._gpt.client, settings.CATEGORIES
+            self._gpt.client,
+            sorted(self.category_group_contexts) or settings.CATEGORIES,
         )
 
         self.bullet_point_generator: BulletPointGenerator = BulletPointGenerator(
@@ -48,10 +95,12 @@ class ProductMapper:
         self.logger = logging.getLogger("product_mapper_flow")
         self._category_attrs_cache: dict[str, list[dict]] = {}
         self._category_attrs_locks: dict[str, asyncio.Lock] = {}
+        self._category_group_prediction_cache: dict[str, dict[str, Any]] = {}
 
     async def payload_deploy(
         self,
         on_item_finished: Callable[[], Awaitable[None]] | None = None,
+        on_item_mapped: Callable[[int, dict], Awaitable[None]] | None = None,
     ):
         result: list[dict | None] = [None] * len(self.products)
         issues: list[dict] = []
@@ -69,16 +118,18 @@ class ProductMapper:
                 async with semaphore:
                     mapped = await self.clean_data(product)
                 result[index] = mapped
+                if on_item_mapped is not None:
+                    await on_item_mapped(index, mapped)
                 self.logger.info(
                     "Маппер закончился: ean=%s index=%s",
-                    index,
                     ean,
+                    index,
                 )
             except Exception as exc:
                 self.logger.exception(
                     "Маппер провалился ean=%s index=%s error=%s",
-                    index,
                     ean,
+                    index,
                     exc,
                 )
                 issues.append(
@@ -109,18 +160,27 @@ class ProductMapper:
         }
 
         xml_data = product.get("CustomItemSpecifics")
+        specifics = self._parse_item_specifics(xml_data)
+        ean = specifics.get("EAN") or product.get("EAN") or product.get("ean")
+        if ean:
+            result["EAN"] = ean
 
-        ean = self.prepare_cis(xml_data, result)
+        category_source = self._prepare_ai_source(
+            product,
+            include_descriptions=False,
+            include_images=True,
+        )
 
         self.logger.info("Старт генерации категория для ean=%s", ean)
-        category_result = await self.get_category(result)
-        result["category"] = category_result.get("category")
-        result["categoryConfidence"] = int(category_result.get("confidence") or 0)
+        category_result = await self.get_category(category_source)
+        category_group = str(category_result.get("categoryGroup") or "").strip()
+        result["categoryGroup"] = category_group
+        result["category"] = self._default_category_for_group(category_group)
         self.logger.info(
-            "Закончено генерация категории для ean=%s category=%s confidence=%s",
+            "Закончено генерация группы категории для ean=%s category_group=%s category=%s",
             ean,
+            category_group,
             result.get("category"),
-            result.get("categoryConfidence"),
         )
 
         return result
@@ -160,6 +220,113 @@ class ProductMapper:
 
         return shaped
 
+    @staticmethod
+    def _prepare_ai_source(
+        source: dict,
+        *,
+        include_descriptions: bool = True,
+        include_images: bool = False,
+    ) -> dict:
+        prepared: dict[str, Any] = {}
+        title = source.get("Artikelbeschreibung") or source.get("title")
+        if isinstance(title, str) and title.strip():
+            prepared["Artikelbeschreibung"] = title.strip()
+
+        specifics = ProductMapper._parse_item_specifics(source.get("CustomItemSpecifics"))
+        for key in AI_SOURCE_SPECIFIC_KEYS:
+            value = specifics.get(key) or source.get(key)
+            if ProductMapper._has_ai_value(value):
+                prepared[key] = value
+
+        for key, value in source.items():
+            if not isinstance(key, str):
+                continue
+            if key in prepared or key in AI_SOURCE_EXCLUDED_KEYS:
+                continue
+            if key.startswith("Maße") and ProductMapper._has_ai_value(value):
+                prepared[key] = value
+
+        for key, value in specifics.items():
+            if key not in prepared and key.startswith("Maße"):
+                prepared[key] = value
+
+        if include_images:
+            image_urls = ProductMapper._extract_image_urls(source)
+            if image_urls:
+                prepared["imageUrls"] = image_urls
+
+        if include_descriptions:
+            placeholder_values = {"<-StammBeschreibung->", "<-stammbeschreibung->"}
+            for key in ("Description", "Beschreibung", "TranslatedDescription"):
+                value = source.get(key)
+                if isinstance(value, str) and value.strip() in placeholder_values:
+                    continue
+                if isinstance(value, str) and value.strip():
+                    prepared[key] = value.strip()
+
+            stamm_description = source.get("StammartikelBeschreibungDetailsHtml")
+            if isinstance(stamm_description, str) and stamm_description.strip():
+                prepared["StammartikelBeschreibungDetailsHtml"] = (
+                    stamm_description.strip()
+                )
+                prepared.setdefault("Beschreibung", stamm_description.strip())
+
+        return prepared
+
+    @staticmethod
+    def _has_ai_value(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, list):
+            return any(ProductMapper._has_ai_value(item) for item in value)
+        return True
+
+    @staticmethod
+    def _parse_item_specifics(xml_data: Any) -> dict[str, Any]:
+        if not isinstance(xml_data, str) or not xml_data.strip():
+            return {}
+
+        try:
+            root = ET.fromstring(xml_data)
+        except ET.ParseError:
+            return {}
+
+        result: dict[str, Any] = {}
+        for item in root.findall("NameValueList"):
+            name = item.findtext("Name")
+            if not name:
+                continue
+            values = [
+                value.text.strip()
+                for value in item.findall("Value")
+                if value.text and value.text.strip()
+            ]
+            if not values:
+                continue
+            result[name] = values[0] if len(values) == 1 else values
+
+        return result
+
+    @staticmethod
+    def _extract_image_urls(source: dict) -> list[str]:
+        raw_values: list[Any] = [
+            source.get("PictureURL"),
+            source.get("pictureurls"),
+            source.get("Bild"),
+            source.get("bild"),
+        ]
+        urls: list[str] = []
+        for raw_value in raw_values:
+            if not isinstance(raw_value, str):
+                continue
+            for part in raw_value.replace("\n", ",").replace(";", ",").split(","):
+                url = part.strip()
+                if url.startswith(("http://", "https://")) and url not in urls:
+                    urls.append(url)
+        return urls[:5]
+
     async def enrich_after_category_approval(
         self,
         product: dict,
@@ -171,8 +338,15 @@ class ProductMapper:
         product_description = dict(result.get("productDescription") or {})
         result["productDescription"] = product_description
 
-        source = source_item or product
+        source = self._prepare_ai_source(source_item or product)
+        compact_source = self._prepare_ai_source(
+            source_item or product,
+            include_descriptions=False,
+        )
         category = str(product_description.get("category") or "").strip()
+        category_group = str(result.get("aiCategoryGroup") or "").strip()
+        if not category_group:
+            category_group = self._category_group_for_category(category)
         ean = source.get("EAN") or source.get("ean") or result.get("ean")
 
         if not category:
@@ -182,25 +356,34 @@ class ProductMapper:
             )
             return result
 
+        if not category_group:
+            self.logger.info(
+                "Группа категории отсутствует для ean=%s category=%s. Используется category как fallback для AI context",
+                ean,
+                category,
+            )
+            category_group = category
+
         self.logger.info(
-            "Старт генерации оставшихся свойств для ean=%s с категорией category=%s",
+            "Старт генерации оставшихся свойств для ean=%s category=%s category_group=%s",
             ean,
             category,
+            category_group,
         )
 
         try:
-            direct_map = self.direct_map_attrs(source)
+            direct_map = self.direct_map_attrs(compact_source)
             self.logger.info("Атрибуты замапано: ean=%s count=%s", ean, len(direct_map))
 
             category_attrs_task: asyncio.Task[list[dict]] | None = None
-            if self.otto_client:
+            if category_group:
                 category_attrs_task = asyncio.create_task(
-                    self._get_cleaned_category_attrs(category)
+                    self._get_cleaned_category_attrs(category_group)
                 )
 
-            bullet_source = dict(source)
+            bullet_source = dict(compact_source)
             bullet_source["bulletPoints"] = ["Made in Europa"]
-            self.logger.info("step=ai_bullet_points_start ean=%s", ean)
+            self.logger.info("Генерация буллет поинтов: ean=%s", ean)
             bullet_points = await self.get_bullet_points(bullet_source)
             self.logger.info(
                 "Буллет поинты сгенерированы для ean=%s",
@@ -219,10 +402,10 @@ class ProductMapper:
             if category_attrs_task:
                 try:
                     self.logger.info(
-                        "Генерация оставшихся аттрибутов: ean=%s category=%s",
-                        ean,
-                        category,
-                    )
+                            "Генерация оставшихся аттрибутов: ean=%s category_group=%s",
+                            ean,
+                            category_group,
+                        )
                     cleaned_otto_attrs = await category_attrs_task
                     self.logger.info("Клин аттрибутов для ean=%s", ean)
                     direct_attr_names = {item["name"] for item in direct_map}
@@ -233,9 +416,9 @@ class ProductMapper:
                     }
                     if not cleaned_otto_attrs:
                         self.logger.info(
-                            "AI аттрибуты скипнуты: ean=%s category=%s reason=no_otto_attrs",
+                            "AI аттрибуты скипнуты: ean=%s category_group=%s reason=no_group_attrs",
                             ean,
-                            category,
+                            category_group,
                         )
                     elif otto_attr_names and otto_attr_names.issubset(
                         direct_attr_names
@@ -247,8 +430,8 @@ class ProductMapper:
                         )
                     else:
                         generated = await self.attribute_generator.generate(
-                            category=category,
-                            source_attributes=source,
+                            category=category_group,
+                            source_attributes=compact_source,
                             bullet_points=bullet_points,
                             otto_attributes=cleaned_otto_attrs,
                             exclude_attributes=direct_map,
@@ -266,16 +449,16 @@ class ProductMapper:
                         self.logger.info if status_code == 404 else self.logger.warning
                     )
                     log_fn(
-                        "Ошибка генерации ean=%s category=%s status=%s",
+                        "Ошибка генерации ean=%s category_group=%s status=%s",
                         ean,
-                        category,
+                        category_group,
                         status_code,
                     )
                 except Exception as exc:
                     self.logger.warning(
-                        "step=ai_otto_category_attrs_generation_failed_fallback_direct_only ean=%s category=%s error=%s",
+                        "step=ai_category_group_attrs_generation_failed_fallback_direct_only ean=%s category_group=%s error=%s",
                         ean,
-                        category,
+                        category_group,
                         exc,
                     )
 
@@ -298,8 +481,8 @@ class ProductMapper:
             )
             raise
 
-    async def _get_cleaned_category_attrs(self, category: str) -> list[dict]:
-        cache_key = f"{self.controller}:{category.casefold()}"
+    async def _get_cleaned_category_attrs(self, category_group: str) -> list[dict]:
+        cache_key = f"{self.controller}:{category_group.casefold()}"
         cached = self._category_attrs_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -310,28 +493,45 @@ class ProductMapper:
             if cached is not None:
                 return cached
 
-            if not self.otto_client:
-                self._category_attrs_cache[cache_key] = []
-                return []
-
-            categories_payload = CategoryQuery(
-                category=category,
-                page=0,
-                limit=100,
-            ).to_payload()
-            category_attributes = await self.otto_client.get_categories(
-                categories_payload
-            )
-            cleaned_otto_attrs = self.prepare_attrs(category_attributes)
+            group_context = self.category_group_contexts.get(category_group)
+            cleaned_otto_attrs = self.prepare_attrs(group_context or {})
             self._category_attrs_cache[cache_key] = cleaned_otto_attrs
             return cleaned_otto_attrs
 
     async def get_category(self, product: dict):
+        cache_key = hashlib.sha256(
+            json.dumps(product, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        cached = self._category_group_prediction_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         response = await self.classifier.classify(product)
-        return {
-            "category": response.get("category"),
-            "confidence": int(response.get("confidence") or 0),
-        }
+        result = {"categoryGroup": response.get("categoryGroup")}
+        self._category_group_prediction_cache[cache_key] = result
+        return result
+
+    def _default_category_for_group(self, category_group: str) -> str | None:
+        category_group = str(category_group or "").strip()
+        if not category_group:
+            return None
+        group_context = self.category_group_contexts.get(category_group)
+        categories = group_context.get("categories") if isinstance(group_context, dict) else None
+        if isinstance(categories, list) and categories:
+            return str(categories[0])
+        return category_group
+
+    def _category_group_for_category(self, category: str) -> str | None:
+        if not category:
+            return None
+        category_key = category.casefold()
+        for group_name, group_context in self.category_group_contexts.items():
+            categories = group_context.get("categories") if isinstance(group_context, dict) else None
+            if not isinstance(categories, list):
+                continue
+            if any(str(item).casefold() == category_key for item in categories):
+                return group_name
+        return None
 
     async def get_bullet_points(self, product: dict):
         product["bulletPoints"] = [
@@ -339,9 +539,8 @@ class ProductMapper:
             *(f"{k}: {v}" for k, v in product.items() if k.startswith("Maße")),
         ]
         if len(product["bulletPoints"]) < 5:
-            generated = await self.bullet_point_generator.generate_bullet_points(
-                product
-            )
+            generated = await self.bullet_point_generator.generate_bullet_points(product)
+
             if not isinstance(generated, list):
                 return product["bulletPoints"]
             return [*product["bulletPoints"], *generated]
@@ -371,13 +570,30 @@ class ProductMapper:
 
         return value.replace(" cm", "").strip()
 
-    def prepare_attrs(self, category_attributes: list[dict]):
+    def prepare_attrs(self, category_attributes: Any):
+        if isinstance(category_attributes, BaseModel):
+            category_attributes = category_attributes.model_dump(mode="json")
+
+        if isinstance(category_attributes, dict):
+            if isinstance(category_attributes.get("attributes"), list):
+                category_attributes = [category_attributes]
+            else:
+                category_groups = category_attributes.get("categoryGroups")
+                category_attributes = (
+                    category_groups if isinstance(category_groups, list) else []
+                )
+
+        if not isinstance(category_attributes, list):
+            return []
+
         attrs = []
 
         for root in category_attributes:
-            for value in root.values():
-                if isinstance(value, list):
-                    attrs.extend(value)
+            if not isinstance(root, dict):
+                continue
+            attributes = root.get("attributes")
+            if isinstance(attributes, list):
+                attrs.extend(attributes)
 
         result = []
 

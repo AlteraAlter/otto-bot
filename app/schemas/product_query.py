@@ -6,12 +6,12 @@ from pydantic import BaseModel, Field
 
 
 def _normalize_category(payload: dict) -> dict:
-    """Trim/capitalize category value to match upstream formatting expectations."""
+    """Trim category value while preserving upstream-sensitive casing."""
     category = payload.get("category")
     if isinstance(category, str):
         cleaned = category.strip()
         if cleaned:
-            payload["category"] = cleaned.capitalize()
+            payload["category"] = cleaned
     return payload
 
 

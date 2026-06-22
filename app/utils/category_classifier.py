@@ -18,32 +18,46 @@ class CategoryClassifier:
 
     async def classify(self, product: dict):
         system_prompt = """
-        You are an OTTO marketplace category classifier.
+        You are an OTTO marketplace category-group classifier.
 
         Rules:
-        - Select EXACTLY ONE category.
-        - Category MUST exist in provided category list.
+        - Select EXACTLY ONE category group.
+        - Category group MUST exist in provided category group list.
         - Never invent categories.
-        - Analyze title, description and attributes.
-        - Return confidence for how certain you are about the category.
-        - Confidence MUST be a number between 0 and 100.
+        - Analyze title, image, description and attributes.
         - Return valid JSON only.
 
         Format:
         {
-            "category": "...",
-            "confidence": 96
+            "categoryGroup": "..."
         }
         """
+
+        image_urls = product.get("imageUrls")
+        if not isinstance(image_urls, list):
+            image_urls = []
+        image_urls = [
+            url
+            for url in image_urls
+            if isinstance(url, str)
+            and (url.startswith("http://") or url.startswith("https://"))
+        ][:1]
 
         user_prompt = f"""
         PRODUCT:
         {json.dumps(product, ensure_ascii=False)}
 
-        AVAILABLE CATEGORIES:
+        AVAILABLE CATEGORY GROUPS:
 
         {json.dumps(self.categories, ensure_ascii=False)}
         """
+
+        user_content = user_prompt
+        if image_urls:
+            user_content = [
+                {"type": "input_text", "text": user_prompt},
+                {"type": "input_image", "image_url": image_urls[0], "detail": "low"},
+            ]
 
         response = await self.client.responses.create(
             model=self.model,
@@ -54,40 +68,25 @@ class CategoryClassifier:
                     "schema": {
                         "type": "object",
                         "properties": {
-                            "category": {"type": "string"},
-                            "confidence": {
-                                "type": "number",
-                                "minimum": 0,
-                                "maximum": 100,
-                            },
+                            "categoryGroup": {"type": "string"},
                         },
-                        "required": ["category", "confidence"],
+                        "required": ["categoryGroup"],
                         "additionalProperties": False,
                     },
                 }
             },
             input=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": user_content},
             ],
         )
 
         data = json.loads(response.output_text)
 
-        if data["category"] not in self.categories:
-            raise ValueError(f"Возвращена неправильная категория: {data['category']}")
-        raw_confidence = data.get("confidence", 0)
-        if isinstance(raw_confidence, str):
-            try:
-                raw_confidence = float(raw_confidence)
-            except ValueError:
-                raw_confidence = 0
-        confidence = (
-            float(raw_confidence) if isinstance(raw_confidence, (int, float)) else 0
-        )
-        if 0 <= confidence <= 1:
-            confidence *= 100
-        data["confidence"] = max(0, min(100, int(round(confidence))))
+        if data["categoryGroup"] not in self.categories:
+            raise ValueError(
+                f"Возвращена неправильная категория: {data['categoryGroup']}"
+            )
         return data
 
 

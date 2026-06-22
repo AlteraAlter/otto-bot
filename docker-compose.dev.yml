@@ -28,6 +28,18 @@ services:
       retries: 10
     restart: unless-stopped
 
+  mongodb:
+    image: mongo:7
+    container_name: otto-bot-mongodb-dev
+    volumes:
+      - mongodb-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   backend:
     build:
       context: .
@@ -40,6 +52,8 @@ services:
       DB_HOST: postgres
       DB_PORT: 5432
       REDIS_URL: redis://redis:6379/0
+      MONGODB_URL: mongodb://mongodb:27017
+      MONGODB_DATABASE: otto_bot
       ARQ_REDIS_URL: redis://redis:6379/0
       ARQ_QUEUE_NAME: arq:otto-bot
       FRONTEND_APP_URL: http://127.0.0.1:3000
@@ -53,6 +67,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      mongodb:
         condition: service_healthy
     restart: unless-stopped
 
@@ -73,5 +89,6 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  mongodb-data:
   uploads-data:
   backend-logs:
