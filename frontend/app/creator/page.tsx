@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type Ref } from "react";
 import { AlertCircle, Box, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Funnel, MoreVertical, Package, Pencil, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
 
 import { readApiErrorMessage, readJsonResponse } from "../lib/api";
@@ -1024,43 +1024,6 @@ function CategoryEditDrawer({
   );
 }
 
-function CategoryDrawerHeader({ onClose }: { onClose: () => void }) {
-  return (
-    <header className="category-drawer-head category-review-header">
-      <div className="category-review-heading">
-        <h3>Проверка категории</h3>
-        <p>Проверьте товар по изображению и подтвердите AI-категорию</p>
-      </div>
-      <button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button>
-    </header>
-  );
-}
-
-function ProductImageCard({ row }: { row: CategoryCheckRow }) {
-  return row.image ? (
-    <img className="category-review-product-image" src={row.image} alt={row.title || "Изображение товара"} />
-  ) : (
-    <div className="category-review-product-image-empty">
-      <Package size={42} aria-hidden="true" />
-      <span>Изображение отсутствует</span>
-    </div>
-  );
-}
-
-function ProductMeta({ row, status }: { row: CategoryCheckRow; status: CategoryReviewStatus }) {
-  return (
-    <div className="category-review-product-info">
-      <div className="category-review-product-title"><strong>{row.title || "Без названия"}</strong></div>
-      <div className="category-review-identifiers"><span>{`SKU: ${row.sku || "-"} · EAN: ${row.ean || "-"}`}</span></div>
-      <div className="category-review-product-status"><StatusBadge status={status} /></div>
-    </div>
-  );
-}
-
-function StickyProductPreview({ row, status }: { row: CategoryCheckRow; status: CategoryReviewStatus }) {
-  return <section className="category-review-preview"><ProductImageCard row={row} /><ProductMeta row={row} status={status} /></section>;
-}
-
 function CategoryChangeForm({
   currentGroup,
   currentCategory,
@@ -1069,6 +1032,9 @@ function CategoryChangeForm({
   onCancel,
   onDirtyChange,
   autoSave = false,
+  hideActions = false,
+  compact = false,
+  onDraftChange,
 }: {
   currentGroup: string;
   currentCategory: string;
@@ -1077,6 +1043,9 @@ function CategoryChangeForm({
   onCancel: () => void;
   onDirtyChange: (dirty: boolean) => void;
   autoSave?: boolean;
+  hideActions?: boolean;
+  compact?: boolean;
+  onDraftChange?: (draft: { category: string; dirty: boolean; valid: boolean }) => void;
 }) {
   const groups = useMemo(() => Object.keys(categoryOptionsByGroup).sort((a, b) => a.localeCompare(b)), [categoryOptionsByGroup]);
   const [group, setGroup] = useState(currentGroup);
@@ -1084,6 +1053,7 @@ function CategoryChangeForm({
   const [query, setQuery] = useState(currentCategory);
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [optionsStyle, setOptionsStyle] = useState<CSSProperties | undefined>(undefined);
   const comboboxRef = useRef<HTMLDivElement>(null);
   const categories = categoryOptionsByGroup[group] ?? [];
   const matches = useMemo(() => {
@@ -1091,7 +1061,11 @@ function CategoryChangeForm({
     return categories.filter((item) => !normalized || item.toLocaleLowerCase().includes(normalized)).slice(0, 80);
   }, [categories, query]);
 
-  useEffect(() => onDirtyChange(group !== currentGroup || category !== currentCategory), [group, category, currentGroup, currentCategory, onDirtyChange]);
+  useEffect(() => {
+    const dirty = group !== currentGroup || category !== currentCategory;
+    onDirtyChange(dirty);
+    onDraftChange?.({ category, dirty, valid: Boolean(category) });
+  }, [group, category, currentGroup, currentCategory, onDirtyChange, onDraftChange]);
 
   useEffect(() => {
     if (!open) return;
@@ -1103,6 +1077,41 @@ function CategoryChangeForm({
     document.addEventListener("pointerdown", closeOnOutsidePointerDown);
     return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
   }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open || !comboboxRef.current) {
+      setOptionsStyle(undefined);
+      return;
+    }
+
+    const updateOptionsPosition = () => {
+      if (!comboboxRef.current) return;
+      const rect = comboboxRef.current.getBoundingClientRect();
+      const viewportGap = 24;
+      const preferredHeight = 220;
+      const availableBelow = window.innerHeight - rect.bottom - viewportGap;
+      const availableAbove = rect.top - viewportGap;
+      const openUpward = availableBelow < 160 && availableAbove > availableBelow;
+      const maxHeight = Math.max(120, Math.min(preferredHeight, openUpward ? availableAbove - 6 : availableBelow - 6));
+
+      setOptionsStyle({
+        position: "fixed",
+        left: rect.left,
+        right: "auto",
+        width: rect.width,
+        maxHeight,
+        ...(openUpward ? { top: "auto", bottom: window.innerHeight - rect.top + 6 } : { top: rect.bottom + 6, bottom: "auto" }),
+      });
+    };
+
+    updateOptionsPosition();
+    window.addEventListener("resize", updateOptionsPosition);
+    window.addEventListener("scroll", updateOptionsPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateOptionsPosition);
+      window.removeEventListener("scroll", updateOptionsPosition, true);
+    };
+  }, [open, matches.length]);
 
   const choose = (value: string) => {
     setCategory(value);
@@ -1120,8 +1129,8 @@ function CategoryChangeForm({
   };
 
   return (
-    <div className="category-change-form">
-      <div className="category-change-current"><span>Текущая AI-категория</span><strong>{currentCategory || "-"}</strong></div>
+    <div className={`category-change-form ${compact ? "is-compact" : ""}`}>
+      {!compact ? <div className="category-change-current"><span>Текущая AI-категория</span><strong>{currentCategory || "-"}</strong></div> : null}
       <label>Category group
         <select value={group} onChange={(event) => { setGroup(event.target.value); setCategory(""); setQuery(""); setOpen(false); setActiveIndex(0); }}>
           <option value="">Выберите Category group</option>
@@ -1148,15 +1157,15 @@ function CategoryChangeForm({
             }}
           />
           <ChevronDown size={16} aria-hidden="true" />
-          {open ? <div className="category-combobox-options" id="category-options" role="listbox">
+          {open ? <div className="category-combobox-options" id="category-options" role="listbox" style={optionsStyle} onWheel={(event) => event.stopPropagation()}>
             {matches.length ? matches.map((item, index) => (
               <button className={index === activeIndex ? "active" : ""} type="button" role="option" aria-selected={category === item} key={item} onMouseDown={(event) => event.preventDefault()} onClick={() => choose(item)}>{item}</button>
             )) : <span>Категории не найдены</span>}
           </div> : null}
         </div>
       </label>
-      <div className="category-change-result"><span>Новая подкатегория</span><strong>{category || "Выберите подкатегорию"}</strong></div>
-      {!autoSave ? <div className="category-change-actions">
+      {!compact ? <div className="category-change-result"><span>Новая подкатегория</span><strong>{category || "Выберите подкатегорию"}</strong></div> : null}
+      {!autoSave && !hideActions ? <div className="category-change-actions">
         <button className="secondary-btn" type="button" onClick={cancel}>Отмена</button>
         <button className="primary-btn" type="button" disabled={!category} onClick={() => onSave(category, "")}>Сохранить изменение</button>
       </div> : null}
@@ -1174,32 +1183,76 @@ function CategoryDiff({ previous, next }: { previous: string; next: string }) {
   );
 }
 
-function CategoryReviewCard({ row, editing, categoryOptionsByGroup, onEditCancel, onDirtyChange, onSave }: {
-  row: CategoryCheckRow;
-  editing: boolean;
-  categoryOptionsByGroup: Record<string, string[]>;
-  onEditCancel: () => void;
-  onDirtyChange: (dirty: boolean) => void;
-  onSave: (category: string, comment: string) => void;
-}) {
+function CategoryReviewModalHeader({ onClose }: { onClose: () => void }) {
   return (
-    <section className="category-review-card category-review-ai-card">
-      <div className="category-review-ai-head">
-        <div><strong>AI-категория</strong><small>Текущая предложенная категория</small></div>
+    <header className="category-review-modal-header">
+      <div className="category-review-heading">
+        <h3>Проверка категории</h3>
+        <p>Проверьте товар по изображению и подтвердите AI-категорию</p>
       </div>
-      <CategoryDiff previous={row.aiCategory} next={row.selectedCategory} />
-      {editing ? <CategoryChangeForm currentGroup={row.aiCategoryGroup} currentCategory={row.selectedCategory || row.aiCategory} categoryOptionsByGroup={categoryOptionsByGroup} onSave={onSave} onCancel={onEditCancel} onDirtyChange={onDirtyChange} autoSave /> : <div className="category-review-ai-values">
-        <div><span>Выбранная Category group</span><strong>{row.aiCategoryGroup || "Category group не определена"}</strong></div>
-      </div>}
+      <button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button>
+    </header>
+  );
+}
+
+function CategoryProductImageCard({ row }: { row: CategoryCheckRow }) {
+  return row.image ? (
+    <img className="category-review-product-image" src={row.image} alt={row.title || "Изображение товара"} />
+  ) : (
+    <div className="category-review-product-image-empty">
+      <Package size={42} aria-hidden="true" />
+      <span>Изображение отсутствует</span>
+    </div>
+  );
+}
+
+function CategoryProductHero({ row, status }: { row: CategoryCheckRow; status: CategoryReviewStatus }) {
+  return (
+    <section className="category-product-hero">
+      <CategoryProductImageCard row={row} />
+      <div className="category-review-product-info">
+        <div className="category-review-product-title"><strong>{row.title || "Без названия"}</strong></div>
+        <div className="category-review-identifiers"><span>{`SKU: ${row.sku || "-"} · EAN: ${row.ean || "-"}`}</span></div>
+        <div className="category-review-product-status"><StatusBadge status={status} /></div>
+      </div>
     </section>
   );
 }
 
-function DrawerAccordion({ title, children }: { title: string; children: ReactNode }) {
-  return <details className="category-review-card category-review-more"><summary>{title}<ChevronDown size={17} /></summary>{children}</details>;
+function CategoryCategorySection({ row, categoryOptionsByGroup, canSaveDraft, onDraftChange, onDirtyChange, onSave, onSaveDraft }: {
+  row: CategoryCheckRow;
+  categoryOptionsByGroup: Record<string, string[]>;
+  canSaveDraft: boolean;
+  onDraftChange: (draft: { category: string; dirty: boolean; valid: boolean }) => void;
+  onDirtyChange: (dirty: boolean) => void;
+  onSave: (category: string, comment: string) => void;
+  onSaveDraft: () => void;
+}) {
+  return (
+    <section className="category-review-ai-panel">
+      <div className="category-review-ai-head">
+        <div><strong>AI-категория</strong><small>Текущая предложенная категория</small></div>
+      </div>
+      <CategoryDiff previous={row.aiCategory} next={row.selectedCategory} />
+      <CategoryChangeForm
+        currentGroup={row.aiCategoryGroup}
+        currentCategory={row.selectedCategory || row.aiCategory}
+        categoryOptionsByGroup={categoryOptionsByGroup}
+        onSave={onSave}
+        onCancel={() => undefined}
+        onDirtyChange={onDirtyChange}
+        onDraftChange={onDraftChange}
+        hideActions
+        compact
+      />
+      <div className="category-inline-save">
+        <button className="primary-btn" type="button" disabled={!canSaveDraft} onClick={onSaveDraft}>Сохранить изменения</button>
+      </div>
+    </section>
+  );
 }
 
-function DrawerNavigation({ position, total, onPrevious, onNext }: { position: number; total: number; onPrevious: () => void; onNext: () => void }) {
+function CategoryReviewNavigation({ position, total, onPrevious, onNext }: { position: number; total: number; onPrevious: () => void; onNext: () => void }) {
   return (
     <div className="category-review-navigation">
       <button className="secondary-btn" type="button" onClick={onPrevious} disabled={position <= 0}><ChevronLeft size={16} /> Предыдущий</button>
@@ -1209,21 +1262,107 @@ function DrawerNavigation({ position, total, onPrevious, onNext }: { position: n
   );
 }
 
-function DrawerFooterActions({ position, total, onPrevious, onNext }: {
+function CategoryReviewFooter({ position, total, onPrevious, onNext }: {
   position: number;
   total: number;
   onPrevious: () => void;
   onNext: () => void;
 }) {
-  return <footer className="category-drawer-actions category-review-actions">
-    <DrawerNavigation position={position} total={total} onPrevious={onPrevious} onNext={onNext} />
+  return <footer className="category-review-footer">
+    <CategoryReviewNavigation position={position} total={total} onPrevious={onPrevious} onNext={onNext} />
   </footer>;
 }
 
-function CategoryReviewDrawer({
+function CategoryProductListItem({ row, status, active, onSelect }: {
+  row: CategoryCheckRow;
+  status: CategoryReviewStatus;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button type="button" className={`category-product-list-item ${active ? "active" : ""}`} onClick={onSelect}>
+      {row.image ? <img src={row.image} alt="" /> : <span className="category-product-list-empty">-</span>}
+      <span className="category-product-list-text">
+        <strong>{row.title || "Без названия"}</strong>
+        <span>{row.sku || row.ean || "-"}</span>
+        <StatusBadge status={status} />
+      </span>
+    </button>
+  );
+}
+
+function CategoryProductNavigator({ rows, statuses, activeIndex, position, total, onSelectProduct }: {
+  rows: CategoryCheckRow[];
+  statuses: Record<number, CategoryReviewStatus>;
+  activeIndex: number;
+  position: number;
+  total: number;
+  onSelectProduct: (rowIndex: number) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const visibleRows = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    if (!normalized) return rows;
+    return rows.filter((row) => [row.title, row.sku, row.ean, row.selectedCategory, row.aiCategory].some((value) => value.toLocaleLowerCase().includes(normalized)));
+  }, [query, rows]);
+
+  return (
+    <aside className="category-product-navigator">
+      <div className="category-product-search">
+        <label htmlFor="category-product-search">Поиск по товарам</label>
+        <span>{`${Math.max(0, position) + 1} / ${total}`}</span>
+      </div>
+      <div className="category-product-search-input">
+        <Search size={16} aria-hidden="true" />
+        <input id="category-product-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Название, SKU или EAN" />
+      </div>
+      <div className="category-product-list">
+        {visibleRows.length ? visibleRows.map((item) => (
+          <CategoryProductListItem
+            key={item.index}
+            row={item}
+            status={statuses[item.index] ?? "requires_review"}
+            active={item.index === activeIndex}
+            onSelect={() => onSelectProduct(item.index)}
+          />
+        )) : <div className="category-product-list-empty-state">Товары не найдены</div>}
+      </div>
+    </aside>
+  );
+}
+
+function CategoryReviewWorkspace({ row, status, categoryOptionsByGroup, canSaveDraft, onDraftChange, onDirtyChange, onSave, onSaveDraft }: {
+  row: CategoryCheckRow;
+  status: CategoryReviewStatus;
+  categoryOptionsByGroup: Record<string, string[]>;
+  canSaveDraft: boolean;
+  onDraftChange: (draft: { category: string; dirty: boolean; valid: boolean }) => void;
+  onDirtyChange: (dirty: boolean) => void;
+  onSave: (category: string, comment: string) => void;
+  onSaveDraft: () => void;
+}) {
+  return (
+    <div className="category-review-workspace">
+      <CategoryProductHero row={row} status={status} />
+      <CategoryCategorySection
+        key={row.index}
+        row={row}
+        categoryOptionsByGroup={categoryOptionsByGroup}
+        canSaveDraft={canSaveDraft}
+        onDraftChange={onDraftChange}
+        onDirtyChange={onDirtyChange}
+        onSave={onSave}
+        onSaveDraft={onSaveDraft}
+      />
+    </div>
+  );
+}
+
+function CategoryReviewModal({
   row,
+  rows,
+  statuses,
   status,
-  history,
   categoryOptionsByGroup,
   open,
   onSave,
@@ -1231,11 +1370,13 @@ function CategoryReviewDrawer({
   total,
   onPrevious,
   onNext,
+  onSelectProduct,
   onClose,
 }: {
   row: CategoryCheckRow | null;
+  rows: CategoryCheckRow[];
+  statuses: Record<number, CategoryReviewStatus>;
   status: CategoryReviewStatus;
-  history: CategoryChangeEvent[];
   categoryOptionsByGroup: Record<string, string[]>;
   open: boolean;
   onSave: (category: string, comment: string) => void;
@@ -1243,45 +1384,68 @@ function CategoryReviewDrawer({
   total: number;
   onPrevious: () => void;
   onNext: () => void;
+  onSelectProduct: (rowIndex: number) => void;
   onClose: () => void;
 }) {
-  const [editing, setEditing] = useState(true);
   const [dirty, setDirty] = useState(false);
-  useEffect(() => { setEditing(true); setDirty(false); }, [row?.index, open]);
+  const [draft, setDraft] = useState({ category: "", dirty: false, valid: false });
+  useEffect(() => {
+    setDirty(false);
+    setDraft({ category: row?.selectedCategory || row?.aiCategory || "", dirty: false, valid: Boolean(row?.selectedCategory || row?.aiCategory) });
+  }, [row?.index, open, row?.selectedCategory, row?.aiCategory]);
   const requestClose = () => {
     if (dirty && !window.confirm("Есть несохранённые изменения. Закрыть без сохранения?")) return;
     onClose();
   };
-  const requestNavigation = (navigate: () => void) => { setDirty(false); navigate(); };
+  const requestNavigation = (navigate: () => void) => {
+    if (dirty && !window.confirm("Есть несохранённые изменения. Перейти без сохранения?")) return;
+    setDirty(false);
+    navigate();
+  };
+  const requestSave = () => {
+    if (!draft.valid || !draft.category) return;
+    onSave(draft.category, "");
+    setDirty(false);
+    setDraft((current) => ({ ...current, dirty: false }));
+  };
   useEffect(() => {
     if (!open) return;
     const handleKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") requestClose(); };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   });
+  useEffect(() => {
+    if (!open) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [open]);
   if (!open || !row) return null;
   return (
     <div className="category-drawer-backdrop category-review-backdrop" onClick={requestClose}>
-      <aside className="category-drawer category-details-drawer" onClick={(event) => event.stopPropagation()}>
-        <CategoryDrawerHeader onClose={requestClose} />
-        <StickyProductPreview row={row} status={status} />
-        <div className="category-drawer-body category-review-body">
-          <CategoryReviewCard key={row.index} row={row} editing={editing} categoryOptionsByGroup={categoryOptionsByGroup} onEditCancel={() => { setEditing(true); setDirty(false); }} onDirtyChange={setDirty} onSave={(category, comment) => { onSave(category, comment); setDirty(false); }} />
-          <DrawerAccordion title="История изменений категории">
-            {history.length === 0 ? <p>Истории изменений нет.</p> : (
-              <ul className="category-history-list">
-                {history.map((item, index) => (
-                  <li key={`${item.at}-${index}`}>
-                    <strong>{`${item.from || "-"} -> ${item.to || "-"}`}</strong>
-                    <span>{`${item.by} · ${new Date(item.at).toLocaleString()}`}</span>
-                    {item.comment ? <p>{item.comment}</p> : null}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </DrawerAccordion>
+      <aside className="category-review-modal" onClick={(event) => event.stopPropagation()}>
+        <CategoryReviewModalHeader onClose={requestClose} />
+        <div className="category-review-modal-body">
+          <CategoryProductNavigator rows={rows} statuses={statuses} activeIndex={row.index} position={position} total={total} onSelectProduct={(rowIndex) => requestNavigation(() => onSelectProduct(rowIndex))} />
+          <CategoryReviewWorkspace
+            row={row}
+            status={status}
+            categoryOptionsByGroup={categoryOptionsByGroup}
+            canSaveDraft={dirty && draft.valid}
+            onDraftChange={setDraft}
+            onDirtyChange={setDirty}
+            onSave={(category, comment) => { onSave(category, comment); setDirty(false); }}
+            onSaveDraft={requestSave}
+          />
         </div>
-        <DrawerFooterActions position={position} total={total} onPrevious={() => requestNavigation(onPrevious)} onNext={() => requestNavigation(onNext)} />
+        <CategoryReviewFooter
+          position={position}
+          total={total}
+          onPrevious={() => requestNavigation(onPrevious)}
+          onNext={() => requestNavigation(onNext)}
+        />
       </aside>
     </div>
   );
@@ -1936,6 +2100,7 @@ export default function CreatorPage() {
   const [heartbeatLag, setHeartbeatLag] = useState<number>(0);
   const [stuckMessage, setStuckMessage] = useState<string>("");
   const [hydratedDraft, setHydratedDraft] = useState(false);
+  const [isRestoringProcess, setIsRestoringProcess] = useState(false);
   const [ottoProcessId, setOttoProcessId] = useState<string>("");
   const [ottoSummary, setOttoSummary] = useState<OttoSummary | null>(null);
   const [ottoErrors, setOttoErrors] = useState<OttoErrorRow[]>([]);
@@ -1987,6 +2152,7 @@ export default function CreatorPage() {
   const productsDraftSaveSkippedRef = useRef(false);
   const serverDraftRestoreAttemptedRef = useRef(false);
   const liveCategoryRowsCountRef = useRef(0);
+  const taskProgressSnapshotRef = useRef({ step: "", completed: 0, percent: 0 });
   const reviewSearchRef = useRef<HTMLInputElement>(null);
   const bulkAttributeEdit = useBulkAttributeEdit();
 
@@ -2075,14 +2241,28 @@ export default function CreatorPage() {
     const nextState = parsed?.process_state ?? "IN_PROGRESS";
     setProcessState(nextState);
     setIssues(Array.isArray(parsed?.issues) ? parsed.issues : []);
-    setCurrentStep(String(parsed?.current_step ?? "in_progress"));
+    const currentStepName = String(parsed?.current_step ?? "in_progress");
+    setCurrentStep(currentStepName);
     setStepElapsed(Number(parsed?.step_elapsed_sec ?? 0));
     setHeartbeatLag(Number(parsed?.heartbeat_lag_sec ?? 0));
     setStuckMessage(parsed?.stuck ? String(parsed?.stuck_message ?? "Процесс завис") : "");
-    setTaskProgress({
+    const nextProgress = {
       total: Number((parsed as Record<string, unknown>)?.progress_total ?? 0),
       completed: Number((parsed as Record<string, unknown>)?.progress_completed ?? 0),
       percent: Number((parsed as Record<string, unknown>)?.progress_percent ?? 0),
+    };
+    setTaskProgress((previous) => {
+      const snapshot = taskProgressSnapshotRef.current;
+      const sameStep = snapshot.step === currentStepName;
+      const isTransientRollback = sameStep && nextProgress.percent < snapshot.percent && nextProgress.completed <= snapshot.completed;
+      if (isTransientRollback) return previous;
+
+      taskProgressSnapshotRef.current = {
+        step: currentStepName,
+        completed: nextProgress.completed,
+        percent: nextProgress.percent,
+      };
+      return nextProgress;
     });
     setPreparationCounts({
       source: Number(parsed?.source_items ?? 0),
@@ -2090,7 +2270,6 @@ export default function CreatorPage() {
       payload: Number(parsed?.payload_items ?? (Array.isArray(parsed?.products) ? parsed.products.length : 0)),
     });
 
-    const currentStepName = String(parsed?.current_step ?? "");
     const liveRows = Array.isArray(parsed?.products) ? parsed.products : [];
     if (liveRows.length > 0 && nextState === "IN_PROGRESS") {
       if (currentStepName === "building_category_preview" && liveRows.length < liveCategoryRowsCountRef.current) return;
@@ -2274,11 +2453,12 @@ export default function CreatorPage() {
   ]);
 
   useEffect(() => {
-    if (!hydratedDraft || processId || serverDraftRestoreAttemptedRef.current) return;
+    if (!hydratedDraft || serverDraftRestoreAttemptedRef.current) return;
     serverDraftRestoreAttemptedRef.current = true;
     let active = true;
+    setIsRestoringProcess(true);
 
-    async function restoreLatestAccountDraft() {
+    async function restoreLatestWorkspaceTask() {
       try {
         const response = await fetch("/api/products/create-from-fabric/latest", {
           method: "GET",
@@ -2291,21 +2471,25 @@ export default function CreatorPage() {
         setController(String((parsed as Record<string, unknown>).controller ?? "jv") as ControllerOption);
         setSelectedFabricId(String((parsed as Record<string, unknown>).factory_id ?? ""));
         applyProcessUpdate(parsed);
-        setUiMessage("Восстановлен незавершённый процесс создания с вашего аккаунта.");
+        setUiMessage("Восстановлен текущий процесс создания из workspace.");
       } catch {
-        // A missing server draft is a valid clean-account state.
+        // A missing workspace task is a valid clean state.
+      } finally {
+        if (active) setIsRestoringProcess(false);
       }
     }
 
-    void restoreLatestAccountDraft();
+    void restoreLatestWorkspaceTask();
     return () => {
       active = false;
+      setIsRestoringProcess(false);
     };
-  }, [hydratedDraft, processId]);
+  }, [hydratedDraft]);
 
   useEffect(() => {
     if (!hydratedDraft || !processId || products.length > 0) return;
     let active = true;
+    setIsRestoringProcess(true);
 
     async function restorePersistedTask() {
       try {
@@ -2318,12 +2502,15 @@ export default function CreatorPage() {
         applyProcessUpdate(parsed);
       } catch {
         // ignore restore failures and keep current draft state
+      } finally {
+        if (active) setIsRestoringProcess(false);
       }
     }
 
     void restorePersistedTask();
     return () => {
       active = false;
+      setIsRestoringProcess(false);
     };
   }, [hydratedDraft, processId, products.length]);
 
@@ -2840,7 +3027,6 @@ export default function CreatorPage() {
   const editingCategoryRow = editingCategoryIndex === null ? null : rowByIndex.get(editingCategoryIndex) ?? null;
   const detailsCategoryRow = detailsCategoryIndex === null ? null : rowByIndex.get(detailsCategoryIndex) ?? null;
   const detailsCategoryStatus = detailsCategoryIndex === null ? "requires_review" : categoryRowStatuses[detailsCategoryIndex] ?? "requires_review";
-  const detailsCategoryHistory = detailsCategoryIndex === null ? [] : categoryChangeHistoryByIndex[detailsCategoryIndex] ?? [];
   const detailsCategoryPosition = detailsCategoryIndex === null ? -1 : filteredRows.findIndex((row) => row.index === detailsCategoryIndex);
   const navigateCategoryDetails = (position: number) => {
     const target = filteredRows[position];
@@ -3740,7 +3926,7 @@ export default function CreatorPage() {
     }
   }
 
-  if (isLoading) {
+  if (isLoading || !hydratedDraft || isRestoringProcess) {
     return <PageLoadingShell contentMode="form" />;
   }
 
@@ -3988,10 +4174,11 @@ export default function CreatorPage() {
             onClose={() => setIsBulkCategoryDrawerOpen(false)}
             onApply={applyBulkCategory}
           />
-          <CategoryReviewDrawer
+          <CategoryReviewModal
             row={detailsCategoryRow}
+            rows={filteredRows}
+            statuses={categoryRowStatuses}
             status={detailsCategoryStatus}
-            history={detailsCategoryHistory}
             categoryOptionsByGroup={categoryOptionsByGroup}
             open={detailsCategoryIndex !== null}
             onSave={(category, comment) => {
@@ -4001,6 +4188,10 @@ export default function CreatorPage() {
             total={filteredRows.length}
             onPrevious={() => navigateCategoryDetails(detailsCategoryPosition - 1)}
             onNext={() => navigateCategoryDetails(detailsCategoryPosition + 1)}
+            onSelectProduct={(rowIndex) => {
+              const nextPosition = filteredRows.findIndex((item) => item.index === rowIndex);
+              if (nextPosition >= 0) navigateCategoryDetails(nextPosition);
+            }}
             onClose={() => setDetailsCategoryIndex(null)}
           />
         </section>

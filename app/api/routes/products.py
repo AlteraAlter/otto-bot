@@ -1995,7 +1995,7 @@ async def create_product_task_from_factory(
 @router.get("/tasks/create-from-factory/latest")
 async def get_latest_factory_prepare_task(
     db: AsyncSession = Depends(get_db),
-    current_user=Depends(require_role([RoleEnum.SEO])),
+    _current_user=Depends(require_role([RoleEnum.SEO])),
 ):
     final_steps = {
         "otto_create_done",
@@ -2005,7 +2005,6 @@ async def get_latest_factory_prepare_task(
     }
     stmt = (
         select(FactoryTaskState)
-        .where(FactoryTaskState.created_by_user_id == current_user.id)
         .where(
             or_(
                 FactoryTaskState.current_step.is_(None),

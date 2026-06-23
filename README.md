@@ -115,6 +115,26 @@ If you specifically want the production-like local stack with `worker` and `ngin
 docker compose up --build
 ```
 
+## Production Deploy Behind Host Nginx
+
+The production compose file does not bind public `80` or `443`, so it will not
+interfere with other projects or the host nginx. It exposes this app only on the
+server loopback interface:
+
+```bash
+docker compose up -d --build
+```
+
+Local upstream URL for the host reverse proxy:
+
+```text
+http://127.0.0.1:18080
+```
+
+The public `https://okb.automatonsoft.de` certificate and domain routing should
+stay in the existing host nginx. That host nginx can proxy the subdomain to
+`http://127.0.0.1:18080`.
+
 ## Project Structure
 
 - `app/api/routes/products.py`: OTTO products + creation workflow endpoints
