@@ -4615,7 +4615,7 @@ a:focus-visible {
 
 .creator-ref-card .creator-mode-switch {
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: 96px minmax(260px, 1fr);
   min-width: 0;
   margin-top: 0;
   padding: 0;
@@ -4624,6 +4624,7 @@ a:focus-visible {
 }
 
 .creator-ref-card .creator-mode-switch label {
+  min-width: 0;
   font-size: 14px;
   font-weight: 500;
   color: #64748b;
@@ -4636,6 +4637,7 @@ a:focus-visible {
   border: 1px solid var(--border);
   background: #fff;
   font-size: 14px;
+  padding-inline: 10px 28px;
 }
 
 .creator-ref-card .creator-mode-switch .primary-btn {
@@ -5234,6 +5236,101 @@ a:focus-visible {
   gap: 8px;
 }
 
+.fabric-picker {
+  position: relative;
+  display: grid;
+}
+
+.fabric-search {
+  width: 100%;
+}
+
+.fabric-picker-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid #dbe5f3;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #0f172a;
+  font-size: 14px;
+  text-align: left;
+}
+
+.fabric-picker-trigger span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fabric-picker-trigger:disabled {
+  cursor: not-allowed;
+  color: #94a3b8;
+  background: #f8fafc;
+}
+
+.fabric-picker-menu {
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  box-sizing: border-box;
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  padding: 8px;
+  border: 1px solid #dbe5f3;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 20px 45px rgba(15, 23, 42, 0.16);
+}
+
+.fabric-picker-options {
+  display: grid;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.fabric-picker-menu .creator-search-wrap,
+.fabric-picker-menu .creator-search-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+}
+
+.fabric-picker-options button {
+  display: grid;
+  gap: 2px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #0f172a;
+  text-align: left;
+}
+
+.fabric-picker-options button:hover,
+.fabric-picker-options button.is-selected {
+  background: #eff6ff;
+}
+
+.fabric-picker-options small,
+.fabric-picker-empty {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.fabric-picker-empty {
+  padding: 10px;
+}
+
 .category-check-page {
   display: grid;
   gap: 16px;
@@ -5452,11 +5549,13 @@ a:focus-visible {
 }
 
 .category-check-table tbody tr {
+  position: relative;
   cursor: pointer;
   transition: background-color 140ms ease;
 }
 
 .category-check-table tbody tr:hover {
+  z-index: 20;
   background: #f9fafb;
 }
 
@@ -5466,6 +5565,7 @@ a:focus-visible {
 }
 
 .category-check-title-cell {
+  position: relative;
   display: grid;
   grid-template-columns: 40px minmax(0, 1fr);
   align-items: center;
@@ -5484,6 +5584,51 @@ a:focus-visible {
   place-items: center;
   color: #94a3b8;
   background: #f8fafc;
+}
+
+.image-hover-source {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  max-width: 100%;
+  isolation: isolate;
+}
+
+.image-hover-source.is-block {
+  display: block;
+  width: 100%;
+}
+
+.image-hover-source.is-block > img {
+  width: 100%;
+}
+
+.image-hover-source > img {
+  position: relative;
+  z-index: 1;
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    border-color 160ms ease;
+  transform-origin: center center;
+}
+
+.image-hover-source:hover {
+  z-index: 10000;
+}
+
+.image-hover-source:not(.is-block):hover > img {
+  transform: scale(4.2);
+  border-color: #dbeafe;
+  background: #ffffff;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.32);
+}
+
+.image-hover-source.is-block:hover > img {
+  transform: scale(1.18);
+  border-color: #dbeafe;
+  background: #ffffff;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.24);
 }
 
 .category-check-title-cell strong {
@@ -7097,7 +7242,8 @@ a:focus-visible {
 }
 
 .product-overview-field input,
-.product-overview-field textarea {
+.product-overview-field textarea,
+.product-overview-field select {
   width: 100%;
   border: 1px solid #cbd5e1;
   border-radius: 10px;
@@ -7106,7 +7252,8 @@ a:focus-visible {
   font-size: 14px;
 }
 
-.product-overview-field input {
+.product-overview-field input,
+.product-overview-field select {
   height: 40px;
   padding: 8px 12px;
 }
@@ -11464,7 +11611,11 @@ a:focus-visible {
 }
 
 .creator-ref-card-action .creator-ref-refresh-btn {
-  min-height: 38px;
+  width: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0;
+  justify-content: center;
   border-color: #eef2f7;
   border-radius: 10px;
 }

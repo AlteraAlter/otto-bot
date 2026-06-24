@@ -148,6 +148,7 @@ class ProductMapper:
 
         return {
             "items": [item for item in result if isinstance(item, dict)],
+            "items_by_index": result,
             "issues": issues,
         }
 
@@ -175,7 +176,7 @@ class ProductMapper:
         category_result = await self.get_category(category_source)
         category_group = str(category_result.get("categoryGroup") or "").strip()
         result["categoryGroup"] = category_group
-        result["category"] = self._default_category_for_group(category_group)
+        result["category"] = ""
         self.logger.info(
             "Закончено генерация группы категории для ean=%s category_group=%s category=%s",
             ean,
@@ -382,7 +383,7 @@ class ProductMapper:
                 )
 
             bullet_source = dict(compact_source)
-            bullet_source["bulletPoints"] = ["Made in Europa"]
+            bullet_source["bulletPoints"] = []
             self.logger.info("Генерация буллет поинтов: ean=%s", ean)
             bullet_points = await self.get_bullet_points(bullet_source)
             self.logger.info(
@@ -535,8 +536,9 @@ class ProductMapper:
 
     async def get_bullet_points(self, product: dict):
         product["bulletPoints"] = [
-            "Made in Europa",
-            *(f"{k}: {v}" for k, v in product.items() if k.startswith("Maße")),
+            str(item).strip()
+            for item in product.get("bulletPoints", [])
+            if str(item).strip() and str(item).strip() != "Made in Europa"
         ]
         if len(product["bulletPoints"]) < 5:
             generated = await self.bullet_point_generator.generate_bullet_points(product)

@@ -11,6 +11,8 @@ class CategoryGroup(Base):
 
     name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
 
+    name_ru: Mapped[str | None] = mapped_column(String, nullable=True)
+
     categories: Mapped[list["Category"]] = relationship(back_populates="group")
 
     attributes: Mapped[list["Attribute"]] = relationship(back_populates="group")

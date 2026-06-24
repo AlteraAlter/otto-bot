@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     factory_ai_enrich_item_timeout_seconds: int = 300
 
     gpt_key: str
+    deepl_api_key_test: str | None = None
+    deepl_url: str = "https://api-free.deepl.com"
+    deepl_timeout_seconds: float = 12.0
+    deepl_min_interval_seconds: float = 1.25
+    deepl_max_retries: int = 6
+    deepl_retry_base_delay_seconds: float = 2.0
 
     compliance: ClassVar = {
         Controller.JV: Compliance(
