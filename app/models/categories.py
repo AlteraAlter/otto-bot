@@ -11,6 +11,8 @@ class Category(Base):
 
     name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
 
+    name_ru: Mapped[str | None] = mapped_column(String, nullable=True)
+
     group_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("category_groups.id", ondelete="CASCADE")
     )

@@ -68,6 +68,7 @@ from app.schemas.product_tasks import (
 from app.services.afterbuy_service import AfterbuyService
 from app.services.factory_task_state_service import FactoryTaskStateService
 from app.services.product_service import ProductService
+from app.services.translation_service import TranslationService, normalize_translation_text
 
 router = APIRouter(
     prefix="/v1/products",
@@ -422,12 +423,28 @@ async def _load_category_group_contexts() -> dict[str, dict[str, Any]]:
                 [category.name for category in group.categories if category.name],
                 key=str.casefold,
             )
+            categories_display = sorted(
+                [
+                    {
+                        "name": category.name,
+                        "nameRu": category.name_ru,
+                        "displayName": category.name,
+                    }
+                    for category in group.categories
+                    if category.name
+                ],
+                key=lambda item: str(item["name"]).casefold(),
+            )
             attributes = []
             for attr in group.attributes:
                 attributes.append(
                     {
                         "name": attr.name,
+                        "nameRu": attr.name_ru,
+                        "displayName": attr.name_ru or attr.name,
                         "description": attr.description,
+                        "descriptionRu": attr.description_ru,
+                        "displayDescription": attr.description_ru or attr.description,
                         "type": attr.type,
                         "multiValue": attr.multi_value,
                         "relevance": attr.relevance,
@@ -435,11 +452,23 @@ async def _load_category_group_contexts() -> dict[str, dict[str, Any]]:
                         "allowedValues": [
                             item.value for item in attr.allowed_values if item.value
                         ],
+                        "allowedValuesDisplay": [
+                            {
+                                "value": item.value,
+                                "valueRu": item.value_ru,
+                                "displayValue": item.value,
+                            }
+                            for item in attr.allowed_values
+                            if item.value
+                        ],
                     }
                 )
             contexts[group.name] = {
                 "categoryGroup": group.name,
+                "categoryGroupRu": group.name_ru,
+                "displayCategoryGroup": group.name,
                 "categories": categories,
+                "categoriesDisplay": categories_display,
                 "attributes": attributes,
             }
 
@@ -564,9 +593,8 @@ async def _build_factory_prepared_products(
                     category_group = mapped_item.get("categoryGroup")
                     if category_group:
                         normalized["aiCategoryGroup"] = category_group
-                    if mapped_item.get("category"):
-                        product_description["category"] = mapped_item["category"]
-                normalized["aiCategory"] = product_description.get("category")
+                product_description["category"] = ""
+                normalized["aiCategory"] = ""
                 product_description["description"] = None
                 product_description["bulletPoints"] = []
                 product_description["attributes"] = []
@@ -638,6 +666,11 @@ async def _build_factory_prepared_products(
     mapped_items = (
         mapped_result.get("items", []) if isinstance(mapped_result, dict) else []
     )
+    mapped_items_by_index = (
+        mapped_result.get("items_by_index", [])
+        if isinstance(mapped_result, dict)
+        else []
+    )
     mapper_issues = (
         mapped_result.get("issues", []) if isinstance(mapped_result, dict) else []
     )
@@ -664,8 +697,9 @@ async def _build_factory_prepared_products(
 
     async def _normalize_one(index: int, source_item: dict[str, Any]) -> None:
         mapped_item = (
-            mapped_items[index]
-            if index < len(mapped_items) and isinstance(mapped_items[index], dict)
+            mapped_items_by_index[index]
+            if index < len(mapped_items_by_index)
+            and isinstance(mapped_items_by_index[index], dict)
             else None
         )
         if mapped_item is None and normalized_results[index] is None:
@@ -1593,17 +1627,37 @@ async def get_db_category_group_categories(
 
     items: list[dict[str, Any]] = []
     for group in groups:
-        categories = sorted(
-            {
-                str(category.name).strip()
+        category_items = sorted(
+            [
+                {
+                    "name": str(category.name).strip(),
+                    "nameRu": str(category.name_ru).strip() if category.name_ru else None,
+                    "displayName": str(category.name).strip(),
+                }
                 for category in group.categories
                 if category.name and str(category.name).strip()
-            },
-            key=str.casefold,
+            ],
+            key=lambda item: item["name"].casefold(),
         )
+        categories = [item["name"] for item in category_items]
         if not categories:
             categories = [str(group.name).strip()]
-        items.append({"categoryGroup": group.name, "categories": categories})
+            category_items = [
+                {
+                    "name": str(group.name).strip(),
+                    "nameRu": str(group.name_ru).strip() if group.name_ru else None,
+                    "displayName": str(group.name).strip(),
+                }
+            ]
+        items.append(
+            {
+                "categoryGroup": group.name,
+                "categoryGroupRu": group.name_ru,
+                "displayCategoryGroup": group.name,
+                "categories": categories,
+                "categoriesDisplay": category_items,
+            }
+        )
 
     return {"items": items, "total": len(items)}
 
@@ -1638,7 +1692,11 @@ async def get_db_category_attributes(
     items = [
         {
             "name": attr.name,
+            "nameRu": attr.name_ru,
+            "displayName": attr.name_ru or attr.name,
             "description": attr.description,
+            "descriptionRu": attr.description_ru,
+            "displayDescription": attr.description_ru or attr.description,
             "type": attr.type,
             "multiValue": attr.multi_value,
             "relevance": attr.relevance,
@@ -1647,11 +1705,29 @@ async def get_db_category_attributes(
                 {item.value for item in attr.allowed_values if item.value},
                 key=str.casefold,
             ),
+            "allowedValuesDisplay": sorted(
+                [
+                    {
+                        "value": item.value,
+                        "valueRu": item.value_ru,
+                        "displayValue": item.value,
+                    }
+                    for item in attr.allowed_values
+                    if item.value
+                ],
+                key=lambda item: str(item["displayValue"]).casefold(),
+            ),
         }
         for attr in sorted(group.attributes, key=lambda item: item.name.casefold())
         if attr.name
     ]
-    return {"items": items, "total": len(items), "categoryGroup": group.name}
+    return {
+        "items": items,
+        "total": len(items),
+        "categoryGroup": group.name,
+        "categoryGroupRu": group.name_ru,
+        "displayCategoryGroup": group.name,
+    }
 
 
 async def _get_otto_product_categories(
@@ -2220,6 +2296,91 @@ def _compact_source_specifics(source_item: dict[str, Any] | None) -> dict[str, s
     return result
 
 
+def _normalized_identity_value(value: Any) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _source_identity_values(source_item: dict[str, Any] | None) -> set[str]:
+    if not isinstance(source_item, dict):
+        return set()
+
+    specifics = _compact_source_specifics(source_item)
+    raw_values = [
+        source_item.get("EAN"),
+        source_item.get("ean"),
+        source_item.get("SKU"),
+        source_item.get("sku"),
+        source_item.get("productReference"),
+        source_item.get("product_reference"),
+        specifics.get("EAN"),
+        specifics.get("ean"),
+    ]
+    return {
+        normalized
+        for normalized in (_normalized_identity_value(value) for value in raw_values)
+        if normalized
+    }
+
+
+def _product_identity_values(product: dict[str, Any] | None) -> set[str]:
+    if not isinstance(product, dict):
+        return set()
+    raw_values = [
+        product.get("ean"),
+        product.get("EAN"),
+        product.get("sku"),
+        product.get("SKU"),
+        product.get("productReference"),
+        product.get("product_reference"),
+    ]
+    return {
+        normalized
+        for normalized in (_normalized_identity_value(value) for value in raw_values)
+        if normalized
+    }
+
+
+def _build_source_item_lookup(
+    source_items: list[Any],
+) -> dict[str, dict[str, Any]]:
+    lookup: dict[str, dict[str, Any]] = {}
+    for source_item in source_items:
+        if not isinstance(source_item, dict):
+            continue
+        for identity in _source_identity_values(source_item):
+            lookup.setdefault(identity, source_item)
+    return lookup
+
+
+def _find_source_item_for_product(
+    *,
+    product: dict[str, Any],
+    index: int,
+    source_items: list[Any],
+    source_items_by_identity: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    for identity in _product_identity_values(product):
+        source_item = source_items_by_identity.get(identity)
+        if source_item is not None:
+            return source_item
+
+    if index < len(source_items) and isinstance(source_items[index], dict):
+        fallback = source_items[index]
+        product_identities = _product_identity_values(product)
+        fallback_identities = _source_identity_values(fallback)
+        if not product_identities or product_identities.intersection(fallback_identities):
+            return fallback
+
+        MAPPER_LOGGER.warning(
+            "step=source_item_index_mismatch index=%s product_ids=%s source_ids=%s",
+            index,
+            sorted(product_identities),
+            sorted(fallback_identities),
+        )
+
+    return None
+
+
 def _build_aftercool_comparison(
     *,
     source_item: dict[str, Any] | None,
@@ -2285,6 +2446,7 @@ async def _run_factory_enrichment_task(
 
     source_items_raw = task.get("source_items_raw")
     source_items = source_items_raw if isinstance(source_items_raw, list) else []
+    source_items_by_identity = _build_source_item_lookup(source_items)
     controller_value = str(
         task.get("controller") or payload.get("controller") or "jv"
     ).lower()
@@ -2341,10 +2503,12 @@ async def _run_factory_enrichment_task(
 
         async def _enrich_one(index: int, item: dict[str, Any]) -> None:
             model = ProductPayload.model_validate(item)
-            source_item = (
-                source_items[index]
-                if index < len(source_items) and isinstance(source_items[index], dict)
-                else None
+            model_dump = model.model_dump(mode="json", exclude_none=True)
+            source_item = _find_source_item_for_product(
+                product=model_dump,
+                index=index,
+                source_items=source_items,
+                source_items_by_identity=source_items_by_identity,
             )
             MAPPER_LOGGER.info(
                 "step=category_approval_enrichment_item_start process_id=%s index=%s sku=%s category=%s source_available=%s",
@@ -2356,7 +2520,7 @@ async def _run_factory_enrichment_task(
             )
             enriched_payload = await asyncio.wait_for(
                 ai_mapper.enrich_after_category_approval(
-                    model.model_dump(mode="json", exclude_none=True),
+                    model_dump,
                     source_item=source_item,
                 ),
                 timeout=FACTORY_AI_ENRICH_ITEM_TIMEOUT_SEC,
@@ -2410,13 +2574,14 @@ async def _run_factory_enrichment_task(
                             mode="json",
                             exclude_none=True,
                         )
+                        fallback_source_item = _find_source_item_for_product(
+                            product=fallback_dump,
+                            index=index,
+                            source_items=source_items,
+                            source_items_by_identity=source_items_by_identity,
+                        )
                         fallback_dump["aftercoolComparison"] = _build_aftercool_comparison(
-                            source_item=(
-                                source_items[index]
-                                if index < len(source_items)
-                                and isinstance(source_items[index], dict)
-                                else None
-                            ),
+                            source_item=fallback_source_item,
                             generated_product=fallback_dump,
                         )
                         enriched_products[index] = fallback_dump
@@ -2592,6 +2757,152 @@ async def enrich_factory_prepared_products(
     }
 
 
+def _contains_cyrillic(value: str) -> bool:
+    return bool(re.search(r"[А-Яа-яЁё]", value or ""))
+
+
+async def _load_attribute_allowed_value_lookup() -> dict[str, dict[str, str]]:
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(Attribute)
+            .options(selectinload(Attribute.allowed_values))
+            .order_by(Attribute.name.asc())
+        )
+        lookup: dict[str, dict[str, str]] = {}
+        for attr in result.scalars().unique().all():
+            attr_key = normalize_translation_text(attr.name).casefold()
+            if not attr_key:
+                continue
+            values: dict[str, str] = {}
+            for item in attr.allowed_values:
+                original = normalize_translation_text(item.value)
+                if not original:
+                    continue
+                values[original.casefold()] = original
+                if item.value_ru:
+                    values[normalize_translation_text(item.value_ru).casefold()] = original
+            if values:
+                lookup[attr_key] = values
+        return lookup
+
+
+async def _translate_user_attribute_values_for_otto(
+    products: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    allowed_value_lookup = await _load_attribute_allowed_value_lookup()
+    async with SessionLocal() as session:
+        translator = TranslationService(session)
+        translated_products: list[dict[str, Any]] = []
+        for product in products:
+            next_product = dict(product)
+            description = dict(next_product.get("productDescription") or {})
+            attributes = description.get("attributes")
+            if not isinstance(attributes, list):
+                translated_products.append(next_product)
+                continue
+
+            translated_attributes: list[Any] = []
+            for raw_attr in attributes:
+                if not isinstance(raw_attr, dict):
+                    translated_attributes.append(raw_attr)
+                    continue
+                attr = dict(raw_attr)
+                attr_name = normalize_translation_text(str(attr.get("name") or ""))
+                allowed_map = allowed_value_lookup.get(attr_name.casefold(), {})
+                raw_values = attr.get("values")
+                if not isinstance(raw_values, list):
+                    translated_attributes.append(attr)
+                    continue
+
+                next_values: list[Any] = []
+                for raw_value in raw_values:
+                    if not isinstance(raw_value, str):
+                        next_values.append(raw_value)
+                        continue
+                    normalized_value = normalize_translation_text(raw_value)
+                    if not normalized_value:
+                        next_values.append(raw_value)
+                        continue
+
+                    allowed_original = allowed_map.get(normalized_value.casefold())
+                    if allowed_original:
+                        next_values.append(allowed_original)
+                        continue
+
+                    if not _contains_cyrillic(normalized_value):
+                        next_values.append(normalized_value)
+                        continue
+
+                    try:
+                        next_values.append(
+                            await translator.translate(
+                                normalized_value,
+                                source_lang="RU",
+                                target_lang="DE",
+                                context="user_attribute_input",
+                            )
+                        )
+                    except Exception as exc:
+                        MAPPER_LOGGER.warning(
+                            "step=translate_user_attribute_failed attribute=%s value=%s error=%s",
+                            attr_name,
+                            normalized_value,
+                            exc,
+                        )
+                        next_values.append(normalized_value)
+
+                attr["values"] = next_values
+                translated_attributes.append(attr)
+
+            description["attributes"] = translated_attributes
+            next_product["productDescription"] = description
+            translated_products.append(next_product)
+        return translated_products
+
+
+OTTO_ERROR_TRANSLATION_FIELDS = {"title", "message", "description", "detail"}
+
+
+async def _translate_otto_error_payload_for_ui(value: Any) -> Any:
+    async with SessionLocal() as session:
+        translator = TranslationService(session)
+
+        async def translate_value(current: Any) -> Any:
+            if isinstance(current, list):
+                return [await translate_value(item) for item in current]
+            if not isinstance(current, dict):
+                return current
+
+            translated: dict[str, Any] = {}
+            for key, raw_value in current.items():
+                if (
+                    key in OTTO_ERROR_TRANSLATION_FIELDS
+                    and isinstance(raw_value, str)
+                    and normalize_translation_text(raw_value)
+                ):
+                    translated[f"{key}Original"] = raw_value
+                    try:
+                        translated[key] = await translator.translate(
+                            raw_value,
+                            source_lang="DE",
+                            target_lang="RU",
+                            context="otto_error",
+                        )
+                    except Exception as exc:
+                        MAPPER_LOGGER.warning(
+                            "step=translate_otto_error_failed field=%s error=%s",
+                            key,
+                            exc,
+                        )
+                        translated[key] = raw_value
+                    continue
+
+                translated[key] = await translate_value(raw_value)
+            return translated
+
+        return await translate_value(value)
+
+
 async def _run_factory_submit_task(
     *,
     process_id: str,
@@ -2627,7 +2938,9 @@ async def _run_factory_submit_task(
             task["heartbeat_at"] = task["updated_at"]
             await _save_factory_task_state(process_id, task)
 
-        for index, item in enumerate(products):
+        products_for_otto = await _translate_user_attribute_values_for_otto(products)
+
+        for index, item in enumerate(products_for_otto):
             model = ProductPayload.model_validate(item)
             MAPPER_LOGGER.info(
                 "step=submit_final_products_item_validated process_id=%s index=%s sku=%s category=%s",
@@ -2682,7 +2995,12 @@ async def _run_factory_submit_task(
         task["otto_process_id"] = otto_process_id
         task["otto_create_state"] = otto_state
         task["otto_update_result"] = update_result
-        task["otto_failed_result"] = failed_result
+        task["otto_failed_result_original"] = failed_result
+        task["otto_failed_result"] = (
+            await _translate_otto_error_payload_for_ui(failed_result)
+            if failed_result
+            else failed_result
+        )
         task["updated_at"] = datetime.now(UTC).isoformat()
         task["heartbeat_at"] = task["updated_at"]
         task["status"] = (
@@ -2829,7 +3147,12 @@ async def _run_factory_submit_task(
                 await availability_queue.put(None)
             await availability_queue.join()
             await asyncio.gather(*availability_workers)
-            task["availability_errors"] = availability_errors
+            task["availability_errors_original"] = availability_errors
+            task["availability_errors"] = (
+                await _translate_otto_error_payload_for_ui(availability_errors)
+                if availability_errors
+                else availability_errors
+            )
             task["availability_failed"] = len(availability_errors)
             task["status"] = "FAILED" if availability_errors else "DONE"
             task["current_step"] = "availability_done"

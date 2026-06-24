@@ -20,7 +20,11 @@ type FabricOption = { id: string; name: string; items_count?: number };
 type FabricListResponse = { factory?: FabricOption[] };
 type CategoryGroupCategoriesResponse = {
   success?: boolean;
-  items?: { categoryGroup?: string; categories?: string[] }[];
+  items?: {
+    categoryGroup?: string;
+    categories?: string[];
+    categoriesDisplay?: { name?: string; nameRu?: string | null; displayName?: string | null }[];
+  }[];
 };
 type ShippingProfileOption = { id: string; name: string };
 type CreateFromFabricResponse = {
@@ -49,7 +53,9 @@ type PrepareStatusResponse = {
   otto_create_state?: string;
   otto_update_result?: Record<string, unknown>;
   otto_failed_result?: Record<string, unknown> | null;
+  otto_failed_result_original?: Record<string, unknown> | null;
   availability_errors?: OttoErrorRow[];
+  availability_errors_original?: OttoErrorRow[];
   availability_failed?: number;
 };
 type SubmitPreparedResponse = {
@@ -60,6 +66,7 @@ type SubmitPreparedResponse = {
   otto_create_state?: string;
   otto_update_result?: Record<string, unknown>;
   otto_failed_result?: Record<string, unknown> | null;
+  otto_failed_result_original?: Record<string, unknown> | null;
   queued?: boolean;
   process_state?: string;
 };
@@ -134,12 +141,17 @@ type CategoryAttributeOption = {
   attributeId?: string | number | null;
   attributeKey?: string | null;
   name: string;
+  nameRu?: string | null;
+  displayName?: string | null;
   description?: string | null;
+  descriptionRu?: string | null;
+  displayDescription?: string | null;
   type?: string | null;
   multiValue?: boolean;
   relevance?: string | null;
   unit?: string | null;
   allowedValues?: string[];
+  allowedValuesDisplay?: { value?: string | null; valueRu?: string | null; displayValue?: string | null }[];
 };
 type CategoryAttributesResponse = {
   items?: CategoryAttributeOption[];
@@ -193,6 +205,17 @@ function updateProductField(product: Record<string, unknown>, path: string[], va
   return next;
 }
 
+function updateProductTitle(product: Record<string, unknown>, title: string): Record<string, unknown> {
+  return updateProductField(
+    {
+      ...product,
+      Artikelbeschreibung: title,
+    },
+    ["productDescription", "productLine"],
+    title,
+  );
+}
+
 function bulkUpsertProductAttributes(
   sourceProducts: Record<string, unknown>[],
   productIndexes: number[],
@@ -244,6 +267,24 @@ function firstImage(product: Record<string, unknown>): string {
   const assets = product.mediaAssets;
   if (!Array.isArray(assets) || assets.length === 0) return "";
   return String(asRecord(assets[0]).location ?? asRecord(assets[0]).filename ?? "");
+}
+
+function HoverPreviewImage({
+  src,
+  alt,
+  className,
+  block = false,
+}: {
+  src: string;
+  alt: string;
+  className?: string;
+  block?: boolean;
+}) {
+  return (
+    <span className={`image-hover-source${block ? " is-block" : ""}`}>
+      <img className={className} src={src} alt={alt} />
+    </span>
+  );
 }
 
 function rowStatusLabel(status: "passed" | "failed" | "processing" | "pending"): string {
@@ -331,6 +372,19 @@ function readAttributeGroup(name: string): "Основные характери�
     return "Комплектация";
   }
   return "Дополнительно";
+}
+
+function attributeDisplayName(item: CategoryAttributeOption): string {
+  return String(item.name || "").trim();
+}
+
+function attributeDisplayDescription(item: CategoryAttributeOption): string {
+  return String(item.displayDescription || item.descriptionRu || item.description || "").trim();
+}
+
+function attributeAllowedValueLabel(item: CategoryAttributeOption, value: string): string {
+  const displayItem = item.allowedValuesDisplay?.find((option) => option.value === value);
+  return String(displayItem?.value || value).trim();
 }
 
 function parseShippingProfiles(payload: unknown): ShippingProfileOption[] {
@@ -620,6 +674,9 @@ function CategoryCheckProgress({
 function CategoryCheckToolbar({
   tableQuery,
   setTableQuery,
+  categoryFilter,
+  setCategoryFilter,
+  categoryFilterOptions,
   statusFilter,
   setStatusFilter,
   categorySort,
@@ -628,6 +685,9 @@ function CategoryCheckToolbar({
 }: {
   tableQuery: string;
   setTableQuery: (value: string) => void;
+  categoryFilter: string;
+  setCategoryFilter: (value: string) => void;
+  categoryFilterOptions: string[];
   statusFilter: CategoryStatusFilter;
   setStatusFilter: (value: CategoryStatusFilter) => void;
   categorySort: CategorySortOption;
@@ -649,6 +709,12 @@ function CategoryCheckToolbar({
           }}
         />
       </div>
+      <select value={categoryFilter} onChange={(event) => { setCategoryFilter(event.target.value); setPage(1); }}>
+        <option value="all">Все AI категории</option>
+        {categoryFilterOptions.map((item) => (
+          <option value={item} key={item}>{item}</option>
+        ))}
+      </select>
       <select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as CategoryStatusFilter); setPage(1); }}>
         <option value="all">Все статусы</option>
         <option value="requires_review">Требуют проверки</option>
@@ -897,9 +963,9 @@ function CategoryCheckTable({
                   </td>
                   <td data-label="№">{rowNumberStart + displayIndex + 1}</td>
                   <td data-label="Название товара">
-                    <div className="category-check-title-cell" title={row.title || "-"}>
-                      {row.image ? <img src={row.image} alt="" /> : <span className="category-check-no-image">-</span>}
-                      <strong>{row.title || "-"}</strong>
+                    <div className="category-check-title-cell">
+                      {row.image ? <HoverPreviewImage src={row.image} alt="" /> : <span className="category-check-no-image">-</span>}
+                      <strong title={row.title || "-"}>{row.title || "-"}</strong>
                     </div>
                   </td>
                   <td data-label="EAN / SKU">
@@ -930,7 +996,7 @@ function CategoryCheckTable({
                   <td data-label="Статус"><StatusBadge status={reviewStatus} /></td>
                   <td data-label="Действия" onClick={(event) => event.stopPropagation()}>
                     <div className="category-check-row-actions">
-                      <button type="button" onClick={() => confirmCategoryRows([row.index])} disabled={state === "loading" || reviewStatus === "confirmed" || reviewStatus === "manually_confirmed"}>Подтвердить</button>
+                      <button type="button" onClick={() => confirmCategoryRows([row.index])} disabled={state === "loading" || !row.selectedCategory.trim() || reviewStatus === "confirmed" || reviewStatus === "manually_confirmed"}>Подтвердить</button>
                       <button type="button" onClick={() => { setSelectedIndex(row.index); openDetails(row.index); }}>Детали</button>
                     </div>
                   </td>
@@ -974,7 +1040,7 @@ function CategoryProductMedia({ row }: { row: CategoryCheckRow }) {
   return (
     <figure className="category-details-product-media">
       {row.image ? (
-        <img src={row.image} alt={row.title || "Изображение товара"} />
+        <HoverPreviewImage src={row.image} alt={row.title || "Изображение товара"} block />
       ) : (
         <div className="category-details-product-media-empty">
           <Package size={48} aria-hidden="true" />
@@ -989,12 +1055,14 @@ function CategoryProductMedia({ row }: { row: CategoryCheckRow }) {
 function CategoryEditDrawer({
   row,
   categoryOptionsByGroup,
+  categoryDisplayByValue,
   open,
   onSave,
   onClose,
 }: {
   row: CategoryCheckRow | null;
   categoryOptionsByGroup: Record<string, string[]>;
+  categoryDisplayByValue: Record<string, string>;
   open: boolean;
   onSave: (category: string, comment: string) => void;
   onClose: () => void;
@@ -1014,6 +1082,7 @@ function CategoryEditDrawer({
             currentGroup={row.aiCategoryGroup}
             currentCategory={row.selectedCategory || row.aiCategory}
             categoryOptionsByGroup={categoryOptionsByGroup}
+            categoryDisplayByValue={categoryDisplayByValue}
             onSave={onSave}
             onCancel={onClose}
             onDirtyChange={() => undefined}
@@ -1028,6 +1097,7 @@ function CategoryChangeForm({
   currentGroup,
   currentCategory,
   categoryOptionsByGroup,
+  categoryDisplayByValue = {},
   onSave,
   onCancel,
   onDirtyChange,
@@ -1039,6 +1109,7 @@ function CategoryChangeForm({
   currentGroup: string;
   currentCategory: string;
   categoryOptionsByGroup: Record<string, string[]>;
+  categoryDisplayByValue?: Record<string, string>;
   onSave: (category: string, comment: string) => void;
   onCancel: () => void;
   onDirtyChange: (dirty: boolean) => void;
@@ -1056,10 +1127,14 @@ function CategoryChangeForm({
   const [optionsStyle, setOptionsStyle] = useState<CSSProperties | undefined>(undefined);
   const comboboxRef = useRef<HTMLDivElement>(null);
   const categories = categoryOptionsByGroup[group] ?? [];
+  const displayCategory = (value: string) => categoryDisplayByValue[value] || value;
   const matches = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
-    return categories.filter((item) => !normalized || item.toLocaleLowerCase().includes(normalized)).slice(0, 80);
-  }, [categories, query]);
+    return categories.filter((item) => {
+      if (!normalized) return true;
+      return item.toLocaleLowerCase().includes(normalized) || displayCategory(item).toLocaleLowerCase().includes(normalized);
+    }).slice(0, 80);
+  }, [categories, query, categoryDisplayByValue]);
 
   useEffect(() => {
     const dirty = group !== currentGroup || category !== currentCategory;
@@ -1115,7 +1190,7 @@ function CategoryChangeForm({
 
   const choose = (value: string) => {
     setCategory(value);
-    setQuery(value);
+    setQuery(displayCategory(value));
     setOpen(false);
     if (autoSave) onSave(value, "");
   };
@@ -1159,7 +1234,7 @@ function CategoryChangeForm({
           <ChevronDown size={16} aria-hidden="true" />
           {open ? <div className="category-combobox-options" id="category-options" role="listbox" style={optionsStyle} onWheel={(event) => event.stopPropagation()}>
             {matches.length ? matches.map((item, index) => (
-              <button className={index === activeIndex ? "active" : ""} type="button" role="option" aria-selected={category === item} key={item} onMouseDown={(event) => event.preventDefault()} onClick={() => choose(item)}>{item}</button>
+              <button className={index === activeIndex ? "active" : ""} type="button" role="option" aria-selected={category === item} key={item} onMouseDown={(event) => event.preventDefault()} onClick={() => choose(item)}>{displayCategory(item)}</button>
             )) : <span>Категории не найдены</span>}
           </div> : null}
         </div>
@@ -1197,7 +1272,7 @@ function CategoryReviewModalHeader({ onClose }: { onClose: () => void }) {
 
 function CategoryProductImageCard({ row }: { row: CategoryCheckRow }) {
   return row.image ? (
-    <img className="category-review-product-image" src={row.image} alt={row.title || "Изображение товара"} />
+    <HoverPreviewImage className="category-review-product-image" src={row.image} alt={row.title || "Изображение товара"} block />
   ) : (
     <div className="category-review-product-image-empty">
       <Package size={42} aria-hidden="true" />
@@ -1219,9 +1294,10 @@ function CategoryProductHero({ row, status }: { row: CategoryCheckRow; status: C
   );
 }
 
-function CategoryCategorySection({ row, categoryOptionsByGroup, canSaveDraft, onDraftChange, onDirtyChange, onSave, onSaveDraft }: {
+function CategoryCategorySection({ row, categoryOptionsByGroup, categoryDisplayByValue, canSaveDraft, onDraftChange, onDirtyChange, onSave, onSaveDraft }: {
   row: CategoryCheckRow;
   categoryOptionsByGroup: Record<string, string[]>;
+  categoryDisplayByValue: Record<string, string>;
   canSaveDraft: boolean;
   onDraftChange: (draft: { category: string; dirty: boolean; valid: boolean }) => void;
   onDirtyChange: (dirty: boolean) => void;
@@ -1238,6 +1314,7 @@ function CategoryCategorySection({ row, categoryOptionsByGroup, canSaveDraft, on
         currentGroup={row.aiCategoryGroup}
         currentCategory={row.selectedCategory || row.aiCategory}
         categoryOptionsByGroup={categoryOptionsByGroup}
+        categoryDisplayByValue={categoryDisplayByValue}
         onSave={onSave}
         onCancel={() => undefined}
         onDirtyChange={onDirtyChange}
@@ -1281,7 +1358,7 @@ function CategoryProductListItem({ row, status, active, onSelect }: {
 }) {
   return (
     <button type="button" className={`category-product-list-item ${active ? "active" : ""}`} onClick={onSelect}>
-      {row.image ? <img src={row.image} alt="" /> : <span className="category-product-list-empty">-</span>}
+      {row.image ? <HoverPreviewImage src={row.image} alt="" /> : <span className="category-product-list-empty">-</span>}
       <span className="category-product-list-text">
         <strong>{row.title || "Без названия"}</strong>
         <span>{row.sku || row.ean || "-"}</span>
@@ -1331,10 +1408,11 @@ function CategoryProductNavigator({ rows, statuses, activeIndex, position, total
   );
 }
 
-function CategoryReviewWorkspace({ row, status, categoryOptionsByGroup, canSaveDraft, onDraftChange, onDirtyChange, onSave, onSaveDraft }: {
+function CategoryReviewWorkspace({ row, status, categoryOptionsByGroup, categoryDisplayByValue, canSaveDraft, onDraftChange, onDirtyChange, onSave, onSaveDraft }: {
   row: CategoryCheckRow;
   status: CategoryReviewStatus;
   categoryOptionsByGroup: Record<string, string[]>;
+  categoryDisplayByValue: Record<string, string>;
   canSaveDraft: boolean;
   onDraftChange: (draft: { category: string; dirty: boolean; valid: boolean }) => void;
   onDirtyChange: (dirty: boolean) => void;
@@ -1348,6 +1426,7 @@ function CategoryReviewWorkspace({ row, status, categoryOptionsByGroup, canSaveD
         key={row.index}
         row={row}
         categoryOptionsByGroup={categoryOptionsByGroup}
+        categoryDisplayByValue={categoryDisplayByValue}
         canSaveDraft={canSaveDraft}
         onDraftChange={onDraftChange}
         onDirtyChange={onDirtyChange}
@@ -1364,6 +1443,7 @@ function CategoryReviewModal({
   statuses,
   status,
   categoryOptionsByGroup,
+  categoryDisplayByValue,
   open,
   onSave,
   position,
@@ -1378,6 +1458,7 @@ function CategoryReviewModal({
   statuses: Record<number, CategoryReviewStatus>;
   status: CategoryReviewStatus;
   categoryOptionsByGroup: Record<string, string[]>;
+  categoryDisplayByValue: Record<string, string>;
   open: boolean;
   onSave: (category: string, comment: string) => void;
   position: number;
@@ -1433,6 +1514,7 @@ function CategoryReviewModal({
             row={row}
             status={status}
             categoryOptionsByGroup={categoryOptionsByGroup}
+            categoryDisplayByValue={categoryDisplayByValue}
             canSaveDraft={dirty && draft.valid}
             onDraftChange={setDraft}
             onDirtyChange={setDirty}
@@ -1481,7 +1563,7 @@ function ProductListItem({
         <input type="checkbox" checked={selected} onChange={onToggle} aria-label={`Select ${row.sku}`} />
       </span>
       <button type="button" className="product-review-list-open" onClick={onOpen}>
-        {row.image ? <img src={row.image} alt="" /> : <span className="product-review-list-no-image">-</span>}
+        {row.image ? <HoverPreviewImage src={row.image} alt="" /> : <span className="product-review-list-no-image">-</span>}
       </button>
       <button type="button" className="product-review-list-copy" onClick={onOpen}>
         <strong title={row.title}>{row.title || "-"}</strong>
@@ -1562,7 +1644,7 @@ function ProductReviewHeader({ row, image }: { row: ProductReviewRow | null; ima
   }
   return (
     <section className="product-review-header">
-      {image ? <img src={image} alt="" /> : <div className="product-review-header-empty">No image</div>}
+      {image ? <HoverPreviewImage src={image} alt="" /> : <div className="product-review-header-empty">No image</div>}
       <div>
         <h2>{row.title || "-"}</h2>
         <dl>
@@ -1610,7 +1692,14 @@ function ReviewTabs({ value, setValue }: { value: EditorTab; setValue: (value: E
   );
 }
 
-type AttributeCard = { index: number; name: string; values: string; group: string };
+type AttributeCard = {
+  index: number;
+  name: string;
+  displayName: string;
+  values: string;
+  displayValues: string;
+  group: string;
+};
 
 function AttributeBadges({ invalid }: { invalid: boolean }) {
   return invalid ? <span className="attribute-badge is-invalid">Invalid</span> : null;
@@ -1687,7 +1776,7 @@ function AttributeFieldCard({ attribute, isEditing, editingDraft, setEditingDraf
   return (
     <article className={`attribute-field-card${invalid ? " is-invalid" : ""}`}>
       <div className="attribute-field-card-head">
-        <span>{attribute.name || "Unnamed"}</span>
+        <span title={attribute.name}>{attribute.displayName || attribute.name || "Unnamed"}</span>
         <AttributeBadges invalid={invalid} />
         {!isEditing ? <AttributeActionsMenu onEdit={onEdit} onDelete={onDelete} value={attribute.values} /> : null}
       </div>
@@ -1695,7 +1784,7 @@ function AttributeFieldCard({ attribute, isEditing, editingDraft, setEditingDraf
         <AttributeFieldEditor value={editingDraft} setValue={setEditingDraft} onSave={onSave} onCancel={onCancel} />
       ) : (
         <button type="button" className={`attribute-field-value${attribute.values ? "" : " is-empty"}`} onClick={onEdit}>
-          {attribute.values || "Not provided"}
+          {attribute.displayValues || attribute.values || "Not provided"}
         </button>
       )}
       {invalid ? <p className="attribute-field-error">Check this value before approval.</p> : null}
@@ -1744,11 +1833,12 @@ function AttributeGroup({ title, items, editingAttribute, editingDraft, setEditi
 
 function MissingAttributeRow({ item, selected, onSelect }: { item: CategoryAttributeOption; selected: boolean; onSelect: () => void }) {
   const priority = (item.relevance || "LOW").toUpperCase();
+  const displayName = attributeDisplayName(item);
   return (
     <div className={`missing-attribute-row${selected ? " is-selected" : ""}`}>
-      <strong>{item.name}</strong><span>{item.unit || "—"}</span><span>{item.type || "—"}</span>
+      <strong>{displayName || item.name}</strong><span>{item.unit || "—"}</span><span>{item.type || "—"}</span>
       <span><i className={`priority-badge priority-${priority.toLowerCase()}`}>{priority}</i></span>
-      <button type="button" onClick={onSelect}>Add</button>
+      <button type="button" onClick={onSelect}>Добавить</button>
     </div>
   );
 }
@@ -1759,28 +1849,28 @@ function MissingAttributesPanel({ availableAttributes, isLoading, error, selecte
   addAttribute: () => void; open: boolean; setOpen: (value: boolean) => void;
 }) {
   const query = newAttributeName.trim().toLowerCase();
-  const visible = availableAttributes.filter((item) => !query || [item.name, item.description, item.relevance, item.unit, item.type].join(" ").toLowerCase().includes(query)).slice(0, 80);
+  const visible = availableAttributes.filter((item) => !query || [item.name, attributeDisplayName(item), attributeDisplayDescription(item), item.relevance, item.unit, item.type].join(" ").toLowerCase().includes(query)).slice(0, 80);
   return (
     <section className="missing-attributes-panel">
       <button type="button" className="missing-attributes-toggle" onClick={() => setOpen(!open)} aria-expanded={open}>
-        <span><strong>Missing attributes</strong><small>{isLoading ? "Loading category attributes" : `${availableAttributes.length} available from category`}</small></span>
+        <span><strong>Недостающие атрибуты</strong><small>{isLoading ? "Загрузка атрибутов категории" : `${availableAttributes.length} доступно из категории`}</small></span>
         {open ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
       </button>
       {open ? <div className="missing-attributes-content">
         <div className="missing-attributes-form">
-          <input list="product-review-category-attributes" value={newAttributeName} onChange={(event) => setNewAttributeName(event.target.value)} placeholder="Search missing attributes..." aria-label="Search missing attributes" />
-          <datalist id="product-review-category-attributes">{availableAttributes.map((item) => <option value={item.name} key={item.name} />)}</datalist>
-          <input list="product-review-category-attribute-values" value={newAttributeValue} onChange={(event) => setNewAttributeValue(event.target.value)} placeholder={selectedOption?.unit ? `Value in ${selectedOption.unit}` : "Value"} aria-label="Attribute value" />
-          <datalist id="product-review-category-attribute-values">{valueOptions.map((value) => <option value={value} key={value} />)}</datalist>
-          <button className="primary-btn" type="button" onClick={addAttribute} disabled={!newAttributeName.trim() || !newAttributeValue.trim()}>Add</button>
+          <input list="product-review-category-attributes" value={newAttributeName} onChange={(event) => setNewAttributeName(event.target.value)} placeholder="Поиск атрибута..." aria-label="Поиск атрибута" />
+          <datalist id="product-review-category-attributes">{availableAttributes.map((item) => <option value={item.name} label={attributeDisplayName(item)} key={item.name} />)}</datalist>
+          <input list="product-review-category-attribute-values" value={newAttributeValue} onChange={(event) => setNewAttributeValue(event.target.value)} placeholder={selectedOption?.unit ? `Значение в ${selectedOption.unit}` : "Значение"} aria-label="Значение атрибута" />
+          <datalist id="product-review-category-attribute-values">{valueOptions.map((value) => <option value={value} label={selectedOption ? attributeAllowedValueLabel(selectedOption, value) : value} key={value} />)}</datalist>
+          <button className="primary-btn" type="button" onClick={addAttribute} disabled={!newAttributeName.trim() || !newAttributeValue.trim()}>Добавить</button>
         </div>
         {error ? <p className="attribute-field-error">{error}</p> : null}
         <div className="missing-attribute-list">
-          <div className="missing-attribute-row is-head"><span>Attribute</span><span>Unit</span><span>Type</span><span>Priority</span><span /></div>
+          <div className="missing-attribute-row is-head"><span>Атрибут</span><span>Ед.</span><span>Тип</span><span>Приоритет</span><span /></div>
           {visible.length ? visible.map((item) => <MissingAttributeRow key={item.name} item={item} selected={selectedOption?.name === item.name} onSelect={() => {
             setNewAttributeName(item.name);
             if ((item.allowedValues ?? []).length === 1) setNewAttributeValue(item.allowedValues?.[0] ?? "");
-          }} />) : <p className="missing-attributes-empty">{isLoading ? "Loading attributes..." : "No matching attributes."}</p>}
+          }} />) : <p className="missing-attributes-empty">{isLoading ? "Загрузка атрибутов..." : "Подходящие атрибуты не найдены."}</p>}
         </div>
       </div> : null}
     </section>
@@ -1815,7 +1905,7 @@ function AttributeEditor({
   deleteAttribute,
   invalidAttributeNames,
 }: {
-  attributes: { index: number; name: string; values: string; group: string }[];
+  attributes: AttributeCard[];
   categoryAttributes: CategoryAttributeOption[];
   isLoadingCategoryAttributes: boolean;
   categoryAttributesError: string;
@@ -1866,7 +1956,7 @@ function AttributeEditor({
   const normalizedQuery = query.trim().toLowerCase();
   const groupEntries = Object.entries(groups).map(([title, items]) => [title, items.filter((item) => {
     if (onlyEmpty && item.values.trim()) return false;
-    return !normalizedQuery || `${item.name} ${item.values}`.toLowerCase().includes(normalizedQuery);
+    return !normalizedQuery || `${item.name} ${item.displayName} ${item.values} ${item.displayValues}`.toLowerCase().includes(normalizedQuery);
   })] as const).filter(([title, items]) => items.length > 0 && (groupFilter === "all" || groupFilter === title));
   return (
     <div className="product-review-attributes">
@@ -1977,7 +2067,7 @@ function BulkAttributeRow({ row, options, onChange, onRemove }: { row: BulkAttri
   const query = normalizeFieldToken(row.name);
   const visibleOptions = options.filter((item) => {
     if (!query || selectedOption) return true;
-    return normalizeFieldToken(`${item.name} ${item.description ?? ""} ${item.type ?? ""} ${item.relevance ?? ""} ${item.unit ?? ""}`).includes(query);
+    return normalizeFieldToken(`${item.name} ${attributeDisplayName(item)} ${attributeDisplayDescription(item)} ${item.type ?? ""} ${item.relevance ?? ""} ${item.unit ?? ""}`).includes(query);
   }).slice(0, 80);
   const selectAttribute = (option: CategoryAttributeOption) => {
     onChange({
@@ -2008,31 +2098,33 @@ function BulkAttributeRow({ row, options, onChange, onRemove }: { row: BulkAttri
         {visibleOptions.length ? visibleOptions.map((item) => {
           const priority = (item.relevance || "LOW").toUpperCase();
           const active = selectedOption === item;
+          const displayName = attributeDisplayName(item);
+          const displayDescription = attributeDisplayDescription(item);
           return <button className={active ? "is-selected" : ""} type="button" role="option" aria-selected={active} key={`${item.attributeId ?? item.id ?? item.attributeKey ?? item.name}-${item.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => selectAttribute(item)}>
-            <span className="bulk-attribute-option-head"><strong>{item.name}</strong>{active ? <Check size={14} /> : null}</span>
-            {item.description ? <small>{item.description}</small> : <small className="is-empty">No description</small>}
+            <span className="bulk-attribute-option-head"><strong>{displayName || item.name}</strong>{active ? <Check size={14} /> : null}</span>
+            {displayDescription ? <small>{displayDescription}</small> : <small className="is-empty">Нет описания</small>}
             <span className="bulk-attribute-requirements">
               <i className={`priority-badge priority-${priority.toLowerCase()}`}>{priority}</i>
-              <i>{item.type || "Unknown type"}</i>
-              {item.unit ? <i>{`Unit: ${item.unit}`}</i> : null}
-              {item.multiValue ? <i>Multi-value</i> : <i>Single value</i>}
+              <i>{item.type || "Неизвестный тип"}</i>
+              {item.unit ? <i>{`Ед.: ${item.unit}`}</i> : null}
+              {item.multiValue ? <i>Несколько значений</i> : <i>Одно значение</i>}
             </span>
           </button>;
-        }) : <div className="bulk-attribute-options-empty">No matching attributes</div>}
+        }) : <div className="bulk-attribute-options-empty">Подходящие атрибуты не найдены</div>}
       </div> : null}
       {selectedOption ? <div className="bulk-selected-attribute-meta">
-        {selectedOption.description ? <p>{selectedOption.description}</p> : null}
+        {attributeDisplayDescription(selectedOption) ? <p>{attributeDisplayDescription(selectedOption)}</p> : null}
         <span className="bulk-attribute-requirements">
           <i className={`priority-badge priority-${(selectedOption.relevance || "LOW").toLowerCase()}`}>{(selectedOption.relevance || "LOW").toUpperCase()}</i>
-          <i>{selectedOption.type || "Unknown type"}</i>
-          {selectedOption.unit ? <i>{`Unit: ${selectedOption.unit}`}</i> : null}
-          <i>{selectedOption.multiValue ? "Multi-value" : "Single value"}</i>
+          <i>{selectedOption.type || "Неизвестный тип"}</i>
+          {selectedOption.unit ? <i>{`Ед.: ${selectedOption.unit}`}</i> : null}
+          <i>{selectedOption.multiValue ? "Несколько значений" : "Одно значение"}</i>
         </span>
       </div> : null}
     </div>
     <div>
       <input list={valuesListId} value={row.value} onChange={(event) => onChange({ value: event.target.value })} placeholder={selectedOption?.unit ? `Value in ${selectedOption.unit}` : "Value"} aria-label="Value" />
-      <datalist id={valuesListId}>{(selectedOption?.allowedValues ?? []).map((value) => <option key={value} value={value} />)}</datalist>
+      <datalist id={valuesListId}>{(selectedOption?.allowedValues ?? []).map((value) => <option key={value} value={value} label={selectedOption ? attributeAllowedValueLabel(selectedOption, value) : value} />)}</datalist>
     </div>
     <button type="button" onClick={onRemove} aria-label="Remove attribute"><Trash2 size={16} /></button>
   </div>;
@@ -2084,6 +2176,8 @@ export default function CreatorPage() {
   const [shippingProfiles, setShippingProfiles] = useState<ShippingProfileOption[]>([]);
   const [categoryOptionsByGroup, setCategoryOptionsByGroup] = useState<Record<string, string[]>>({});
   const [selectedFabricId, setSelectedFabricId] = useState<string>("");
+  const [fabricQuery, setFabricQuery] = useState("");
+  const [fabricDropdownOpen, setFabricDropdownOpen] = useState(false);
   const [state, setState] = useState<UploadState>("idle");
   const [isLoadingFabrics, setIsLoadingFabrics] = useState(false);
   const [isRefreshingFabrics, setIsRefreshingFabrics] = useState(false);
@@ -2093,6 +2187,7 @@ export default function CreatorPage() {
   const [processState, setProcessState] = useState<string>("IDLE");
   const [products, setProducts] = useState<Record<string, unknown>[]>([]);
   const [aiCategoryByIndex, setAiCategoryByIndex] = useState<Record<number, AiCategoryReview>>({});
+  const [categoryDisplayByValue, setCategoryDisplayByValue] = useState<Record<string, string>>({});
   const [selectedIndex, setSelectedIndex] = useState<number>(0);
   const [workflowStep, setWorkflowStep] = useState<WorkflowStep>("categories");
   const [currentStep, setCurrentStep] = useState<string>("prepare_initializing");
@@ -2828,10 +2923,17 @@ export default function CreatorPage() {
     };
   }), [products, aiCategoryByIndex, errorCountByVariation, tableStatusPhase, shippingProfileNameById]);
 
-  const categories = useMemo(
-    () => Array.from(new Set(rows.map((row) => row.selectedCategory || row.aiCategoryGroup || row.aiCategory).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+  const categoryFilterOptions = useMemo(
+    () => Array.from(new Set(rows.map((row) => row.aiCategoryGroup.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
     [rows],
   );
+
+  useEffect(() => {
+    if (categoryFilter === "all") return;
+    if (categoryFilterOptions.includes(categoryFilter)) return;
+    setCategoryFilter("all");
+    setPage(1);
+  }, [categoryFilter, categoryFilterOptions]);
 
   const requestedCategoryGroups = useMemo(
     () => Array.from(new Set(rows.map((row) => row.aiCategoryGroup.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
@@ -2854,6 +2956,7 @@ export default function CreatorPage() {
         const parsed = await readJsonResponse<CategoryGroupCategoriesResponse>(response);
         if (!active || !response.ok) return;
         const nextEntries: Record<string, string[]> = {};
+        const nextDisplayByValue: Record<string, string> = {};
         const categoriesByGroupKey = new Map<string, string[]>();
         for (const item of Array.isArray(parsed?.items) ? parsed.items : []) {
           const group = String(item.categoryGroup ?? "").trim();
@@ -2864,11 +2967,19 @@ export default function CreatorPage() {
           const options = categories.length > 0 ? categories : [group];
           nextEntries[group] = options;
           categoriesByGroupKey.set(group.toLowerCase(), options);
+          if (Array.isArray(item.categoriesDisplay)) {
+            for (const displayItem of item.categoriesDisplay) {
+              const value = String(displayItem.name ?? "").trim();
+              const label = String(displayItem.displayName ?? displayItem.nameRu ?? displayItem.name ?? "").trim();
+              if (value && label) nextDisplayByValue[value] = label;
+            }
+          }
         }
         for (const group of missingGroups) {
           nextEntries[group] = categoriesByGroupKey.get(group.toLowerCase()) ?? [group];
         }
         setCategoryOptionsByGroup((prev) => ({ ...prev, ...nextEntries }));
+        setCategoryDisplayByValue((prev) => ({ ...prev, ...nextDisplayByValue }));
       } catch {
         if (!active) return;
       }
@@ -2885,7 +2996,7 @@ export default function CreatorPage() {
     const confirmedSet = new Set(confirmedCategoryRowIndexes);
     const isCategoryMode = workflowStep === "categories";
     const filtered = rows.filter((row) => {
-      if (!isCategoryMode && categoryFilter !== "all" && row.selectedCategory !== categoryFilter && row.aiCategoryGroup !== categoryFilter && row.aiCategory !== categoryFilter) return false;
+      if (categoryFilter !== "all" && row.aiCategoryGroup !== categoryFilter) return false;
       const manuallyChanged = row.selectedCategory.trim() !== row.aiCategory.trim();
       const status: CategoryReviewStatus = skippedSet.has(row.index)
         ? "skipped"
@@ -3074,6 +3185,7 @@ export default function CreatorPage() {
   const selectedAttributeCategory = selectedReviewRowForRender?.selectedCategory || selectedReviewRowForRender?.aiCategory || "";
   const selectedAttributeCategoryGroup = selectedReviewRowForRender?.aiCategoryGroup || "";
   const selectedSku = normalizeSku(String(selectedProduct.sku ?? ""));
+  const selectedShippingProfileId = productShippingProfileId(selectedProduct);
   const selectedDescription = asRecord(selectedProduct.productDescription);
   const selectedPricing = asRecord(selectedProduct.pricing);
   const selectedStandardPrice = asRecord(selectedPricing.standardPrice);
@@ -3090,19 +3202,34 @@ export default function CreatorPage() {
   useEffect(() => {
     setEditingOverviewField(null);
   }, [selectedIndex]);
+  const categoryAttributeByName = useMemo(() => {
+    const map = new Map<string, CategoryAttributeOption>();
+    for (const option of categoryAttributes) {
+      const key = normalizeFieldToken(option.name);
+      if (key) map.set(key, option);
+    }
+    return map;
+  }, [categoryAttributes]);
   const attributeCards = useMemo(() => {
     return selectedAttributes.map((item, index) => {
       const attr = asRecord(item);
       const name = String(attr.name ?? "");
-      const values = Array.isArray(attr.values) ? attr.values.map((value) => String(value)).join(", ") : "";
+      const option = categoryAttributeByName.get(normalizeFieldToken(name));
+      const rawValues = Array.isArray(attr.values) ? attr.values.map((value) => String(value)) : [];
+      const values = rawValues.join(", ");
+      const displayValues = option
+        ? rawValues.map((value) => attributeAllowedValueLabel(option, value) || value).join(", ")
+        : values;
       return {
         index,
         name,
+        displayName: name,
         values,
+        displayValues,
         group: readAttributeGroup(name),
       };
     });
-  }, [selectedAttributes]);
+  }, [selectedAttributes, categoryAttributeByName]);
   const parsedOttoErrors = useMemo<ParsedSkuError[]>(() => {
     return ottoErrors.map((item) => {
       const jsonPath = String(item.jsonPath ?? "");
@@ -3336,6 +3463,14 @@ export default function CreatorPage() {
     });
   }
 
+  function updateSelectedTitle(value: string) {
+    setProducts((prev) => {
+      const next = [...prev];
+      next[selectedIndex] = updateProductTitle(asRecord(next[selectedIndex]), value);
+      return next;
+    });
+  }
+
   function updateRowShippingProfile(rowIndex: number, profileId: string) {
     setProducts((prev) => {
       const next = [...prev];
@@ -3397,6 +3532,7 @@ export default function CreatorPage() {
     });
     if (eligible.length === 0) return;
     setConfirmedCategoryRowIndexes((prev) => Array.from(new Set([...prev, ...eligible])).sort((a, b) => a - b));
+    setSelectedCategoryRowIndexes((prev) => prev.filter((item) => !eligible.includes(item)));
     setUiMessage(`Подтверждено категорий: ${eligible.length}.`);
   }
 
@@ -3930,6 +4066,21 @@ export default function CreatorPage() {
     return <PageLoadingShell contentMode="form" />;
   }
 
+  const normalizedFabricQuery = normalizeFieldToken(fabricQuery);
+  const filteredFabrics = normalizedFabricQuery
+    ? fabrics.filter((item) =>
+        normalizeFieldToken(`${item.name ?? ""} ${item.id ?? ""}`).includes(normalizedFabricQuery),
+      )
+    : fabrics;
+  const visibleFabrics = selectedFabricId && !filteredFabrics.some((item) => item.id === selectedFabricId)
+    ? [
+        ...fabrics.filter((item) => item.id === selectedFabricId),
+        ...filteredFabrics,
+      ]
+    : filteredFabrics;
+  const selectedFabric = fabrics.find((item) => item.id === selectedFabricId);
+  const fabricPickerDisabled = isLoadingFabrics || state === "loading" || fabrics.length === 0;
+
   return (
     <AppWorkspaceShell
       activeHref="/creator"
@@ -3965,9 +4116,65 @@ export default function CreatorPage() {
                 </select>
               </label>
               <label>Fabric
-                <select value={selectedFabricId} onChange={(event) => setSelectedFabricId(event.target.value)} disabled={isLoadingFabrics || state === "loading" || fabrics.length === 0}>
-                  {fabrics.length === 0 ? <option value="">{isLoadingFabrics ? "Загрузка fabrics..." : "Нет fabrics"}</option> : fabrics.map((item) => <option key={item.id} value={item.id}>{item.name ?? item.id} ({item.items_count ?? 0})</option>)}
-                </select>
+                <div
+                  className="fabric-picker"
+                  onBlur={(event) => {
+                    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                      setFabricDropdownOpen(false);
+                    }
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="fabric-picker-trigger"
+                    disabled={fabricPickerDisabled}
+                    aria-haspopup="listbox"
+                    aria-expanded={fabricDropdownOpen}
+                    onClick={() => {
+                      if (fabricPickerDisabled) return;
+                      setFabricDropdownOpen((open) => !open);
+                    }}
+                  >
+                    <span>{isLoadingFabrics ? "Загрузка fabrics..." : selectedFabric ? `${selectedFabric.name ?? selectedFabric.id} (${selectedFabric.items_count ?? 0})` : "Выберите fabric"}</span>
+                    <ChevronDown size={16} aria-hidden="true" />
+                  </button>
+                  {fabricDropdownOpen ? (
+                    <div className="fabric-picker-menu">
+                      <div className="creator-search-wrap fabric-search">
+                        <Search size={16} className="creator-search-icon" />
+                        <input
+                          autoFocus
+                          className="creator-search-input"
+                          type="search"
+                          value={fabricQuery}
+                          onChange={(event) => setFabricQuery(event.target.value)}
+                          placeholder="Поиск fabric..."
+                        />
+                      </div>
+                      <div className="fabric-picker-options" role="listbox">
+                        {visibleFabrics.length === 0 ? (
+                          <span className="fabric-picker-empty">Ничего не найдено</span>
+                        ) : visibleFabrics.map((item) => (
+                          <button
+                            type="button"
+                            role="option"
+                            aria-selected={item.id === selectedFabricId}
+                            className={item.id === selectedFabricId ? "is-selected" : ""}
+                            key={item.id}
+                            onMouseDown={(event) => {
+                              event.preventDefault();
+                              setSelectedFabricId(item.id);
+                              setFabricDropdownOpen(false);
+                            }}
+                          >
+                            <span>{item.name ?? item.id}</span>
+                            <small>{`${item.items_count ?? 0} товаров`}</small>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
               </label>
               <button
                 type="button"
@@ -3977,8 +4184,7 @@ export default function CreatorPage() {
                 title="Обновить список фабрик"
                 aria-label="Обновить список фабрик"
               >
-                <RefreshCw size={14} className={isRefreshingFabrics ? "spin" : ""} />
-                {isRefreshingFabrics ? "Обновляю..." : "Обновить список"}
+                <RefreshCw size={18} className={isRefreshingFabrics ? "spin" : ""} />
               </button>
             </div>
             <div className="creator-ref-launch-actions">
@@ -4114,6 +4320,9 @@ export default function CreatorPage() {
             <CategoryCheckToolbar
               tableQuery={tableQuery}
               setTableQuery={setTableQuery}
+              categoryFilter={categoryFilter}
+              setCategoryFilter={setCategoryFilter}
+              categoryFilterOptions={categoryFilterOptions}
               statusFilter={categoryStatusFilter}
               setStatusFilter={setCategoryStatusFilter}
               categorySort={categorySort}
@@ -4158,6 +4367,7 @@ export default function CreatorPage() {
           <CategoryEditDrawer
             row={editingCategoryRow}
             categoryOptionsByGroup={categoryOptionsByGroup}
+            categoryDisplayByValue={categoryDisplayByValue}
             open={editingCategoryIndex !== null}
             onSave={(category, comment) => {
               if (editingCategoryIndex !== null) saveCategoryEdit(editingCategoryIndex, category, comment);
@@ -4180,6 +4390,7 @@ export default function CreatorPage() {
             statuses={categoryRowStatuses}
             status={detailsCategoryStatus}
             categoryOptionsByGroup={categoryOptionsByGroup}
+            categoryDisplayByValue={categoryDisplayByValue}
             open={detailsCategoryIndex !== null}
             onSave={(category, comment) => {
               if (detailsCategoryIndex !== null) saveCategoryEdit(detailsCategoryIndex, category, comment);
@@ -4266,14 +4477,46 @@ export default function CreatorPage() {
                           <div className="product-overview-card-head"><h3>Product Info</h3></div>
                           <div className="product-overview-field attribute-field-card">
                             <div className="product-overview-field-head attribute-field-card-head">
+                              <span>Title</span>
+                              {editingOverviewField !== "title" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("title")} onCopy={() => void copyText(selectedReviewRowForRender?.title ?? "", "overview-title")} canCopy={Boolean(selectedReviewRowForRender?.title)} copied={copiedRuntimeField === "overview-title"} /> : null}
+                            </div>
+                            {editingOverviewField === "title" ? (
+                              <div className="attribute-field-editor"><input autoFocus value={selectedReviewRowForRender?.title ?? ""} onChange={(event) => updateSelectedTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} /><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
+                            ) : (
+                              <button type="button" className={`attribute-field-value${selectedReviewRowForRender?.title?.trim() ? "" : " is-empty"}`} onClick={() => setEditingOverviewField("title")}>{selectedReviewRowForRender?.title?.trim() || "Not provided"}</button>
+                            )}
+                          </div>
+                          <div className="product-overview-field attribute-field-card">
+                            <div className="product-overview-field-head attribute-field-card-head">
                               <span>Product Line</span>
                               {editingOverviewField !== "product-line" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("product-line")} /> : null}
                             </div>
                             {editingOverviewField === "product-line" ? (
-                              <div className="attribute-field-editor"><input autoFocus value={String(selectedDescription.productLine ?? "")} onChange={(event) => updateSelected(["productDescription", "productLine"], event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} /><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
+                              <div className="attribute-field-editor"><input autoFocus value={String(selectedDescription.productLine ?? "")} onChange={(event) => updateSelectedTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} /><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
                             ) : (
                               <button type="button" className={`attribute-field-value${String(selectedDescription.productLine ?? "").trim() ? "" : " is-empty"}`} onClick={() => setEditingOverviewField("product-line")}>{String(selectedDescription.productLine ?? "").trim() || "Not provided"}</button>
                             )}
+                          </div>
+                          <div className="product-overview-field attribute-field-card">
+                            <div className="product-overview-field-head attribute-field-card-head">
+                              <span>Delivery days</span>
+                            </div>
+                            <select
+                              value={selectedShippingProfileId}
+                              onChange={(event) => updateRowShippingProfile(selectedIndex, event.target.value)}
+                              disabled={shippingProfiles.length === 0}
+                            >
+                              {selectedShippingProfileId && !shippingProfiles.some((item) => item.id === selectedShippingProfileId) ? (
+                                <option value={selectedShippingProfileId}>{selectedReviewRowForRender?.shippingProfileName || selectedShippingProfileId}</option>
+                              ) : null}
+                              {shippingProfiles.length === 0 ? (
+                                <option value="">{selectedShippingProfileId || "No delivery profiles"}</option>
+                              ) : (
+                                shippingProfiles.map((item) => (
+                                  <option key={item.id} value={item.id}>{item.name}</option>
+                                ))
+                              )}
+                            </select>
                           </div>
                         </section>
 
@@ -4383,6 +4626,7 @@ export default function CreatorPage() {
             <CategoryEditDrawer
               row={rowByIndex.get(selectedIndex) ?? null}
               categoryOptionsByGroup={categoryOptionsByGroup}
+              categoryDisplayByValue={categoryDisplayByValue}
               open={editingCategoryIndex === selectedIndex}
               onSave={(category, comment) => saveCategoryEdit(selectedIndex, category, comment)}
               onClose={() => setEditingCategoryIndex(null)}

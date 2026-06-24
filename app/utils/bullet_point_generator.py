@@ -9,35 +9,47 @@ class BulletPointGenerator:
         self.model = model
 
     async def generate_bullet_points(self, product: dict):
-        remaining = 5 - len(product["bulletPoints"])
+        existing_bullet_points = [
+            str(item).strip()
+            for item in product.get("bulletPoints", [])
+            if str(item).strip()
+        ]
+        remaining = 5 - len(existing_bullet_points)
+        if remaining <= 0:
+            return []
 
         system_prompt = """
         You are a professional OTTO marketplace copywriter.
 
-        Your task is to create sales-oriented bullet points.
+        Your task is to create factual, useful OTTO marketplace bullet points
+        from the product data.
 
         Rules:
 
         - Generate EXACTLY the requested number of bullet points.
         - German language only.
-        - Write benefits, not attribute lists.
-        - Focus on customer value.
-        - Sound natural and premium.
-        - Do not simply repeat product attributes.
+        - Use concrete product facts instead of generic marketing claims.
+        - Prefer information in this priority order:
+        1. Maße (Länge, Breite, Höhe)
+        2. Material
+        3. Farbe
+        4. Besondere Eigenschaften
+        5. Lieferumfang
+        6. Pflegehinweise
+        7. Einsatzbereich / Verwendungszweck
+        8. Belastbarkeit, falls relevant
+        9. Montageinformationen, falls relevant
+        10. Herstellungsland, only if explicitly present or important.
+        - It is allowed and encouraged to mention dimensions, material, color,
+          assembly, care, delivery scope, load capacity, and use case when present.
+        - Keep each bullet clear and natural, not a raw key-value dump.
+        - Do not start bullets with labels like "Material:" or "Farbe:".
+        - Do not use "Made in Europa" unless the product data explicitly says so.
         - Do not mention:
-        - dimensions
         - EAN
         - manufacturer number
         - warranty
         - brand name
-        - room names
-        - assembly information
-        - Avoid phrases like:
-        - "Material: ..."
-        - "Farbe: ..."
-        - "Maße ..."
-        - "2 Schubladen"
-        - Instead explain WHY the feature is useful.
         - Every bullet must be unique.
         - Maximum 100 characters per bullet.
 
@@ -55,18 +67,19 @@ class BulletPointGenerator:
 
         Good examples:
 
-        ✓ Modernes Design für ein stilvolles Wohnambiente
-        ✓ Praktischer Stauraum für mehr Ordnung im Alltag
-        ✓ Hochwertige Verarbeitung für langanhaltende Freude
-        ✓ Zeitlose Optik passend zu vielen Einrichtungsstilen
-        ✓ Durchdachte Konstruktion für komfortable Nutzung
+        ✓ Maße ca. 240 x 100 x 90 cm passend für großzügige Wohnbereiche
+        ✓ Bezug aus beigem Stoff mit angenehm wohnlicher Oberfläche
+        ✓ Verstellbare Relaxfunktion für bequemes Sitzen und Zurücklehnen
+        ✓ Lieferumfang: 1 Fernsehsessel für den Innenbereich
+        ✓ Montage erforderlich, Aufbau mit wenigen Handgriffen möglich
 
         Bad examples:
 
-        ✗ Farbe Weiß
-        ✗ Material Holz
-        ✗ Mit 2 Schubladen
-        ✗ Maße 70 x 44 x 59 cm
+        ✗ Modernes Design für viele Einrichtungsstile
+        ✗ Hochwertige Verarbeitung für langanhaltende Freude
+        ✗ Made in Europa
+        ✗ Farbe: Weiß
+        ✗ Material: Holz
         ✗ Marke JV Möbel
 
         Return JSON only.
@@ -79,7 +92,7 @@ class BulletPointGenerator:
         {json.dumps(product, ensure_ascii=False)}
 
         Existing bullet points:
-        {json.dumps(product.get("bulletPoints"), ensure_ascii=False)}
+        {json.dumps(existing_bullet_points, ensure_ascii=False)}
         """
 
         response = await self.client.responses.create(
@@ -150,7 +163,7 @@ async def main():
             "Personalisiert": "Nein",
             "EAN": "4067282593664",
             "Maße Stuhl": "ca: 55 x 59 x 93 cm",
-            "bulletPoints": ["Made in Europa"],
+            "bulletPoints": [],
         }
     )
 

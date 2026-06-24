@@ -13,4 +13,6 @@ class AttributeAllowedValue(Base):
 
     value: Mapped[str] = mapped_column(String(255), nullable=False)
 
+    value_ru: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     attribute: Mapped["Attribute"] = relationship(back_populates="allowed_values")

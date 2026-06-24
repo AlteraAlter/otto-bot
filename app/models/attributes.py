@@ -22,9 +22,13 @@ class Attribute(Base):
         nullable=False,
     )
 
+    name_ru: Mapped[str | None] = mapped_column(String, nullable=True)
+
     type: Mapped[str] = mapped_column(String, nullable=False, unique=False)
 
     description: Mapped[str] = mapped_column(Text, nullable=True)
+
+    description_ru: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     multi_value: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
