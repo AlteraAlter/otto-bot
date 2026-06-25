@@ -21,6 +21,7 @@ from app.models.attributes import Attribute
 from app.models.categories import Category
 from app.models.category_group import CategoryGroup
 from app.models.variation_theme import VariationTheme
+from app.normalize_product_to_schema import brand_id_for_controller
 from app.schemas.enums import Controller
 
 # Schemas
@@ -64,9 +65,13 @@ class ProductService:
         """Fetch one product from OTTO by SKU and include the upstream status code."""
         return await self.client.get_product_with_status(sku)
 
-    async def get_products(self, payload: dict) -> ProductResponse:
+    async def get_products(
+        self,
+        payload: dict,
+        controller: Controller = Controller.JV,
+    ) -> ProductResponse:
         """Fetch paginated products from OTTO using query payload filters."""
-        return await self.client.get_products(payload)
+        return await self.client.get_products(payload, controller=controller)
 
     async def get_active_products(self, payload: dict):
         """Fetch active-status listing from OTTO."""
@@ -90,9 +95,14 @@ class ProductService:
         compliance = settings.compliance.get(payload.controller)
 
         products = []
+        brand_id = brand_id_for_controller(payload.controller)
 
         for item in payload.products:
-            product = ProductClient(**item.model_dump(), compliance=compliance)
+            product_data = item.model_dump()
+            product_description = dict(product_data.get("productDescription") or {})
+            product_description["brandId"] = brand_id
+            product_data["productDescription"] = product_description
+            product = ProductClient(**product_data, compliance=compliance)
             products.append(product)
 
             print(f"Product client body: {product}")
@@ -136,6 +146,16 @@ class ProductService:
 
     # Post creation of product data process
     async def create_availability(self, payload: Availability) -> AvailabilityResponse:
+        self.logger.info(
+            "step=create_availability_start sku=%s quantity=%s shipping_profile_id=%s processing_time=%s controller=%s",
+            payload.sku,
+            payload.quantity or "20",
+            payload.shippingProfileID,
+            payload.processingTime or "DEFAULT",
+            payload.controller.value
+            if isinstance(payload.controller, Controller)
+            else payload.controller,
+        )
 
         quantity_payload = UpdateQuantity(
             sku=payload.sku, quantity=payload.quantity or "20"
@@ -147,44 +167,82 @@ class ProductService:
             shippingProfileId=payload.shippingProfileID,
         )
 
-        # Tasks
-        quantity_task = self.update_quantity(
-            quantity_payload.model_dump(
-                mode="json",
-                by_alias=True,
-            ),
-            controller=payload.controller,
-        )
-        delivery_task = self.update_product_delivery_information(
-            delivery_payload.model_dump(
-                mode="json",
-                by_alias=True,
-            ),
-            controller=payload.controller,
-        )
-        quantity_result, delivery_result = await asyncio.gather(
-            quantity_task, delivery_task, return_exceptions=True
-        )
+        try:
+            self.logger.info(
+                "step=create_availability_quantity_request sku=%s payload=%s",
+                payload.sku,
+                quantity_payload.model_dump(mode="json", by_alias=True),
+            )
+            await self.update_quantity(
+                quantity_payload.model_dump(
+                    mode="json",
+                    by_alias=True,
+                ),
+                controller=payload.controller,
+            )
+            quantity_result: OperationResult | Exception = OperationResult(success=True)
+            self.logger.info(
+                "step=create_availability_quantity_success sku=%s",
+                payload.sku,
+            )
+        except Exception as exc:
+            quantity_result = exc
+            self.logger.exception(
+                "step=create_availability_quantity_failed sku=%s error=%s",
+                payload.sku,
+                exc,
+            )
+
+        try:
+            self.logger.info(
+                "step=create_availability_delivery_request sku=%s payload=%s",
+                payload.sku,
+                delivery_payload.model_dump(mode="json", by_alias=True),
+            )
+            await self.update_product_delivery_information(
+                delivery_payload.model_dump(
+                    mode="json",
+                    by_alias=True,
+                ),
+                controller=payload.controller,
+            )
+            delivery_result: OperationResult | Exception = OperationResult(success=True)
+            self.logger.info(
+                "step=create_availability_delivery_success sku=%s shipping_profile_id=%s",
+                payload.sku,
+                payload.shippingProfileID,
+            )
+        except Exception as exc:
+            delivery_result = exc
+            self.logger.exception(
+                "step=create_availability_delivery_failed sku=%s shipping_profile_id=%s error=%s",
+                payload.sku,
+                payload.shippingProfileID,
+                exc,
+            )
 
         if isinstance(quantity_result, Exception):
             quantity_result = OperationResult(
                 success=False, errors=str(quantity_result)
             )
 
-        else:
-            quantity_result = OperationResult(success=True)
-
         if isinstance(delivery_result, Exception):
             delivery_result = OperationResult(
                 success=False, errors=str(delivery_result)
             )
 
-        else:
-            delivery_result = OperationResult(success=True)
-
-        return AvailabilityResponse(
+        response = AvailabilityResponse(
             update_quantity=quantity_result, update_delivery=delivery_result
         )
+        self.logger.info(
+            "step=create_availability_done sku=%s quantity_success=%s delivery_success=%s quantity_errors=%s delivery_errors=%s",
+            payload.sku,
+            response.update_quantity.success if response.update_quantity else None,
+            response.update_delivery.success if response.update_delivery else None,
+            response.update_quantity.errors if response.update_quantity else None,
+            response.update_delivery.errors if response.update_delivery else None,
+        )
+        return response
 
     async def delete_product_from_file(
         self, skus: list[str], controller: Controller

@@ -275,6 +275,60 @@ class ProductMapper:
         return prepared
 
     @staticmethod
+    def _source_with_product_edits(source: dict | None, product: dict) -> dict:
+        merged: dict[str, Any] = dict(source or {})
+        product_description = product.get("productDescription")
+        description = (
+            product_description if isinstance(product_description, dict) else {}
+        )
+
+        title = (
+            product.get("Artikelbeschreibung")
+            or description.get("productLine")
+            or product.get("title")
+        )
+        if isinstance(title, str) and title.strip():
+            merged["Artikelbeschreibung"] = title.strip()
+
+        generated_description = description.get("description")
+        if isinstance(generated_description, str) and generated_description.strip():
+            merged["Beschreibung"] = generated_description.strip()
+            merged["Description"] = generated_description.strip()
+            merged["TranslatedDescription"] = generated_description.strip()
+
+        bullet_points = description.get("bulletPoints")
+        if isinstance(bullet_points, list):
+            cleaned_bullets = [
+                str(item).strip() for item in bullet_points if str(item).strip()
+            ]
+            if cleaned_bullets:
+                merged["bulletPoints"] = cleaned_bullets
+
+        attributes = description.get("attributes")
+        if isinstance(attributes, list):
+            for raw_attr in attributes:
+                if not isinstance(raw_attr, dict):
+                    continue
+                name = str(raw_attr.get("name") or "").strip()
+                if not name:
+                    continue
+                raw_values = raw_attr.get("values", raw_attr.get("value"))
+                if isinstance(raw_values, list):
+                    values = [
+                        str(value).strip()
+                        for value in raw_values
+                        if str(value).strip()
+                    ]
+                    if not values:
+                        continue
+                    merged[name] = values[0] if len(values) == 1 else values
+                    continue
+                if ProductMapper._has_ai_value(raw_values):
+                    merged[name] = raw_values
+
+        return merged
+
+    @staticmethod
     def _has_ai_value(value: Any) -> bool:
         if value is None:
             return False
@@ -339,9 +393,10 @@ class ProductMapper:
         product_description = dict(result.get("productDescription") or {})
         result["productDescription"] = product_description
 
-        source = self._prepare_ai_source(source_item or product)
+        ai_source = self._source_with_product_edits(source_item, product)
+        source = self._prepare_ai_source(ai_source)
         compact_source = self._prepare_ai_source(
-            source_item or product,
+            ai_source,
             include_descriptions=False,
         )
         category = str(product_description.get("category") or "").strip()

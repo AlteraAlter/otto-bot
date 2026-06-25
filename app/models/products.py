@@ -4,7 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import DateTime, Float, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
@@ -41,4 +41,8 @@ class Product(Base):
     )
     last_changed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=False), nullable=True
+    )
+    variants: Mapped[list["ProductVariant"]] = relationship(
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )

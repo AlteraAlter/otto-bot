@@ -8,6 +8,17 @@ import xml.etree.ElementTree as ET
 from typing import Any
 
 
+BRAND_IDS_BY_CONTROLLER = {
+    "jv": "UO4EGHSX",
+    "xl": "6HMOZBOU",
+}
+
+
+def brand_id_for_controller(controller: Any) -> str:
+    key = str(getattr(controller, "value", controller) or "jv").strip().lower()
+    return BRAND_IDS_BY_CONTROLLER.get(key, BRAND_IDS_BY_CONTROLLER["jv"])
+
+
 def _pick_text(*values: Any) -> str | None:
     for value in values:
         if value is None:
@@ -144,6 +155,7 @@ def _description(
 def build_normalized_product(
     source: dict[str, Any],
     description_html: str | None = None,
+    controller: Any = "jv",
 ) -> dict[str, Any]:
     """Build the minimal valid product payload used by the factory flow."""
     specifics = _parse_specifics(source.get("CustomItemSpecifics"))
@@ -168,20 +180,13 @@ def build_normalized_product(
     )
     description = description_html or _description(source, specifics)
     price = _parse_float(source.get("Startpreis"), 0.0)
-    if price <= 0:
-        raise ValueError(
-            f"Positive product price is missing for EAN/SKU {ean or 'unknown'}"
-        )
 
     return {
         "productReference": ean,
         "sku": ean,
         "ean": ean or None,
         "productDescription": {
-            "brandId": (
-                _pick_text(source.get("brandId"), source.get("brand"), "JVmoebel")
-                or "JVmoebel"
-            ),
+            "brandId": brand_id_for_controller(controller),
             "productLine": title,
             "category": category,
             "bulletPoints": [],
@@ -199,4 +204,4 @@ def build_normalized_product(
     }
 
 
-__all__ = ["build_normalized_product"]
+__all__ = ["brand_id_for_controller", "build_normalized_product"]

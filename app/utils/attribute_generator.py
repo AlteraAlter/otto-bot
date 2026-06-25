@@ -32,7 +32,8 @@ class AttributeGenerator:
         - Return only attributes requested in OTTO schema.
         - Return valid JSON only.
         - Attribute names must exactly match OTTO attribute names.
-        - Multi value attributes must be arrays.
+        - Return exactly one best value per attribute.
+        - Do not return multiple alternatives for one attribute, even for multi value attributes.
         - Numeric attributes must contain only numbers without units.
         - Exlude attributes: {json.dumps(exclude_attributes, ensure_ascii=False)}
         """
@@ -69,10 +70,6 @@ class AttributeGenerator:
                                         "value": {
                                             "anyOf": [
                                                 {"type": "string"},
-                                                {
-                                                    "type": "array",
-                                                    "items": {"type": "string"},
-                                                },
                                                 {"type": "null"},
                                             ]
                                         },

@@ -129,6 +129,7 @@ export default function ProductImportsPage() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const form = event.currentTarget;
     if (currentUser?.role !== "SEO") {
       setMessageTone("error");
       setMessage("SEO access is required to launch XLSX imports.");
@@ -160,8 +161,9 @@ export default function ProductImportsPage() {
       }
 
       setMessageTone("success");
-      setMessage("XLSX import queued successfully.");
+      setMessage("Успешно загружено.");
       setFile(null);
+      form.reset();
       await loadTasks();
     } catch (caughtError) {
       setMessageTone("error");

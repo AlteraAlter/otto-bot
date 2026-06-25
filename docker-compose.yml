@@ -58,8 +58,11 @@ services:
       ARQ_QUEUE_NAME: arq:otto-bot
       FRONTEND_APP_URL: https://okb.automatonsoft.de
       UPLOADS_DIR: /app/uploads
+      GENERATED_MEDIA_ROOT: /app/storage/generated
+      GENERATED_MEDIA_URL_PREFIX: /generated-media
     volumes:
       - ./storage/uploads:/app/uploads
+      - ./storage/generated:/app/storage/generated
       - ./logs:/app/logs
     depends_on:
       postgres:
@@ -88,6 +91,8 @@ services:
       ARQ_QUEUE_NAME: arq:otto-bot
       ARQ_WORKER_CONCURRENCY: ${ARQ_WORKER_CONCURRENCY:-2}
       FRONTEND_APP_URL: https://okb.automatonsoft.de
+      GENERATED_MEDIA_ROOT: /app/storage/generated
+      GENERATED_MEDIA_URL_PREFIX: /generated-media
     depends_on:
       postgres:
         condition: service_healthy
@@ -96,6 +101,7 @@ services:
       mongodb:
         condition: service_healthy
     volumes:
+      - ./storage/generated:/app/storage/generated
       - ./logs:/app/logs
     restart: unless-stopped
 
@@ -122,6 +128,7 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./storage/uploads:/var/www/uploads:ro
+      - ./storage/generated:/var/www/generated-media:ro
     depends_on:
       - frontend
       - backend

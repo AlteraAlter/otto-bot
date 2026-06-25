@@ -49,6 +49,20 @@ class Settings(BaseSettings):
     mongodb_url: str | None = None
     mongodb_database: str = "otto_bot"
     mongodb_factory_tasks_collection: str = "factory_task_states"
+    generated_media_root: str = "storage/generated"
+    generated_media_url_prefix: str = "/generated-media"
+    openai_api_key: str | None = None
+    openai_image_model: str = "gpt-image-1"
+    openai_image_size: str = "1536x1024"
+    openai_image_quality: str = "high"
+    openai_image_background: str = "opaque"
+    openai_image_output_format: str = "jpeg"
+    openai_image_timeout_seconds: float = 180.0
+    otto_image_max_side: int = 4500
+    otto_image_min_width: int = 500
+    otto_image_min_height: int = 1000
+    otto_image_target_max_bytes: int = 5 * 1024 * 1024
+    otto_allowed_image_formats: str = "jpg,png"
 
     # ARQ settings
     arq_redis_url: str | None = None

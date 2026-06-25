@@ -96,6 +96,19 @@ Backend URLs:
 - `http://127.0.0.1:8000/health`
 - `http://127.0.0.1:8000/docs`
 
+## OTTO Direct Products API
+
+The backend exposes a direct proxy for OTTO `GET /v5/products` in Swagger:
+
+- `GET /v5/products`
+- `GET /v1/products/otto`
+
+Supported query params:
+- `controller`: OTTO controller account, defaults to `JV`
+- `page`: page number, defaults to `0`
+- `limit`: page size, defaults to `30`
+- `sku`, `productReference`, `ean`, `moin`: optional product filters
+
 ## Run Frontend
 
 ```bash

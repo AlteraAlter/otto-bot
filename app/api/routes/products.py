@@ -15,9 +15,12 @@ import httpx
 from fastapi import (
     APIRouter,
     BackgroundTasks,
+    Body,
     Depends,
     File,
+    HTTPException,
     Query,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -43,6 +46,7 @@ from app.models.categories import Category
 from app.models.category_group import CategoryGroup
 from app.models.product_import_tasks import ProductImportTask
 from app.models.products import Product
+from app.models.variation_theme import VariationTheme
 from app.schemas.enums import Controller, RoleEnum, SortOrderEnum
 from app.schemas.product import (
     Availability,
@@ -51,6 +55,7 @@ from app.schemas.product import (
 from app.schemas.product import (
     Product as ProductPayload,
 )
+from app.schemas.product import ProductResponse
 from app.schemas.product_creation import (
     ProductCreationErrorResponse,
     ProductImportTaskDTO,
@@ -68,7 +73,17 @@ from app.schemas.product_tasks import (
 from app.services.afterbuy_service import AfterbuyService
 from app.services.factory_task_state_service import FactoryTaskStateService
 from app.services.product_service import ProductService
+from app.services.product_variant_service import (
+    ProductVariantService,
+    find_identifier_conflicts,
+)
+from app.services.product_variation_logic import (
+    active_variant_items,
+    expand_products_with_variants,
+    validate_variant_export_identifiers,
+)
 from app.services.translation_service import TranslationService, normalize_translation_text
+from app.services.variant_image_service import generate_variant_image_from_snapshot
 
 router = APIRouter(
     prefix="/v1/products",
@@ -147,9 +162,12 @@ FACTORY_MAP_TIMEOUT_SEC = 1800
 FACTORY_NORMALIZE_TIMEOUT_SEC = 20
 FACTORY_PRODUCT_CONCURRENCY = settings.factory_product_concurrency
 FACTORY_AI_ENRICH_ITEM_TIMEOUT_SEC = settings.factory_ai_enrich_item_timeout_seconds
+MAX_OTTO_MEDIA_ASSETS = 19
+MEDIA_URL_RE = re.compile(r"https?://[^\s,;|\"'<>]+")
 FACTORY_OTTO_CREATE_BATCH_SIZE = 100
 FACTORY_OTTO_UPDATE_TASK_MAX_POLLS = 60
 FACTORY_OTTO_UPDATE_TASK_FALLBACK_SLEEP_SEC = 5
+FACTORY_AVAILABILITY_AFTER_CREATE_DELAY_SEC = 8
 FACTORY_TASK_STATE_SERVICE = FactoryTaskStateService()
 PRODUCT_DEACTIVATE_CONCURRENCY = 10
 
@@ -196,6 +214,18 @@ async def _get_factory_task_state(process_id: str) -> dict[str, Any] | None:
     return None
 
 
+def _drop_stale_heartbeat_issues(task: dict[str, Any]) -> None:
+    issues = task.get("issues")
+    if not isinstance(issues, list):
+        return
+    task["issues"] = [
+        issue
+        for issue in issues
+        if "без heartbeat" not in str(issue)
+        and "Процесс был остановлен или потерян" not in str(issue)
+    ]
+
+
 async def _mark_factory_task_stale_if_needed(
     process_id: str,
     task: dict[str, Any],
@@ -223,12 +253,70 @@ async def _mark_factory_task_stale_if_needed(
         except ValueError:
             step_elapsed_sec = None
 
+    current_step = str(task.get("current_step") or "")
+    progress_completed = int(task.get("progress_completed") or 0)
+    progress_total = int(task.get("progress_total") or 0)
+    products = task.get("products")
+    has_completed_products = (
+        isinstance(products, list)
+        and bool(products)
+        and progress_total > 0
+        and progress_completed >= progress_total
+    )
+    is_ai_enrichment_step = current_step.startswith("ai_enrichment")
+    was_stale_failure = (
+        task.get("status") == "FAILED"
+        and is_ai_enrichment_step
+        and task.get("stuck") is True
+        and has_completed_products
+    )
+    if was_stale_failure:
+        recovered_at = now.isoformat()
+        task["status"] = "DONE"
+        task["current_step"] = "ai_enrichment_done"
+        task["current_step_started_at"] = recovered_at
+        task["updated_at"] = recovered_at
+        task["heartbeat_at"] = recovered_at
+        task["enriched_at"] = recovered_at
+        task["finished_at"] = recovered_at
+        task["stuck"] = False
+        task["stuck_message"] = None
+        task["progress_percent"] = 100
+        _drop_stale_heartbeat_issues(task)
+        await _save_factory_task_state(process_id, task)
+        MAPPER_LOGGER.warning(
+            "step=task_stale_failed_recovered_done process_id=%s",
+            process_id,
+        )
+        return task, heartbeat_lag_sec, step_elapsed_sec, False
+
     if (
         task.get("status") == "IN_PROGRESS"
         and task.get("current_step") not in FACTORY_QUEUED_STEPS
         and isinstance(heartbeat_lag_sec, float)
         and heartbeat_lag_sec > FACTORY_STUCK_THRESHOLD_SEC
     ):
+        if has_completed_products and is_ai_enrichment_step:
+            finished_at = now.isoformat()
+            task["status"] = "DONE"
+            task["current_step"] = "ai_enrichment_done"
+            task["current_step_started_at"] = finished_at
+            task["updated_at"] = finished_at
+            task["heartbeat_at"] = finished_at
+            task["enriched_at"] = finished_at
+            task["finished_at"] = finished_at
+            task["stuck"] = False
+            task["stuck_message"] = None
+            task["progress_percent"] = 100
+            _drop_stale_heartbeat_issues(task)
+            await _save_factory_task_state(process_id, task)
+            MAPPER_LOGGER.warning(
+                "step=task_stale_recovered_done process_id=%s heartbeat_lag_sec=%s",
+                process_id,
+                int(heartbeat_lag_sec),
+            )
+            return task, heartbeat_lag_sec, step_elapsed_sec, False
+
         is_stuck = True
         stale_message = (
             f"Процесс был остановлен или потерян на шаге '{task.get('current_step')}' "
@@ -287,18 +375,51 @@ def _shape_attributes_for_schema(attributes: Any) -> list[dict[str, Any]]:
     return shaped
 
 
+def _extract_media_asset_locations(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        locations: list[str] = []
+        for item in value:
+            locations.extend(_extract_media_asset_locations(item))
+        return locations
+    if isinstance(value, dict):
+        locations: list[str] = []
+        for key in ("location", "filename", "url", "src"):
+            locations.extend(_extract_media_asset_locations(value.get(key)))
+        return locations
+
+    text = str(value).strip()
+    if not text:
+        return []
+    matches = MEDIA_URL_RE.findall(text)
+    if matches:
+        return [match.rstrip(").]};") for match in matches]
+    if text.startswith(("http://", "https://")):
+        return [text.rstrip(").]};")]
+    return []
+
+
 def _shape_media_assets_for_schema(assets: Any) -> list[dict[str, Any]]:
     if not isinstance(assets, list):
         return []
     shaped: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for item in assets:
-        if not isinstance(item, dict):
-            continue
-        asset_type = item.get("type") or "IMAGE"
-        location = item.get("location") or item.get("filename")
-        if not isinstance(location, str) or not location.strip():
-            continue
-        shaped.append({"type": str(asset_type), "location": location.strip()})
+        asset_type = item.get("type") if isinstance(item, dict) else "IMAGE"
+        for location in _extract_media_asset_locations(item):
+            if location in seen:
+                continue
+            seen.add(location)
+            shaped.append({"type": str(asset_type or "IMAGE"), "location": location})
+            if len(shaped) >= MAX_OTTO_MEDIA_ASSETS:
+                return shaped
+    return shaped
+
+
+def _shape_product_media_assets_for_otto(product: dict[str, Any]) -> dict[str, Any]:
+    shaped = dict(product)
+    shaped["mediaAssets"] = _shape_media_assets_for_schema(shaped.get("mediaAssets"))
     return shaped
 
 
@@ -577,7 +698,12 @@ async def _build_factory_prepared_products(
             MAPPER_LOGGER.info("step=normalize_start index=%s ean=%s", index, ean)
             async with normalize_semaphore:
                 normalized = await asyncio.wait_for(
-                    asyncio.to_thread(build_normalized_product, source_item),
+                    asyncio.to_thread(
+                        build_normalized_product,
+                        source_item,
+                        None,
+                        payload.controller,
+                    ),
                     timeout=FACTORY_NORMALIZE_TIMEOUT_SEC,
                 )
             PREPARED_UPLOAD_LOGGER.info(
@@ -1689,8 +1815,21 @@ async def get_db_category_attributes(
     if group is None:
         return {"items": [], "total": 0, "categoryGroup": None}
 
+    variation_attribute_ids = set(
+        (
+            await db.scalars(
+                select(VariationTheme.attribute_id).where(
+                    VariationTheme.group_id == group.id
+                )
+            )
+        ).all()
+    )
+
     items = [
         {
+            "id": attr.id,
+            "attributeId": attr.id,
+            "attributeKey": str(attr.id),
             "name": attr.name,
             "nameRu": attr.name_ru,
             "displayName": attr.name_ru or attr.name,
@@ -1701,6 +1840,7 @@ async def get_db_category_attributes(
             "multiValue": attr.multi_value,
             "relevance": attr.relevance,
             "unit": attr.unit,
+            "isVariationTheme": attr.id in variation_attribute_ids,
             "allowedValues": sorted(
                 {item.value for item in attr.allowed_values if item.value},
                 key=str.casefold,
@@ -1728,6 +1868,156 @@ async def get_db_category_attributes(
         "categoryGroupRu": group.name_ru,
         "displayCategoryGroup": group.name,
     }
+
+
+@router.post("/{product_id}/variants/preview")
+async def preview_product_variants(
+    product_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Preview variation combinations without creating missing variants."""
+    try:
+        return await ProductVariantService(db).preview(product_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+
+@router.post("/{product_id}/variants/generate")
+async def generate_product_variants(
+    product_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create missing product variants for the current product attributes."""
+    try:
+        result = await ProductVariantService(db).generate(product_id)
+        queued = 0
+        queue_errors: list[str] = []
+        for item in result.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            if item.get("source") == "source" or item.get("status") != "pending_generation":
+                continue
+            variant_id = item.get("id")
+            if not isinstance(variant_id, int):
+                continue
+            try:
+                await enqueue_job(
+                    "regenerate_product_variant_image_task",
+                    variant_id=variant_id,
+                )
+                queued += 1
+            except Exception as exc:
+                queue_errors.append(f"variant {variant_id}: {exc}")
+        result["imageGenerationQueued"] = queued
+        result["imageGenerationQueueErrors"] = queue_errors
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+
+@router.get("/{product_id}/variants")
+async def list_product_variants(
+    product_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await ProductVariantService(db).list_variants(product_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+
+@router.patch("/{product_id}/variants/{variant_id}")
+async def update_product_variant(
+    product_id: int,
+    variant_id: int,
+    payload: dict[str, Any] | None = Body(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await ProductVariantService(db).update_variant(
+            product_id,
+            variant_id,
+            payload or {},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.delete("/{product_id}/variants/{variant_id}")
+async def delete_product_variant(
+    product_id: int,
+    variant_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await ProductVariantService(db).delete_variant(product_id, variant_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+
+@router.post("/{product_id}/variants/{variant_id}/regenerate-image")
+async def regenerate_product_variant_image(
+    product_id: int,
+    variant_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        variant = await ProductVariantService(db).mark_image_regeneration_queued(
+            product_id,
+            variant_id,
+        )
+        await enqueue_job(
+            "regenerate_product_variant_image_task",
+            variant_id=variant_id,
+        )
+        return {"success": True, "queued": True, "variant": variant}
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Could not queue image regeneration: {exc}",
+        )
+
+
+@router.post("/variant-image/generate")
+async def generate_product_variant_image(
+    payload: dict[str, Any] = Body(default_factory=dict),
+):
+    combination_payload = payload.get("combination")
+    if not isinstance(combination_payload, list):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="combination is required")
+
+    combination: list[dict[str, str]] = []
+    for item in combination_payload:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("attributeName") or "").strip()
+        value = str(item.get("value") or "").strip()
+        attribute_id = str(item.get("attributeId") or item.get("attribute_id") or name).strip()
+        if name and value:
+            combination.append({"attributeId": attribute_id, "name": name, "value": value})
+    if not combination:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="combination has no usable values")
+
+    try:
+        result = await generate_variant_image_from_snapshot(
+            combination=combination,
+            source_image_url=str(payload.get("sourceImageUrl") or "").strip() or None,
+            request_id=str(payload.get("requestId") or "").strip() or None,
+        )
+        return {"success": True, **result}
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:500] if exc.response is not None else str(exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Image provider error: {detail}",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Could not generate image: {exc}",
+        )
 
 
 async def _get_otto_product_categories(
@@ -1779,6 +2069,38 @@ async def get_otto_v5_product_categories(
     )
 
 
+@router.get(
+    "/otto",
+    response_model=ProductResponse,
+    summary="Fetch products directly from OTTO",
+)
+@otto_v5_router.get(
+    "",
+    response_model=ProductResponse,
+    summary="Fetch products directly from OTTO",
+)
+async def get_otto_products_direct(
+    controller: Controller = Query(default=Controller.JV),
+    page: int = Query(default=0, ge=0),
+    limit: int = Query(default=30, ge=1, le=1000),
+    sku: str | None = Query(default=None),
+    product_reference: str | None = Query(default=None, alias="productReference"),
+    ean: str | None = Query(default=None),
+    moin: str | None = Query(default=None),
+    product_service: ProductService = Depends(get_product_service),
+):
+    """Proxy OTTO `GET /v5/products` directly through the backend API."""
+    payload = {
+        "page": page,
+        "limit": limit,
+        **({"sku": sku} if sku else {}),
+        **({"productReference": product_reference} if product_reference else {}),
+        **({"ean": ean} if ean else {}),
+        **({"moin": moin} if moin else {}),
+    }
+    return await product_service.get_products(payload, controller=controller)
+
+
 @router.get("/otto/shipping-profiles")
 async def get_shipping_profiles(
     controller: Controller = Query(default=Controller.JV),
@@ -1804,6 +2126,15 @@ async def create_availability(
     payload: Availability,
     product_service: ProductService = Depends(get_product_service),
 ):
+    MAPPER_LOGGER.info(
+        "step=create_availability_endpoint_start sku=%s quantity=%s shipping_profile_id=%s controller=%s",
+        payload.sku,
+        payload.quantity,
+        payload.shippingProfileID,
+        payload.controller.value
+        if isinstance(payload.controller, Controller)
+        else payload.controller,
+    )
     return await product_service.create_availability(payload)
 
 
@@ -2481,15 +2812,18 @@ async def _run_factory_enrichment_task(
     )
 
     heartbeat_stop = asyncio.Event()
+    progress_lock = asyncio.Lock()
 
     async def _heartbeat_loop() -> None:
         while not heartbeat_stop.is_set():
-            current = FACTORY_PREPARE_TASKS.get(process_id)
-            if current:
-                now_heartbeat = datetime.now(UTC).isoformat()
-                current["heartbeat_at"] = now_heartbeat
-                current["updated_at"] = now_heartbeat
-                await _save_factory_task_state(process_id, current)
+            now_heartbeat = datetime.now(UTC).isoformat()
+            async with progress_lock:
+                if task.get("status") != "IN_PROGRESS":
+                    return
+                task["heartbeat_at"] = now_heartbeat
+                task["updated_at"] = now_heartbeat
+                task["heartbeat_count"] = int(task.get("heartbeat_count", 0)) + 1
+                await _save_factory_task_state(process_id, task)
             await asyncio.sleep(FACTORY_HEARTBEAT_INTERVAL_SEC)
 
     heartbeat_task = asyncio.create_task(_heartbeat_loop())
@@ -2497,7 +2831,6 @@ async def _run_factory_enrichment_task(
     enriched_products: list[dict[str, Any] | None] = [None] * len(products)
     item_failures: list[str] = []
     work_queue: asyncio.Queue[tuple[int, dict[str, Any]] | None] = asyncio.Queue()
-    progress_lock = asyncio.Lock()
 
     try:
 
@@ -2529,6 +2862,9 @@ async def _run_factory_enrichment_task(
             enriched_dump = enriched_model.model_dump(
                 mode="json", exclude_none=True
             )
+            for key, value in item.items():
+                if key not in enriched_dump:
+                    enriched_dump[key] = value
             enriched_dump["aftercoolComparison"] = _build_aftercool_comparison(
                 source_item=source_item,
                 generated_product=enriched_dump,
@@ -2548,7 +2884,9 @@ async def _run_factory_enrichment_task(
                 task["progress_percent"] = int(
                     round((task["progress_completed"] / max(1, len(products))) * 100)
                 )
-                task["updated_at"] = datetime.now(UTC).isoformat()
+                progress_at = datetime.now(UTC).isoformat()
+                task["updated_at"] = progress_at
+                task["heartbeat_at"] = progress_at
                 await _save_factory_task_state(process_id, task)
             MAPPER_LOGGER.info(
                 "step=category_approval_enrichment_item_done process_id=%s index=%s sku=%s bullet_points=%s attributes=%s",
@@ -2574,6 +2912,9 @@ async def _run_factory_enrichment_task(
                             mode="json",
                             exclude_none=True,
                         )
+                        for key, value in item.items():
+                            if key not in fallback_dump:
+                                fallback_dump[key] = value
                         fallback_source_item = _find_source_item_for_product(
                             product=fallback_dump,
                             index=index,
@@ -2614,7 +2955,9 @@ async def _run_factory_enrichment_task(
                                     * 100
                                 )
                             )
-                            task["updated_at"] = datetime.now(UTC).isoformat()
+                            progress_at = datetime.now(UTC).isoformat()
+                            task["updated_at"] = progress_at
+                            task["heartbeat_at"] = progress_at
                             await _save_factory_task_state(process_id, task)
                 finally:
                     work_queue.task_done()
@@ -2641,6 +2984,7 @@ async def _run_factory_enrichment_task(
         task["updated_at"] = task["current_step_started_at"]
         task["heartbeat_at"] = task["current_step_started_at"]
         task["enriched_at"] = task["current_step_started_at"]
+        task["finished_at"] = task["current_step_started_at"]
         task["progress_completed"] = len(products)
         task["progress_total"] = len(products)
         task["progress_percent"] = 100
@@ -2863,6 +3207,43 @@ async def _translate_user_attribute_values_for_otto(
 OTTO_ERROR_TRANSLATION_FIELDS = {"title", "message", "description", "detail"}
 
 
+def _extract_otto_error_issues(value: Any) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+
+    results = value.get("results")
+    if not isinstance(results, list):
+        return []
+
+    issues: list[str] = []
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        variation = str(entry.get("variation") or "unknown").strip() or "unknown"
+        errors = entry.get("errors")
+        if not isinstance(errors, list):
+            errors = [entry]
+        for error in errors:
+            if not isinstance(error, dict):
+                continue
+            code = str(error.get("code") or "error").strip() or "error"
+            title = str(
+                error.get("title")
+                or error.get("message")
+                or error.get("description")
+                or error.get("detail")
+                or ""
+            ).strip()
+            json_path = str(error.get("jsonPath") or error.get("path") or "").strip()
+            parts = [variation, code]
+            if title:
+                parts.append(title)
+            if json_path:
+                parts.append(json_path)
+            issues.append(": ".join(parts))
+    return issues
+
+
 async def _translate_otto_error_payload_for_ui(value: Any) -> Any:
     async with SessionLocal() as session:
         translator = TranslationService(session)
@@ -2916,6 +3297,7 @@ async def _run_factory_submit_task(
         task is not None,
     )
     products = payload.get("products")
+    media_base_url = str(payload.get("media_base_url") or "").strip() or None
     if not isinstance(products, list) or not products:
         MAPPER_LOGGER.error(
             "step=submit_final_products_failed process_id=%s error=empty_products",
@@ -2938,7 +3320,92 @@ async def _run_factory_submit_task(
             task["heartbeat_at"] = task["updated_at"]
             await _save_factory_task_state(process_id, task)
 
-        products_for_otto = await _translate_user_attribute_values_for_otto(products)
+        products_with_variants = [
+            item
+            for item in products
+            if isinstance(item, dict) and active_variant_items(item)
+        ]
+        variant_validation_errors = validate_variant_export_identifiers(
+            products_with_variants
+        )
+        if products_with_variants and not variant_validation_errors:
+            expanded_for_conflicts = expand_products_with_variants(
+                products_with_variants,
+                media_base_url=media_base_url,
+            )
+            conflict_skus = {
+                str(item.get("sku") or "").strip()
+                for item in expanded_for_conflicts
+                if str(item.get("sku") or "").strip()
+            }
+            conflict_eans = {
+                str(item.get("ean") or "").strip()
+                for item in expanded_for_conflicts
+                if str(item.get("ean") or "").strip()
+            }
+            async with SessionLocal() as validation_session:
+                try:
+                    variant_validation_errors = await find_identifier_conflicts(
+                        validation_session,
+                        skus=conflict_skus,
+                        eans=conflict_eans,
+                    )
+                except Exception as exc:
+                    MAPPER_LOGGER.warning(
+                        "step=variant_identifier_conflict_check_skipped process_id=%s error=%s",
+                        process_id,
+                        exc,
+                    )
+                    variant_validation_errors = []
+
+        if variant_validation_errors:
+            if task is None:
+                task = {
+                    "process_id": process_id,
+                    "controller": controller.value,
+                    "status": "FAILED",
+                    "created_at": datetime.now(UTC).isoformat(),
+                }
+            task["status"] = "FAILED"
+            task["current_step"] = "final_validation_failed"
+            task["variant_validation_errors"] = variant_validation_errors
+            task["otto_failed_result_original"] = {"results": []}
+            task["otto_failed_result"] = {
+                "results": [
+                    {
+                        "variation": item["variation"],
+                        "errors": [
+                            {
+                                "code": item["code"],
+                                "title": item["title"],
+                                "jsonPath": item["jsonPath"],
+                            }
+                        ],
+                    }
+                    for item in variant_validation_errors
+                ]
+            }
+            task["issues"] = [
+                f"{item['variation']}: {item['code']}"
+                for item in variant_validation_errors[:100]
+            ]
+            task["updated_at"] = datetime.now(UTC).isoformat()
+            task["heartbeat_at"] = task["updated_at"]
+            await _save_factory_task_state(process_id, task)
+            return
+
+        expanded_products = expand_products_with_variants(
+            [item for item in products if isinstance(item, dict)],
+            media_base_url=media_base_url,
+        )
+
+        products_for_otto = [
+            _shape_product_media_assets_for_otto(item)
+            for item in await _translate_user_attribute_values_for_otto(
+                expanded_products
+            )
+            if isinstance(item, dict)
+        ]
 
         for index, item in enumerate(products_for_otto):
             model = ProductPayload.model_validate(item)
@@ -2950,7 +3417,24 @@ async def _run_factory_submit_task(
                 model.productDescription.category,
             )
             validated_models.append(model)
-            validated.append(model.model_dump(mode="json", exclude_none=True))
+            validated_item = model.model_dump(mode="json", exclude_none=True)
+            shipping_profile_id = str(
+                item.get("shippingProfileID")
+                or item.get("shippingProfileId")
+                or item.get("shipping_profile_id")
+                or ""
+            ).strip()
+            if shipping_profile_id:
+                validated_item["shippingProfileID"] = shipping_profile_id
+            else:
+                MAPPER_LOGGER.warning(
+                    "step=submit_final_products_missing_shipping_profile process_id=%s index=%s sku=%s source_keys=%s",
+                    process_id,
+                    index,
+                    model.sku,
+                    sorted(str(key) for key in item.keys()),
+                )
+            validated.append(validated_item)
 
         factory_id = str(
             (task or {}).get("factory_id") or payload.get("factory_id") or "unknown"
@@ -3001,6 +3485,11 @@ async def _run_factory_submit_task(
             if failed_result
             else failed_result
         )
+        failed_issues = _extract_otto_error_issues(
+            task["otto_failed_result"] or failed_result
+        )
+        if failed_issues:
+            task["issues"] = failed_issues[:100]
         task["updated_at"] = datetime.now(UTC).isoformat()
         task["heartbeat_at"] = task["updated_at"]
         task["status"] = (
@@ -3011,7 +3500,23 @@ async def _run_factory_submit_task(
         await _save_factory_task_state(process_id, task)
 
         succeeded_count = int((update_result or {}).get("succeeded") or 0)
+        if task["status"] != "DONE" or succeeded_count < len(validated_models):
+            MAPPER_LOGGER.warning(
+                "step=submit_availability_skipped process_id=%s status=%s succeeded=%s expected=%s update_result=%s",
+                process_id,
+                task["status"],
+                succeeded_count,
+                len(validated_models),
+                update_result,
+            )
         if task["status"] == "DONE" and succeeded_count >= len(validated_models):
+            MAPPER_LOGGER.info(
+                "step=submit_availability_delay_start process_id=%s delay_sec=%s products=%s",
+                process_id,
+                FACTORY_AVAILABILITY_AFTER_CREATE_DELAY_SEC,
+                len(validated),
+            )
+            await asyncio.sleep(FACTORY_AVAILABILITY_AFTER_CREATE_DELAY_SEC)
             task["current_step"] = "availability_in_progress"
             task["progress_total"] = len(validated)
             task["progress_completed"] = 0
@@ -3026,9 +3531,25 @@ async def _run_factory_submit_task(
             )
             availability_lock = asyncio.Lock()
 
+            MAPPER_LOGGER.info(
+                "step=submit_availability_start process_id=%s products=%s concurrency=%s controller=%s",
+                process_id,
+                len(validated),
+                min(FACTORY_PRODUCT_CONCURRENCY, len(validated)),
+                controller.value,
+            )
+
             async def _submit_availability(index: int, item: dict[str, Any]) -> None:
                 sku = str(item.get("sku") or "").strip()
                 shipping_profile_id = str(item.get("shippingProfileID") or "").strip()
+                MAPPER_LOGGER.info(
+                    "step=submit_availability_item_start process_id=%s index=%s sku=%s shipping_profile_id=%s quantity=%s",
+                    process_id,
+                    index,
+                    sku or "-",
+                    shipping_profile_id or "-",
+                    "20",
+                )
                 if not sku:
                     raise ValueError("missing sku")
                 if not shipping_profile_id:
@@ -3067,6 +3588,16 @@ async def _run_factory_submit_task(
                             "title": f"quantity={quantity_error or 'ok'}, delivery={delivery_error or 'ok'}",
                             "jsonPath": "availability",
                         }
+                    )
+                    MAPPER_LOGGER.warning(
+                        "step=submit_availability_item_result_failed process_id=%s index=%s sku=%s quantity_ok=%s delivery_ok=%s quantity_error=%s delivery_error=%s",
+                        process_id,
+                        index,
+                        sku,
+                        quantity_ok,
+                        delivery_ok,
+                        quantity_error or "",
+                        delivery_error or "",
                     )
                 async with availability_lock:
                     task["progress_completed"] = (
@@ -3136,6 +3667,13 @@ async def _run_factory_submit_task(
                         availability_queue.task_done()
 
             for index, item in enumerate(validated):
+                MAPPER_LOGGER.debug(
+                    "step=submit_availability_queue_item process_id=%s index=%s sku=%s shipping_profile_id=%s",
+                    process_id,
+                    index,
+                    item.get("sku"),
+                    item.get("shippingProfileID"),
+                )
                 await availability_queue.put((index, item))
 
             availability_worker_count = min(FACTORY_PRODUCT_CONCURRENCY, len(validated))
@@ -3147,6 +3685,12 @@ async def _run_factory_submit_task(
                 await availability_queue.put(None)
             await availability_queue.join()
             await asyncio.gather(*availability_workers)
+            MAPPER_LOGGER.info(
+                "step=submit_availability_done process_id=%s products=%s failed=%s",
+                process_id,
+                len(validated),
+                len(availability_errors),
+            )
             task["availability_errors_original"] = availability_errors
             task["availability_errors"] = (
                 await _translate_otto_error_payload_for_ui(availability_errors)
@@ -3196,6 +3740,7 @@ async def _run_factory_submit_task(
 async def submit_factory_prepared_products(
     process_id: str,
     payload: dict[str, Any],
+    request: Request,
 ):
     task = await _get_factory_task_state(process_id)
     MAPPER_LOGGER.info(
@@ -3226,21 +3771,40 @@ async def submit_factory_prepared_products(
         )
 
     if task is not None:
+        submitted_products = [item for item in products if isinstance(item, dict)]
+        media_base_url = (
+            str(payload.get("media_base_url") or "").strip()
+            or str(request.base_url).rstrip("/")
+        )
+        queued_products_count = len(
+            expand_products_with_variants(
+                submitted_products,
+                media_base_url=media_base_url,
+            )
+        )
         now = datetime.now(UTC).isoformat()
         task["status"] = "IN_PROGRESS"
         task["current_step"] = "otto_create_queued"
         task["current_step_started_at"] = now
         task["updated_at"] = now
         task["heartbeat_at"] = now
-        task["progress_total"] = len(products)
+        task["progress_total"] = queued_products_count
         task["progress_completed"] = 0
         task["progress_percent"] = 0
+        task["products"] = submitted_products
+        task["submitted_products"] = submitted_products
         await _save_factory_task_state(process_id, task)
+
+    payload_for_job = dict(payload)
+    payload_for_job["media_base_url"] = (
+        str(payload.get("media_base_url") or "").strip()
+        or str(request.base_url).rstrip("/")
+    )
 
     await enqueue_job(
         "submit_factory_products_task",
         process_id=process_id,
-        payload=payload,
+        payload=payload_for_job,
     )
 
     return {
@@ -3248,7 +3812,12 @@ async def submit_factory_prepared_products(
         "process_id": process_id,
         "process_state": "IN_PROGRESS",
         "queued": True,
-        "products_count": len(products),
+        "products_count": len(
+            expand_products_with_variants(
+                [item for item in products if isinstance(item, dict)],
+                media_base_url=payload_for_job["media_base_url"],
+            )
+        ),
     }
 
 

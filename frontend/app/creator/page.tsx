@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type Ref } from "react";
-import { AlertCircle, Box, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Funnel, MoreVertical, Package, Pencil, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
+import { AlertCircle, Box, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Funnel, Info, MoreVertical, Package, Pencil, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
 
 import { readApiErrorMessage, readJsonResponse } from "../lib/api";
 import { useCurrentUser } from "../hooks/use-current-user";
@@ -15,6 +15,7 @@ type UploadState = "idle" | "loading" | "success" | "error";
 type ControllerOption = "jv" | "xl";
 const CREATOR_DRAFT_KEY = "creator_process_draft_v1";
 const AVAILABILITY_CONCURRENCY = 10;
+const AVAILABILITY_AFTER_CREATE_DELAY_MS = 8000;
 
 type FabricOption = { id: string; name: string; items_count?: number };
 type FabricListResponse = { factory?: FabricOption[] };
@@ -22,6 +23,8 @@ type CategoryGroupCategoriesResponse = {
   success?: boolean;
   items?: {
     categoryGroup?: string;
+    categoryGroupRu?: string | null;
+    displayCategoryGroup?: string | null;
     categories?: string[];
     categoriesDisplay?: { name?: string; nameRu?: string | null; displayName?: string | null }[];
   }[];
@@ -150,6 +153,7 @@ type CategoryAttributeOption = {
   multiValue?: boolean;
   relevance?: string | null;
   unit?: string | null;
+  isVariationTheme?: boolean;
   allowedValues?: string[];
   allowedValuesDisplay?: { value?: string | null; valueRu?: string | null; displayValue?: string | null }[];
 };
@@ -178,6 +182,36 @@ type BulkAttributePatch = {
 };
 type BulkAttributeFailure = { productIndex: number; reason: string };
 type WorkflowStep = "categories" | "compare" | "details";
+type VariantStatus = "draft" | "pending_generation" | "generating_image" | "ready" | "failed" | "manual_override";
+type VariantCombinationItem = {
+  attributeId: string;
+  name: string;
+  value: string;
+};
+type ProductVariantDraft = {
+  id: string;
+  combinationKey: string;
+  combination: VariantCombinationItem[];
+  ean: string;
+  sku: string;
+  price: string;
+  imageUrl: string;
+  mediaAssets: { type: string; location: string }[];
+  status: VariantStatus;
+  generationError?: string;
+  source: "source" | "generated" | "manual";
+  active: boolean;
+  productPayload?: Record<string, unknown>;
+};
+type VariantPreview = {
+  totalCombinations: number;
+  existingCombinations: number;
+  newCombinations: number;
+  sourceCombinationKey: string;
+  variationAttributes: { attributeId: string; name: string; values: string[]; fixed: boolean }[];
+  combinations: { key: string; combination: VariantCombinationItem[] }[];
+  issues: string[];
+};
 const SHIPPING_PROFILE_LABELS: Record<string, string> = {
   "786c6468-3baf-52e0-88b5-13757eb7f873": "4-8 недель",
   "360835cf-4962-59bb-ae66-78e8a41c8948": "6-10 недель",
@@ -191,6 +225,79 @@ const SHIPPING_PROFILE_LABELS: Record<string, string> = {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function ottoErrorsFromPayload(value: unknown): OttoErrorRow[] {
+  const payload = asRecord(value);
+  const results = Array.isArray(payload.results) ? payload.results : [];
+  return results.flatMap((entry) => {
+    const rec = asRecord(entry);
+    const variation = String(rec.variation ?? rec.sku ?? rec.productReference ?? "unknown");
+    const errors = Array.isArray(rec.errors) ? rec.errors : [rec];
+    return errors.map((err) => {
+      const errRec = asRecord(err);
+      return {
+        variation,
+        code: String(errRec.code ?? errRec.errorCode ?? "error"),
+        title: String(
+          errRec.title ??
+          errRec.titleOriginal ??
+          errRec.message ??
+          errRec.messageOriginal ??
+          errRec.description ??
+          errRec.detail ??
+          "Unknown error",
+        ),
+        jsonPath: String(errRec.jsonPath ?? errRec.path ?? ""),
+      };
+    });
+  });
+}
+
+function productIdentityKey(product: Record<string, unknown>, index: number): string {
+  const sku = String(product.sku ?? "").trim();
+  if (sku) return `sku:${sku}`;
+  const ean = String(product.ean ?? "").trim();
+  if (ean) return `ean:${ean}`;
+  const reference = String(product.productReference ?? "").trim();
+  if (reference) return `reference:${reference}`;
+  return `index:${index}`;
+}
+
+function mergeLiveProductRows(
+  incomingRows: unknown[],
+  currentRows: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  const currentByKey = new Map<string, Record<string, unknown>>();
+  currentRows.forEach((product, index) => {
+    currentByKey.set(productIdentityKey(asRecord(product), index), asRecord(product));
+  });
+
+  return incomingRows.map((row, index) => {
+    const incoming = asRecord(row);
+    const current = currentByKey.get(productIdentityKey(incoming, index)) ?? asRecord(currentRows[index]);
+    if (Object.keys(current).length === 0) return incoming;
+
+    const merged = { ...current, ...incoming };
+    for (const key of ["variants", "variantSummary", "variantMeta"] as const) {
+      if (!(key in incoming) && key in current) merged[key] = current[key];
+    }
+    if (
+      Array.isArray(current.variants)
+      && current.variants.length > 0
+      && (!Array.isArray(incoming.variants) || incoming.variants.length === 0)
+    ) {
+      merged.variants = current.variants;
+    }
+    if (
+      Array.isArray(current.mediaAssets)
+      && current.mediaAssets.length > 0
+      && (!Array.isArray(incoming.mediaAssets) || incoming.mediaAssets.length === 0)
+    ) {
+      merged.mediaAssets = current.mediaAssets;
+    }
+    return merged;
+  });
 }
 
 function updateProductField(product: Record<string, unknown>, path: string[], value: unknown): Record<string, unknown> {
@@ -343,6 +450,323 @@ function normalizeFieldToken(value: string): string {
     .trim();
 }
 
+function normalizeVariationValue(value: unknown): string {
+  return String(value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function stableVariantImageRequestId(productIndex: number, combinationKey: string): string {
+  let hash = 2166136261;
+  const input = `${productIndex}:${combinationKey}`;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `variant-draft-${productIndex}-${(hash >>> 0).toString(16)}`;
+}
+
+async function waitForGeneratedImage(url: string, attempts = 8): Promise<boolean> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) await sleep(Math.min(12000, 1200 * attempt));
+    try {
+      const response = await fetch(url, { method: "HEAD", cache: "no-store" });
+      if (response.ok) return true;
+      if (response.status !== 404) return false;
+    } catch {
+      // Keep polling: the original generation request may still be finishing.
+    }
+  }
+  return false;
+}
+
+function splitVariationValues(value: unknown): string[] {
+  const rawValues = Array.isArray(value) ? value : String(value ?? "").split(/[,;\n]+/);
+  const values: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of rawValues) {
+    const text = String(raw ?? "").trim();
+    if (!text) continue;
+    const key = normalizeVariationValue(text);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    values.push(text);
+  }
+  return values;
+}
+
+function variantAttributeIdentity(option: CategoryAttributeOption): string {
+  return String(option.attributeId ?? option.id ?? option.attributeKey ?? option.name ?? "").trim();
+}
+
+function buildVariantCombinationKey(combination: VariantCombinationItem[]): string {
+  return JSON.stringify(
+    combination
+      .map((item) => ({
+        attribute_id: String(item.attributeId),
+        value: normalizeVariationValue(item.value),
+      }))
+      .filter((item) => item.attribute_id && item.value)
+      .sort((left, right) => left.attribute_id.localeCompare(right.attribute_id)),
+  );
+}
+
+function cloneProductRecord(product: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(product)) as Record<string, unknown>;
+}
+
+function readProductVariants(product: Record<string, unknown>): ProductVariantDraft[] {
+  return Array.isArray(product.variants)
+    ? product.variants.map((item) => asRecord(item)).map((item): ProductVariantDraft => {
+      const source: ProductVariantDraft["source"] = item.source === "source" ? "source" : item.source === "manual" ? "manual" : "generated";
+      return {
+        id: String(item.id ?? item.combinationKey ?? ""),
+        combinationKey: String(item.combinationKey ?? ""),
+        combination: Array.isArray(item.combination)
+          ? item.combination.map((entry) => asRecord(entry)).map((entry) => ({
+            attributeId: String(entry.attributeId ?? entry.attribute_id ?? entry.id ?? entry.name ?? ""),
+            name: String(entry.name ?? entry.attributeName ?? ""),
+            value: String(entry.value ?? ""),
+          })).filter((entry) => entry.attributeId && entry.name)
+          : [],
+        ean: String(item.ean ?? ""),
+        sku: String(item.sku ?? ""),
+        price: String(item.price ?? ""),
+        imageUrl: String(item.imageUrl ?? item.image_url ?? ""),
+        mediaAssets: Array.isArray(item.mediaAssets)
+          ? item.mediaAssets.map((asset) => asRecord(asset)).map((asset) => ({
+            type: String(asset.type ?? "IMAGE"),
+            location: String(asset.location ?? asset.url ?? ""),
+          })).filter((asset) => asset.location)
+          : [],
+        status: (String(item.status ?? "draft") as VariantStatus) || "draft",
+        generationError: String(item.generationError ?? item.generation_error ?? "") || undefined,
+        source,
+        active: item.active !== false && item.isDeleted !== true && item.deleted !== true,
+        productPayload: typeof item.productPayload === "object" && item.productPayload !== null
+          ? asRecord(item.productPayload)
+          : undefined,
+      };
+    }).filter((item) => item.combinationKey)
+    : [];
+}
+
+function variationDimensionsForProduct(
+  product: Record<string, unknown>,
+  categoryAttributes: CategoryAttributeOption[],
+) {
+  const description = asRecord(product.productDescription);
+  const attributes = Array.isArray(description.attributes) ? description.attributes.map((item) => asRecord(item)) : [];
+  const attributesByName = new Map<string, Record<string, unknown>>();
+  for (const attribute of attributes) {
+    const key = normalizeFieldToken(String(attribute.name ?? ""));
+    if (key) attributesByName.set(key, attribute);
+  }
+
+  return categoryAttributes
+    .filter((option) => option.isVariationTheme)
+    .map((option) => {
+      const attr = attributesByName.get(normalizeFieldToken(option.name));
+      const values = splitVariationValues(attr?.values ?? attr?.value ?? "");
+      return {
+        attributeId: variantAttributeIdentity(option),
+        name: option.name,
+        values,
+        fixed: values.length === 1,
+      };
+    })
+    .filter((dimension) => dimension.attributeId && dimension.name && dimension.values.length > 0);
+}
+
+function buildVariantCombinations(
+  dimensions: ReturnType<typeof variationDimensionsForProduct>,
+): { key: string; combination: VariantCombinationItem[] }[] {
+  if (dimensions.length === 0) return [];
+  const result: { key: string; combination: VariantCombinationItem[] }[] = [];
+  function visit(index: number, current: VariantCombinationItem[]) {
+    if (index >= dimensions.length) {
+      result.push({ key: buildVariantCombinationKey(current), combination: current });
+      return;
+    }
+    const dimension = dimensions[index];
+    for (const value of dimension.values) {
+      visit(index + 1, [
+        ...current,
+        { attributeId: dimension.attributeId, name: dimension.name, value },
+      ]);
+    }
+  }
+  visit(0, []);
+  return result;
+}
+
+function sourceVariantCombinationKey(
+  dimensions: ReturnType<typeof variationDimensionsForProduct>,
+): string {
+  return buildVariantCombinationKey(
+    dimensions.map((dimension) => ({
+      attributeId: dimension.attributeId,
+      name: dimension.name,
+      value: dimension.values[0] ?? "",
+    })),
+  );
+}
+
+function variantPriceFromProduct(product: Record<string, unknown>): string {
+  const pricing = asRecord(product.pricing);
+  const standardPrice = asRecord(pricing.standardPrice);
+  return String(standardPrice.amount ?? "");
+}
+
+function applyCombinationToProductPayload(
+  product: Record<string, unknown>,
+  combination: VariantCombinationItem[],
+): Record<string, unknown> {
+  const payload = cloneProductRecord(product);
+  delete payload.variants;
+  delete payload.variantSummary;
+  const description = asRecord(payload.productDescription);
+  const byName = new Map(combination.map((item) => [normalizeFieldToken(item.name), item.value]));
+  const byId = new Map(combination.map((item) => [String(item.attributeId), item.value]));
+  if (Array.isArray(description.attributes)) {
+    payload.productDescription = {
+      ...description,
+      attributes: description.attributes.map((item) => {
+        const attribute = asRecord(item);
+        const identity = String(attribute.attributeId ?? attribute.attribute_id ?? attribute.id ?? attribute.attributeKey ?? "").trim();
+        const value = (identity && byId.get(identity)) || byName.get(normalizeFieldToken(String(attribute.name ?? "")));
+        return value ? { ...attribute, values: [value] } : attribute;
+      }),
+    };
+  }
+  return payload;
+}
+
+function buildLocalVariantPreview(
+  product: Record<string, unknown>,
+  categoryAttributes: CategoryAttributeOption[],
+): VariantPreview {
+  const dimensions = variationDimensionsForProduct(product, categoryAttributes);
+  const combinations = buildVariantCombinations(dimensions);
+  const sourceKey = sourceVariantCombinationKey(dimensions);
+  const existingKeys = new Set(readProductVariants(product).filter((item) => item.active).map((item) => item.combinationKey));
+  if (sourceKey) existingKeys.add(sourceKey);
+  const allKeys = new Set(combinations.map((item) => item.key));
+  const issues: string[] = [];
+  const themeCount = categoryAttributes.filter((item) => item.isVariationTheme).length;
+  if (themeCount === 0) issues.push("Для этой category group не настроены variationThemes.");
+  if (themeCount > 0 && dimensions.length === 0) issues.push("У variation attributes нет заполненных значений.");
+  return {
+    totalCombinations: combinations.length,
+    existingCombinations: Array.from(existingKeys).filter((key) => allKeys.has(key)).length,
+    newCombinations: combinations.filter((item) => !existingKeys.has(item.key)).length,
+    sourceCombinationKey: sourceKey,
+    variationAttributes: dimensions,
+    combinations,
+    issues,
+  };
+}
+
+function generateLocalVariantsForProduct(
+  product: Record<string, unknown>,
+  categoryAttributes: CategoryAttributeOption[],
+): { product: Record<string, unknown>; createdCount: number; sourceCreated: boolean; preview: VariantPreview } {
+  const preview = buildLocalVariantPreview(product, categoryAttributes);
+  const existing = readProductVariants(product);
+  const existingByKey = new Map(existing.map((variant) => [variant.combinationKey, variant]));
+  const baseImage = firstImage(product);
+  const basePrice = variantPriceFromProduct(product);
+  let createdCount = 0;
+  let sourceCreated = false;
+  const variants = [...existing];
+
+  for (const item of preview.combinations) {
+    if (existingByKey.has(item.key)) continue;
+    const isSource = item.key === preview.sourceCombinationKey;
+    const productPayload = applyCombinationToProductPayload(product, item.combination);
+    const mediaAssets = baseImage ? [{ type: "IMAGE", location: baseImage }] : [];
+    const variant: ProductVariantDraft = {
+      id: item.key,
+      combinationKey: item.key,
+      combination: item.combination,
+      ean: isSource ? String(product.ean ?? "") : "",
+      sku: isSource ? String(product.sku ?? "") : "",
+      price: basePrice,
+      imageUrl: baseImage,
+      mediaAssets,
+      status: isSource && product.ean && product.sku ? "ready" : "pending_generation",
+      source: isSource ? "source" : "generated",
+      active: true,
+      productPayload,
+    };
+    variants.push(variant);
+    existingByKey.set(item.key, variant);
+    if (isSource) sourceCreated = true;
+    else createdCount += 1;
+  }
+
+  return {
+    product: { ...product, variants },
+    createdCount,
+    sourceCreated,
+    preview,
+  };
+}
+
+function updateVariantPayloadFields(variant: ProductVariantDraft): ProductVariantDraft {
+  const payload = variant.productPayload ? cloneProductRecord(variant.productPayload) : undefined;
+  if (!payload) return variant;
+  payload.sku = variant.sku;
+  payload.ean = variant.ean || null;
+  const price = Number(variant.price);
+  if (!Number.isNaN(price)) {
+    payload.pricing = {
+      ...asRecord(payload.pricing),
+      standardPrice: {
+        ...asRecord(asRecord(payload.pricing).standardPrice),
+        amount: price,
+      },
+    };
+  }
+  if (variant.mediaAssets.length > 0) {
+    payload.mediaAssets = variant.mediaAssets;
+  } else if (variant.imageUrl) {
+    payload.mediaAssets = [{ type: "IMAGE", location: variant.imageUrl }];
+  }
+  return { ...variant, productPayload: payload };
+}
+
+function expandedProductCount(products: Record<string, unknown>[]): number {
+  return products.reduce((total, product) => {
+    const variants = readProductVariants(product).filter((variant) => variant.active);
+    return total + (variants.length || 1);
+  }, 0);
+}
+
+function collectVariantExportIssues(products: Record<string, unknown>[]): OttoErrorRow[] {
+  const rows: { sku: string; ean: string; label: string }[] = [];
+  for (const product of products) {
+    const variants = readProductVariants(product).filter((variant) => variant.active);
+    if (variants.length === 0) continue;
+    for (const variant of variants) {
+      const label = variant.sku || variant.ean || variant.combination.map((item) => item.value).join(" + ") || "variant";
+      rows.push({ sku: variant.sku.trim(), ean: variant.ean.trim(), label });
+    }
+  }
+
+  const errors: OttoErrorRow[] = [];
+  const seenSku = new Map<string, string>();
+  const seenEan = new Map<string, string>();
+  for (const row of rows) {
+    if (!row.sku) errors.push({ variation: row.label, code: "missing_sku", title: "SKU is required for every active variant.", jsonPath: "sku" });
+    else if (seenSku.has(row.sku)) errors.push({ variation: row.label, code: "duplicate_sku", title: `SKU duplicates ${seenSku.get(row.sku)}.`, jsonPath: "sku" });
+    else seenSku.set(row.sku, row.label);
+
+    if (!row.ean) errors.push({ variation: row.label, code: "missing_ean", title: "EAN is required for every active variant.", jsonPath: "ean" });
+    else if (seenEan.has(row.ean)) errors.push({ variation: row.label, code: "duplicate_ean", title: `EAN duplicates ${seenEan.get(row.ean)}.`, jsonPath: "ean" });
+    else seenEan.set(row.ean, row.label);
+  }
+  return errors;
+}
+
 function sanitizeUiMessage(value: string): string {
   const raw = String(value ?? "");
   return raw
@@ -374,8 +798,16 @@ function readAttributeGroup(name: string): "Основные характери�
   return "Дополнительно";
 }
 
+function labelWithRu(value: unknown, ruValue?: unknown): string {
+  const primary = String(value ?? "").trim();
+  const ru = String(ruValue ?? "").trim();
+  if (!primary) return ru;
+  if (!ru || normalizeFieldToken(primary) === normalizeFieldToken(ru)) return primary;
+  return `${primary} (${ru})`;
+}
+
 function attributeDisplayName(item: CategoryAttributeOption): string {
-  return String(item.name || "").trim();
+  return labelWithRu(item.name, item.nameRu);
 }
 
 function attributeDisplayDescription(item: CategoryAttributeOption): string {
@@ -384,7 +816,64 @@ function attributeDisplayDescription(item: CategoryAttributeOption): string {
 
 function attributeAllowedValueLabel(item: CategoryAttributeOption, value: string): string {
   const displayItem = item.allowedValuesDisplay?.find((option) => option.value === value);
-  return String(displayItem?.value || value).trim();
+  return labelWithRu(displayItem?.value || value, displayItem?.valueRu);
+}
+
+function isColorVariantAttribute(name: string): boolean {
+  const token = normalizeFieldToken(name);
+  if (token.includes("füße") || token.includes("fusse") || token.includes("feet")) return false;
+  return ["color", "farbe", "grundfarbe", "colour", "цвет"].some((key) => token.includes(key));
+}
+
+function isMaterialVariantAttribute(name: string): boolean {
+  const token = normalizeFieldToken(name);
+  return ["material", "bezug", "stoff", "материал"].some((key) => token.includes(key));
+}
+
+function splitAttributeValues(value: string): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of String(value ?? "").split(/[,;\n]+/)) {
+    const item = raw.trim();
+    const key = normalizeFieldToken(item);
+    if (!item || seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
+}
+
+function joinAttributeValues(values: string[]): string {
+  return values.map((item) => item.trim()).filter(Boolean).join(", ");
+}
+
+function attributeLayoutRank(name: string): number {
+  const token = normalizeFieldToken(name);
+  if (token.includes("wohnraum") || token.includes("room")) return 10;
+  if (token.includes("breite") || token.includes("width")) return 20;
+  if (token.includes("tiefe") || token.includes("depth")) return 30;
+  if (token.includes("höhe") || token.includes("height")) return 40;
+  if (token.includes("set-typ") || token.includes("set typ") || token.includes("set type")) return 50;
+  if (token.includes("anzahl sitzflächen") || token.includes("sitzflächen")) return 60;
+  if (token.includes("besondere merkmale") || token.includes("special features")) return 70;
+  if (isMaterialVariantAttribute(name)) return 80;
+  if (token.includes("ausstattung") || token.includes("features")) return 90;
+  if (isColorVariantAttribute(name) && !token.includes("füße") && !token.includes("fusse") && !token.includes("feet")) return 100;
+  if (token.includes("farbe füße") || token.includes("farbe fusse") || token.includes("feet color")) return 110;
+  if (token.includes("ausführung") || token.includes("ausfuhrung") || token.includes("style")) return 120;
+  if (token.includes("lieferumfang") || token.includes("scope of delivery")) return 130;
+  return 1000;
+}
+
+function attributeFieldLayout(name: string): "wide" | "normal" {
+  const token = normalizeFieldToken(name);
+  return token.includes("wohnraum") || token.includes("ausstattung") ? "wide" : "normal";
+}
+
+function attributeControlKind(name: string, value: string): "input" | "textarea" {
+  const token = normalizeFieldToken(name);
+  if (token.includes("wohnraum") || token.includes("ausstattung") || token.includes("lieferumfang")) return "textarea";
+  return value.length > 100 ? "textarea" : "input";
 }
 
 function parseShippingProfiles(payload: unknown): ShippingProfileOption[] {
@@ -428,6 +917,10 @@ function parseShippingProfiles(payload: unknown): ShippingProfileOption[] {
 
 function productShippingProfileId(product: Record<string, unknown>): string {
   return String(product.shippingProfileID ?? "");
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function readAiCategoryReview(product: Record<string, unknown>): AiCategoryReview {
@@ -677,6 +1170,7 @@ function CategoryCheckToolbar({
   categoryFilter,
   setCategoryFilter,
   categoryFilterOptions,
+  categoryGroupDisplayByValue,
   statusFilter,
   setStatusFilter,
   categorySort,
@@ -688,6 +1182,7 @@ function CategoryCheckToolbar({
   categoryFilter: string;
   setCategoryFilter: (value: string) => void;
   categoryFilterOptions: string[];
+  categoryGroupDisplayByValue: Record<string, string>;
   statusFilter: CategoryStatusFilter;
   setStatusFilter: (value: CategoryStatusFilter) => void;
   categorySort: CategorySortOption;
@@ -712,7 +1207,7 @@ function CategoryCheckToolbar({
       <select value={categoryFilter} onChange={(event) => { setCategoryFilter(event.target.value); setPage(1); }}>
         <option value="all">Все AI категории</option>
         {categoryFilterOptions.map((item) => (
-          <option value={item} key={item}>{item}</option>
+          <option value={item} key={item}>{categoryGroupDisplayByValue[item] || item}</option>
         ))}
       </select>
       <select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as CategoryStatusFilter); setPage(1); }}>
@@ -761,6 +1256,8 @@ function BulkCategoryEditDrawer({
   open,
   count,
   groups,
+  categoryGroupDisplayByValue,
+  categoryDisplayByValue,
   options,
   value,
   setValue,
@@ -770,6 +1267,8 @@ function BulkCategoryEditDrawer({
   open: boolean;
   count: number;
   groups: string[];
+  categoryGroupDisplayByValue: Record<string, string>;
+  categoryDisplayByValue: Record<string, string>;
   options: string[];
   value: string;
   setValue: (value: string) => void;
@@ -781,7 +1280,7 @@ function BulkCategoryEditDrawer({
   const hasSingleGroup = groups.length === 1;
   const normalizedQuery = normalizeFieldToken(query);
   const visibleOptions = options
-    .filter((option) => !normalizedQuery || normalizeFieldToken(option).includes(normalizedQuery))
+    .filter((option) => !normalizedQuery || normalizeFieldToken(`${option} ${categoryDisplayByValue[option] ?? ""}`).includes(normalizedQuery))
     .slice(0, 100);
 
   useEffect(() => {
@@ -813,7 +1312,7 @@ function BulkCategoryEditDrawer({
             <>
               <div className="bulk-category-group">
                 <small>Category group</small>
-                <strong>{groups[0]}</strong>
+                <strong>{categoryGroupDisplayByValue[groups[0]] || groups[0]}</strong>
               </div>
               <label className="bulk-category-field">
                 <span>Подкатегория</span>
@@ -851,7 +1350,7 @@ function BulkCategoryEditDrawer({
                               setMenuOpen(false);
                             }}
                           >
-                            <span>{option}</span>
+                            <span>{categoryDisplayByValue[option] || option}</span>
                             {active ? <Check size={15} /> : null}
                           </button>
                         );
@@ -860,7 +1359,7 @@ function BulkCategoryEditDrawer({
                   ) : null}
                 </div>
               </label>
-              {value ? <div className="bulk-category-selection"><Check size={15} /><span>Будет применено:</span><strong>{value}</strong></div> : null}
+              {value ? <div className="bulk-category-selection"><Check size={15} /><span>Будет применено:</span><strong>{categoryDisplayByValue[value] || value}</strong></div> : null}
             </>
           ) : (
             <div className="bulk-category-warning">
@@ -886,6 +1385,8 @@ function BulkCategoryEditDrawer({
 function CategoryCheckTable({
   rows,
   categoryRowStatuses,
+  categoryDisplayByValue,
+  categoryGroupDisplayByValue,
   selectedCategoryIndexSet,
   allFilteredRowsSelected,
   toggleAllFilteredRows,
@@ -907,6 +1408,8 @@ function CategoryCheckTable({
 }: {
   rows: CategoryCheckRow[];
   categoryRowStatuses: Record<number, CategoryReviewStatus>;
+  categoryDisplayByValue: Record<string, string>;
+  categoryGroupDisplayByValue: Record<string, string>;
   selectedCategoryIndexSet: Set<number>;
   allFilteredRowsSelected: boolean;
   toggleAllFilteredRows: () => void;
@@ -980,17 +1483,17 @@ function CategoryCheckTable({
                         <div className="category-check-category-diff" aria-label="Категория изменена">
                           <div className="removed">
                             <span aria-hidden="true">−</span>
-                            <del>{row.aiCategory || "Без категории"}</del>
+                            <del>{categoryDisplayByValue[row.aiCategory] || row.aiCategory || "Без категории"}</del>
                           </div>
                           <div className="added">
                             <span aria-hidden="true">+</span>
-                            <ins>{row.selectedCategory || "Без категории"}</ins>
+                            <ins>{categoryDisplayByValue[row.selectedCategory] || row.selectedCategory || "Без категории"}</ins>
                           </div>
                         </div>
                       ) : (
-                        <strong>{row.selectedCategory || row.aiCategory || "-"}</strong>
+                        <strong>{categoryDisplayByValue[row.selectedCategory || row.aiCategory] || row.selectedCategory || row.aiCategory || "-"}</strong>
                       )}
-                      <span>{row.aiCategoryGroup || "-"}</span>
+                      <span>{categoryGroupDisplayByValue[row.aiCategoryGroup] || row.aiCategoryGroup || "-"}</span>
                     </div>
                   </td>
                   <td data-label="Статус"><StatusBadge status={reviewStatus} /></td>
@@ -1055,6 +1558,7 @@ function CategoryProductMedia({ row }: { row: CategoryCheckRow }) {
 function CategoryEditDrawer({
   row,
   categoryOptionsByGroup,
+  categoryGroupDisplayByValue,
   categoryDisplayByValue,
   open,
   onSave,
@@ -1062,6 +1566,7 @@ function CategoryEditDrawer({
 }: {
   row: CategoryCheckRow | null;
   categoryOptionsByGroup: Record<string, string[]>;
+  categoryGroupDisplayByValue: Record<string, string>;
   categoryDisplayByValue: Record<string, string>;
   open: boolean;
   onSave: (category: string, comment: string) => void;
@@ -1082,6 +1587,7 @@ function CategoryEditDrawer({
             currentGroup={row.aiCategoryGroup}
             currentCategory={row.selectedCategory || row.aiCategory}
             categoryOptionsByGroup={categoryOptionsByGroup}
+            categoryGroupDisplayByValue={categoryGroupDisplayByValue}
             categoryDisplayByValue={categoryDisplayByValue}
             onSave={onSave}
             onCancel={onClose}
@@ -1097,6 +1603,7 @@ function CategoryChangeForm({
   currentGroup,
   currentCategory,
   categoryOptionsByGroup,
+  categoryGroupDisplayByValue = {},
   categoryDisplayByValue = {},
   onSave,
   onCancel,
@@ -1109,6 +1616,7 @@ function CategoryChangeForm({
   currentGroup: string;
   currentCategory: string;
   categoryOptionsByGroup: Record<string, string[]>;
+  categoryGroupDisplayByValue?: Record<string, string>;
   categoryDisplayByValue?: Record<string, string>;
   onSave: (category: string, comment: string) => void;
   onCancel: () => void;
@@ -1121,7 +1629,7 @@ function CategoryChangeForm({
   const groups = useMemo(() => Object.keys(categoryOptionsByGroup).sort((a, b) => a.localeCompare(b)), [categoryOptionsByGroup]);
   const [group, setGroup] = useState(currentGroup);
   const [category, setCategory] = useState(currentCategory);
-  const [query, setQuery] = useState(currentCategory);
+  const [query, setQuery] = useState(categoryDisplayByValue[currentCategory] || currentCategory);
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [optionsStyle, setOptionsStyle] = useState<CSSProperties | undefined>(undefined);
@@ -1197,7 +1705,7 @@ function CategoryChangeForm({
   const cancel = () => {
     setGroup(currentGroup);
     setCategory(currentCategory);
-    setQuery(currentCategory);
+    setQuery(categoryDisplayByValue[currentCategory] || currentCategory);
     setOpen(false);
     setActiveIndex(0);
     onCancel();
@@ -1205,11 +1713,11 @@ function CategoryChangeForm({
 
   return (
     <div className={`category-change-form ${compact ? "is-compact" : ""}`}>
-      {!compact ? <div className="category-change-current"><span>Текущая AI-категория</span><strong>{currentCategory || "-"}</strong></div> : null}
+      {!compact ? <div className="category-change-current"><span>Текущая AI-категория</span><strong>{categoryDisplayByValue[currentCategory] || currentCategory || "-"}</strong></div> : null}
       <label>Category group
         <select value={group} onChange={(event) => { setGroup(event.target.value); setCategory(""); setQuery(""); setOpen(false); setActiveIndex(0); }}>
           <option value="">Выберите Category group</option>
-          {groups.map((item) => <option value={item} key={item}>{item}</option>)}
+          {groups.map((item) => <option value={item} key={item}>{categoryGroupDisplayByValue[item] || item}</option>)}
         </select>
       </label>
       <label>Новая подкатегория
@@ -1239,7 +1747,7 @@ function CategoryChangeForm({
           </div> : null}
         </div>
       </label>
-      {!compact ? <div className="category-change-result"><span>Новая подкатегория</span><strong>{category || "Выберите подкатегорию"}</strong></div> : null}
+      {!compact ? <div className="category-change-result"><span>Новая подкатегория</span><strong>{category ? displayCategory(category) : "Выберите подкатегорию"}</strong></div> : null}
       {!autoSave && !hideActions ? <div className="category-change-actions">
         <button className="secondary-btn" type="button" onClick={cancel}>Отмена</button>
         <button className="primary-btn" type="button" disabled={!category} onClick={() => onSave(category, "")}>Сохранить изменение</button>
@@ -1294,9 +1802,10 @@ function CategoryProductHero({ row, status }: { row: CategoryCheckRow; status: C
   );
 }
 
-function CategoryCategorySection({ row, categoryOptionsByGroup, categoryDisplayByValue, canSaveDraft, onDraftChange, onDirtyChange, onSave, onSaveDraft }: {
+function CategoryCategorySection({ row, categoryOptionsByGroup, categoryGroupDisplayByValue, categoryDisplayByValue, canSaveDraft, onDraftChange, onDirtyChange, onSave, onSaveDraft }: {
   row: CategoryCheckRow;
   categoryOptionsByGroup: Record<string, string[]>;
+  categoryGroupDisplayByValue: Record<string, string>;
   categoryDisplayByValue: Record<string, string>;
   canSaveDraft: boolean;
   onDraftChange: (draft: { category: string; dirty: boolean; valid: boolean }) => void;
@@ -1309,11 +1818,12 @@ function CategoryCategorySection({ row, categoryOptionsByGroup, categoryDisplayB
       <div className="category-review-ai-head">
         <div><strong>AI-категория</strong><small>Текущая предложенная категория</small></div>
       </div>
-      <CategoryDiff previous={row.aiCategory} next={row.selectedCategory} />
+      <CategoryDiff previous={categoryDisplayByValue[row.aiCategory] || row.aiCategory} next={categoryDisplayByValue[row.selectedCategory] || row.selectedCategory} />
       <CategoryChangeForm
         currentGroup={row.aiCategoryGroup}
         currentCategory={row.selectedCategory || row.aiCategory}
         categoryOptionsByGroup={categoryOptionsByGroup}
+        categoryGroupDisplayByValue={categoryGroupDisplayByValue}
         categoryDisplayByValue={categoryDisplayByValue}
         onSave={onSave}
         onCancel={() => undefined}
@@ -1408,10 +1918,11 @@ function CategoryProductNavigator({ rows, statuses, activeIndex, position, total
   );
 }
 
-function CategoryReviewWorkspace({ row, status, categoryOptionsByGroup, categoryDisplayByValue, canSaveDraft, onDraftChange, onDirtyChange, onSave, onSaveDraft }: {
+function CategoryReviewWorkspace({ row, status, categoryOptionsByGroup, categoryGroupDisplayByValue, categoryDisplayByValue, canSaveDraft, onDraftChange, onDirtyChange, onSave, onSaveDraft }: {
   row: CategoryCheckRow;
   status: CategoryReviewStatus;
   categoryOptionsByGroup: Record<string, string[]>;
+  categoryGroupDisplayByValue: Record<string, string>;
   categoryDisplayByValue: Record<string, string>;
   canSaveDraft: boolean;
   onDraftChange: (draft: { category: string; dirty: boolean; valid: boolean }) => void;
@@ -1426,6 +1937,7 @@ function CategoryReviewWorkspace({ row, status, categoryOptionsByGroup, category
         key={row.index}
         row={row}
         categoryOptionsByGroup={categoryOptionsByGroup}
+        categoryGroupDisplayByValue={categoryGroupDisplayByValue}
         categoryDisplayByValue={categoryDisplayByValue}
         canSaveDraft={canSaveDraft}
         onDraftChange={onDraftChange}
@@ -1443,6 +1955,7 @@ function CategoryReviewModal({
   statuses,
   status,
   categoryOptionsByGroup,
+  categoryGroupDisplayByValue,
   categoryDisplayByValue,
   open,
   onSave,
@@ -1458,6 +1971,7 @@ function CategoryReviewModal({
   statuses: Record<number, CategoryReviewStatus>;
   status: CategoryReviewStatus;
   categoryOptionsByGroup: Record<string, string[]>;
+  categoryGroupDisplayByValue: Record<string, string>;
   categoryDisplayByValue: Record<string, string>;
   open: boolean;
   onSave: (category: string, comment: string) => void;
@@ -1514,6 +2028,7 @@ function CategoryReviewModal({
             row={row}
             status={status}
             categoryOptionsByGroup={categoryOptionsByGroup}
+            categoryGroupDisplayByValue={categoryGroupDisplayByValue}
             categoryDisplayByValue={categoryDisplayByValue}
             canSaveDraft={dirty && draft.valid}
             onDraftChange={setDraft}
@@ -1601,9 +2116,20 @@ function ProductList({
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    const container = listRef.current;
+    if (!container) return;
     const activeItem = listRef.current?.querySelector<HTMLElement>(`[data-product-index="${selectedIndex}"]`);
-    activeItem?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  }, [selectedIndex, rows]);
+    if (!activeItem) return;
+    const itemTop = activeItem.offsetTop;
+    const itemBottom = itemTop + activeItem.offsetHeight;
+    const visibleTop = container.scrollTop;
+    const visibleBottom = visibleTop + container.clientHeight;
+    if (itemTop < visibleTop) {
+      container.scrollTo({ top: Math.max(0, itemTop - 8), behavior: "smooth" });
+    } else if (itemBottom > visibleBottom) {
+      container.scrollTo({ top: itemBottom - container.clientHeight + 8, behavior: "smooth" });
+    }
+  }, [selectedIndex, rows.length]);
 
   return (
     <aside className="product-review-list">
@@ -1638,7 +2164,12 @@ function ProductList({
   );
 }
 
-function ProductReviewHeader({ row, image }: { row: ProductReviewRow | null; image: string }) {
+function ProductReviewHeader({ row, image, categoryDisplayByValue, categoryGroupDisplayByValue }: {
+  row: ProductReviewRow | null;
+  image: string;
+  categoryDisplayByValue: Record<string, string>;
+  categoryGroupDisplayByValue: Record<string, string>;
+}) {
   if (!row) {
     return <div className="product-review-empty workspace"><strong>Select a product to review</strong></div>;
   }
@@ -1651,8 +2182,8 @@ function ProductReviewHeader({ row, image }: { row: ProductReviewRow | null; ima
           <div><dt>SKU</dt><dd>{row.sku || "-"}</dd></div>
           <div><dt>EAN</dt><dd>{row.ean || "-"}</dd></div>
           <div><dt>Price</dt><dd>{row.price || "-"}</dd></div>
-          <div><dt>Category</dt><dd>{row.aiCategoryGroup || "-"}</dd></div>
-          <div><dt>Subcategory</dt><dd>{row.selectedCategory || "-"}</dd></div>
+          <div><dt>Category</dt><dd>{categoryGroupDisplayByValue[row.aiCategoryGroup] || row.aiCategoryGroup || "-"}</dd></div>
+          <div><dt>Subcategory</dt><dd>{categoryDisplayByValue[row.selectedCategory] || row.selectedCategory || "-"}</dd></div>
         </dl>
       </div>
     </section>
@@ -1697,8 +2228,16 @@ type AttributeCard = {
   name: string;
   displayName: string;
   values: string;
+  valueList: string[];
   displayValues: string;
+  allowedValues: string[];
+  multiValue: boolean;
+  variantKind: "color" | "material" | null;
+  option?: CategoryAttributeOption;
   group: string;
+  layout: "wide" | "normal";
+  controlKind: "input" | "textarea";
+  sortRank: number;
 };
 
 function AttributeBadges({ invalid }: { invalid: boolean }) {
@@ -1727,11 +2266,10 @@ function ExclusiveActionsMenu({ children, className = "", label }: { children: R
   );
 }
 
-function AttributeActionsMenu({ onEdit, onDelete, value }: { onEdit: () => void; onDelete: () => void; value: string }) {
+function AttributeActionsMenu({ onDelete, value }: { onDelete: () => void; value: string }) {
   return (
     <ExclusiveActionsMenu label="Attribute actions">
       <div>
-        <button type="button" onClick={onEdit}><Pencil size={14} /> Edit</button>
         {value ? <button type="button" onClick={() => void navigator.clipboard?.writeText(value)}><Copy size={14} /> Copy value</button> : null}
         <button type="button" className="is-danger" onClick={onDelete}><Trash2 size={14} /> Delete</button>
       </div>
@@ -1750,106 +2288,386 @@ function OverviewActionsMenu({ onEdit, onCopy, canCopy = true, copied = false }:
   );
 }
 
-function AttributeFieldEditor({ value, setValue, onSave, onCancel }: { value: string; setValue: (value: string) => void; onSave: () => void; onCancel: () => void }) {
+function AttributeValueChips({ values, option, onChange }: { values: string[]; option?: CategoryAttributeOption; onChange: (values: string[]) => void }) {
+  const [draft, setDraft] = useState("");
+  const allowedValues = option?.allowedValues ?? [];
+  const addValue = (raw: string) => {
+    const next = raw.trim().replace(/,$/, "").trim();
+    if (!next) return;
+    const exists = values.some((item) => normalizeFieldToken(item) === normalizeFieldToken(next));
+    if (!exists) onChange([...values, next]);
+    setDraft("");
+  };
+  const removeValue = (target: string) => {
+    onChange(values.filter((item) => normalizeFieldToken(item) !== normalizeFieldToken(target)));
+  };
+  const availableOptions = allowedValues.filter((item) => !values.some((value) => normalizeFieldToken(value) === normalizeFieldToken(item)));
+
   return (
-    <div className="attribute-field-editor">
-      <input autoFocus value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => {
-        if (event.key === "Enter") onSave();
-        if (event.key === "Escape") onCancel();
-      }} />
-      <div><button type="button" onClick={onSave}>Save</button><button type="button" onClick={onCancel}>Cancel</button></div>
+    <div className={`attribute-chip-control${values.length > 1 ? " has-multiple" : ""}`}>
+      <div className="attribute-chip-list">
+        {values.map((item) => (
+          <span className="attribute-chip" key={item}>
+            {option ? attributeAllowedValueLabel(option, item) : item}
+            <button type="button" onClick={() => removeValue(item)} aria-label={`Remove ${item}`}><X size={12} /></button>
+          </span>
+        ))}
+        {allowedValues.length > 0 ? (
+          <select value="" onChange={(event) => addValue(event.target.value)} aria-label="Add value">
+            <option value="">Add value</option>
+            {availableOptions.map((item) => (
+              <option value={item} key={item}>{option ? attributeAllowedValueLabel(option, item) : item}</option>
+            ))}
+          </select>
+        ) : (
+          <input
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === "Tab" || event.key === ",") {
+                event.preventDefault();
+                addValue(draft);
+              }
+              if (event.key === "Backspace" && !draft && values.length > 0) {
+                removeValue(values[values.length - 1]);
+              }
+              if (event.key === "Escape") setDraft("");
+            }}
+            onBlur={() => addValue(draft)}
+            placeholder=""
+            aria-label="Add value"
+          />
+        )}
+      </div>
     </div>
   );
 }
 
-function AttributeFieldCard({ attribute, isEditing, editingDraft, setEditingDraft, onEdit, onSave, onCancel, onDelete, invalid }: {
+function AttributeFieldCard({ attribute, onChange, onDelete, invalid }: {
   attribute: AttributeCard;
-  isEditing: boolean;
-  editingDraft: string;
-  setEditingDraft: (value: string) => void;
-  onEdit: () => void;
-  onSave: () => void;
-  onCancel: () => void;
+  onChange: (value: string) => void;
   onDelete: () => void;
   invalid: boolean;
 }) {
+  const values = attribute.valueList.length ? attribute.valueList : splitAttributeValues(attribute.values);
   return (
-    <article className={`attribute-field-card${invalid ? " is-invalid" : ""}`}>
-      <div className="attribute-field-card-head">
+    <article className={`attribute-form-field${invalid ? " is-invalid" : ""}${values.length > 1 ? " has-multiple-values" : ""}`}>
+      <div className="attribute-form-field-head">
         <span title={attribute.name}>{attribute.displayName || attribute.name || "Unnamed"}</span>
         <AttributeBadges invalid={invalid} />
-        {!isEditing ? <AttributeActionsMenu onEdit={onEdit} onDelete={onDelete} value={attribute.values} /> : null}
+        <AttributeActionsMenu onDelete={onDelete} value={attribute.values} />
       </div>
-      {isEditing ? (
-        <AttributeFieldEditor value={editingDraft} setValue={setEditingDraft} onSave={onSave} onCancel={onCancel} />
-      ) : (
-        <button type="button" className={`attribute-field-value${attribute.values ? "" : " is-empty"}`} onClick={onEdit}>
-          {attribute.displayValues || attribute.values || "Not provided"}
-        </button>
-      )}
+      <AttributeValueChips
+        values={values}
+        option={attribute.option}
+        onChange={(nextValues) => onChange(joinAttributeValues(nextValues))}
+      />
       {invalid ? <p className="attribute-field-error">Check this value before approval.</p> : null}
     </article>
   );
 }
 
-function AttributeGroup({ title, items, editingAttribute, editingDraft, setEditingDraft, startAttributeEdit, saveAttributeEdit, cancelAttributeEdit, deleteAttribute, invalidNames }: {
+function AttributeFieldsSection({ title, items, editingAttribute, editingDraft, setEditingDraft, startAttributeEdit, saveAttributeEdit, cancelAttributeEdit, deleteAttribute, invalidNames }: {
   title: string;
   items: AttributeCard[];
   editingAttribute: { index: number; field: AttributeEditField } | null;
   editingDraft: string;
   setEditingDraft: (value: string) => void;
   startAttributeEdit: (index: number, field: AttributeEditField, value: string) => void;
-  saveAttributeEdit: () => void;
+  saveAttributeEdit: (index?: number, value?: string) => void;
   cancelAttributeEdit: () => void;
   deleteAttribute: (index: number) => void;
   invalidNames: Set<string>;
 }) {
-  const [expanded, setExpanded] = useState(true);
-  const tone = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  const filled = items.filter((item) => item.values.trim()).length;
+  void editingAttribute;
+  void editingDraft;
+  void setEditingDraft;
+  void startAttributeEdit;
+  void cancelAttributeEdit;
   return (
-    <section className={`attribute-group-card tone-${tone}`}>
-      <button type="button" className="attribute-group-header" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
-        <span><strong>{title}</strong><small>{`${filled} / ${items.length} filled`}</small></span>
-        {expanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
-      </button>
-      {expanded ? <div className="attribute-group-grid">{items.map((attribute) => (
+    <section className="attribute-fields-section" aria-label={title}>
+      <div className="attribute-group-grid">{items.map((attribute) => (
         <AttributeFieldCard
           key={attribute.index}
           attribute={attribute}
-          isEditing={editingAttribute?.index === attribute.index}
-          editingDraft={editingDraft}
-          setEditingDraft={setEditingDraft}
-          onEdit={() => startAttributeEdit(attribute.index, "values", attribute.values)}
-          onSave={saveAttributeEdit}
-          onCancel={cancelAttributeEdit}
+          onChange={(value) => saveAttributeEdit(attribute.index, value)}
           onDelete={() => deleteAttribute(attribute.index)}
           invalid={invalidNames.has(normalizeFieldToken(attribute.name))}
         />
-      ))}</div> : null}
+      ))}</div>
     </section>
   );
 }
 
-function MissingAttributeRow({ item, selected, onSelect }: { item: CategoryAttributeOption; selected: boolean; onSelect: () => void }) {
+type AttributeVariantDimension = {
+  key: string;
+  label: string;
+  values: string[];
+};
+
+type AttributeVariantRow = {
+  key: string;
+  combination: string;
+  parts: Array<{ key: string; label: string; value: string }>;
+};
+
+type VariantPriceAdjustment = {
+  direction: "add" | "subtract";
+  mode: "percent" | "amount";
+  value: string;
+};
+
+function parseMoneyValue(value: unknown): number | null {
+  const normalized = String(value ?? "").trim().replace(/\s+/g, "").replace(",", ".");
+  if (!normalized) return null;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatMoneyValue(value: number): string {
+  return value.toFixed(2).replace(".", ",");
+}
+
+function applyVariantPriceAdjustments(
+  basePrice: number | null,
+  row: AttributeVariantRow,
+  adjustments: Record<string, VariantPriceAdjustment>,
+): string {
+  if (basePrice === null) return "";
+  const nextPrice = row.parts.reduce((price, part) => {
+    const adjustment = adjustments[`${part.key}:${normalizeFieldToken(part.value)}`];
+    const amount = parseMoneyValue(adjustment?.value);
+    if (!adjustment || amount === null) return price;
+    const delta = adjustment.mode === "percent" ? price * (amount / 100) : amount;
+    return adjustment.direction === "subtract" ? price - delta : price + delta;
+  }, basePrice);
+  return formatMoneyValue(Math.max(0, nextPrice));
+}
+
+function variantPartChipLabel(part: { label: string; value: string }, mode: "main" | "row"): string {
+  if (mode === "main") return `${part.label}: ${part.value}`;
+  return part.value;
+}
+
+function buildAttributeVariantRows(attributes: AttributeCard[]): { dimensions: AttributeVariantDimension[]; rows: AttributeVariantRow[]; total: number; mainCombination: string; mainParts: AttributeVariantRow["parts"] } {
+  const dimensions: AttributeVariantDimension[] = attributes
+    .map((attribute) => {
+      const values = attribute.valueList.length ? attribute.valueList : splitAttributeValues(attribute.values);
+      return {
+        key: normalizeFieldToken(attribute.name) || String(attribute.index),
+        label: attribute.displayName || attribute.name,
+        values,
+        variantKind: attribute.variantKind,
+      };
+    })
+    .filter((dimension) => dimension.values.length > 1 && (dimension.variantKind === "material" || dimension.variantKind === "color"));
+  if (dimensions.length === 0) return { dimensions, rows: [], total: 0, mainCombination: "", mainParts: [] };
+
+  const combinations: Array<Array<{ key: string; label: string; value: string }>> = [];
+  const visit = (index: number, current: Array<{ key: string; label: string; value: string }>) => {
+    if (index >= dimensions.length) {
+      combinations.push(current);
+      return;
+    }
+    const dimension = dimensions[index];
+    for (const value of dimension.values) {
+      visit(index + 1, [...current, { key: dimension.key, label: dimension.label, value }]);
+    }
+  };
+  visit(0, []);
+  const toRow = (combination: Array<{ key: string; label: string; value: string }>) => ({
+    key: combination.map((item) => `${item.key}:${normalizeFieldToken(item.value)}`).join("|"),
+    combination: combination.map((item) => `${item.label}: ${item.value}`).join(" / "),
+    parts: combination,
+  });
+  const [main, ...additional] = combinations.map(toRow);
+  return { dimensions, rows: additional, total: combinations.length, mainCombination: main?.combination ?? "", mainParts: main?.parts ?? [] };
+}
+
+function AttributeProductVariants({ attributes, basePrice }: { attributes: AttributeCard[]; basePrice: string }) {
+  const preview = useMemo(() => buildAttributeVariantRows(attributes), [attributes]);
+  const [drafts, setDrafts] = useState<Record<string, { sku: string; ean: string; price: string }>>({});
+  const [priceAdjustments, setPriceAdjustments] = useState<Record<string, VariantPriceAdjustment>>({});
+  const parsedBasePrice = useMemo(() => parseMoneyValue(basePrice), [basePrice]);
+  const materialDimension = preview.dimensions.find((dimension) => isMaterialVariantAttribute(dimension.label));
+  const priceRuleDimension = materialDimension ?? null;
+
+  useEffect(() => {
+    const keys = new Set(preview.rows.map((row) => row.key));
+    setDrafts((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([key]) => keys.has(key)),
+      ),
+    );
+  }, [preview.rows]);
+
+  if (preview.rows.length === 0) return null;
+
+  const updateDraft = (key: string, patch: Partial<{ sku: string; ean: string; price: string }>) => {
+    setDrafts((current) => {
+      const previous = current[key] ?? { sku: "", ean: "", price: "" };
+      return { ...current, [key]: { ...previous, ...patch } };
+    });
+  };
+  const updatePriceAdjustment = (key: string, patch: Partial<VariantPriceAdjustment>) => {
+    setPriceAdjustments((current) => {
+      const previous = current[key] ?? { direction: "add", mode: "percent", value: "" };
+      return { ...current, [key]: { ...previous, ...patch } };
+    });
+  };
+  const basePriceLabel = parsedBasePrice === null ? "0,00" : formatMoneyValue(parsedBasePrice);
+  const resultForPriceValue = (value: string, index: number) => {
+    if (parsedBasePrice === null) return "";
+    if (!priceRuleDimension || index === 0) return basePriceLabel;
+    const key = `${priceRuleDimension.key}:${normalizeFieldToken(value)}`;
+    const adjustment = priceAdjustments[key];
+    const amount = parseMoneyValue(adjustment?.value);
+    if (!adjustment || amount === null) return basePriceLabel;
+    const delta = adjustment.mode === "percent" ? parsedBasePrice * (amount / 100) : amount;
+    const next = adjustment.direction === "subtract" ? parsedBasePrice - delta : parsedBasePrice + delta;
+    return formatMoneyValue(Math.max(0, next));
+  };
+
+  return (
+    <section className="attribute-variants-panel">
+      <div className="attribute-variants-head">
+        <div>
+          <div className="attribute-variants-title-line">
+            <h4>Product variants <Info size={13} aria-hidden="true" /></h4>
+            <span className="attribute-variants-count">{`${preview.rows.length} variants`}</span>
+          </div>
+          <div className="attribute-main-product">
+            <p><strong>Main product:</strong></p>
+            <div className="attribute-main-chips">
+              {preview.mainParts.map((part) => (
+                <span key={`${part.key}:${part.value}`} title={`${part.label}: ${part.value}`}>
+                  <small>{part.label}:</small>
+                  <strong>{part.value}</strong>
+                </span>
+              ))}
+            </div>
+          </div>
+          <p className="attribute-variants-description">{`${preview.rows.length} additional variants generated from selected attributes`}</p>
+        </div>
+      </div>
+      {priceRuleDimension ? (
+        <details className="attribute-price-rules" open>
+          <summary className="attribute-price-rules-head">
+            <span>
+              <h5>Price adjustments</h5>
+              <small>{`Base price: ${basePriceLabel}`}</small>
+            </span>
+            <span className="attribute-price-rules-actions">
+              <span className="attribute-price-rules-count">{`${priceRuleDimension.values.length} rules`}</span>
+              <ChevronDown size={15} aria-hidden="true" />
+            </span>
+          </summary>
+          <div>
+            <div className="attribute-price-rule-row is-head"><span>Value</span><span>Adjustment</span><span>Result</span></div>
+            {priceRuleDimension.values.map((value, index) => {
+              const key = `${priceRuleDimension.key}:${normalizeFieldToken(value)}`;
+              const adjustment = priceAdjustments[key] ?? { direction: "add", mode: "percent", value: "" };
+              const isBase = index === 0;
+              return (
+                <label key={key} className={`attribute-price-rule-row${isBase ? " is-base" : ""}`}>
+                  <span>{value}</span>
+                  {isBase ? <em>Base price</em> : (
+                    <span className="attribute-price-rule-controls">
+                      <select value={adjustment.direction} onChange={(event) => updatePriceAdjustment(key, { direction: event.target.value as VariantPriceAdjustment["direction"] })} aria-label={`${value} price direction`}>
+                        <option value="add">+</option>
+                        <option value="subtract">-</option>
+                      </select>
+                      <input inputMode="decimal" value={adjustment.value} onChange={(event) => updatePriceAdjustment(key, { value: event.target.value })} placeholder="0" aria-label={`${value} price adjustment`} />
+                      <select value={adjustment.mode} onChange={(event) => updatePriceAdjustment(key, { mode: event.target.value as VariantPriceAdjustment["mode"] })} aria-label={`${value} price mode`}>
+                        <option value="percent">%</option>
+                        <option value="amount">€</option>
+                      </select>
+                    </span>
+                  )}
+                  <strong>{resultForPriceValue(value, index)}</strong>
+                </label>
+              );
+            })}
+          </div>
+        </details>
+      ) : null}
+      <div className="attribute-variants-table-meta"><span>{`Showing ${preview.rows.length} additional variants`}</span><span>{`${preview.rows.length} total`}</span></div>
+      <div className="attribute-variants-table">
+        <div className="attribute-variants-row is-head"><span>Variant combination</span><span>SKU</span><span>EAN</span><span>Price</span></div>
+        {preview.rows.map((row) => {
+          const draft = drafts[row.key] ?? { sku: "", ean: "", price: "" };
+          const calculatedPrice = applyVariantPriceAdjustments(parsedBasePrice, row, priceAdjustments);
+          return (
+            <div className="attribute-variants-row" key={row.key}>
+              <div className="attribute-variant-combination" aria-label={row.combination}>
+                {row.parts.map((part) => (
+                  <span key={`${part.key}:${part.value}`} title={`${part.label}: ${part.value}`}>
+                    {variantPartChipLabel(part, "row")}
+                  </span>
+                ))}
+              </div>
+              <input value={draft.sku} onChange={(event) => updateDraft(row.key, { sku: event.target.value })} placeholder="SKU" aria-label={`${row.combination} SKU`} />
+              <input type="text" inputMode="numeric" value={draft.ean} onChange={(event) => updateDraft(row.key, { ean: event.target.value })} placeholder="EAN" aria-label={`${row.combination} EAN`} />
+              <input type="text" inputMode="decimal" value={draft.price || calculatedPrice} onChange={(event) => updateDraft(row.key, { price: event.target.value })} placeholder="0,00" aria-label={`${row.combination} price`} />
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function MissingAttributeRow({
+  item,
+  selected,
+  value,
+  onSelect,
+  onValueChange,
+  onAdd,
+}: {
+  item: CategoryAttributeOption;
+  selected: boolean;
+  value: string;
+  onSelect: () => void;
+  onValueChange: (value: string) => void;
+  onAdd: () => void;
+}) {
   const priority = (item.relevance || "LOW").toUpperCase();
   const displayName = attributeDisplayName(item);
+  const allowedValues = item.allowedValues ?? [];
+  const typeToken = normalizeFieldToken(String(item.type ?? ""));
+  const inputType = typeToken.includes("number") || typeToken.includes("integer") || typeToken.includes("decimal") ? "number" : "text";
   return (
     <div className={`missing-attribute-row${selected ? " is-selected" : ""}`}>
-      <strong>{displayName || item.name}</strong><span>{item.unit || "—"}</span><span>{item.type || "—"}</span>
+      <strong>{displayName || item.name}</strong>
+      {allowedValues.length > 0 ? (
+        <select value={selected && allowedValues.includes(value) ? value : ""} onFocus={onSelect} onChange={(event) => { onSelect(); onValueChange(event.target.value); }} aria-label={`Value for ${item.name}`}>
+          <option value="">Select value</option>
+          {allowedValues.map((option) => <option value={option} key={option}>{attributeAllowedValueLabel(item, option)}</option>)}
+        </select>
+      ) : (
+        <input type={inputType} value={selected ? value : ""} onFocus={onSelect} onChange={(event) => { onSelect(); onValueChange(event.target.value); }} placeholder="Введите значение" aria-label={`Value for ${item.name}`} />
+      )}
+      <span>{item.unit || "—"}</span><span>{item.type || "—"}</span>
       <span><i className={`priority-badge priority-${priority.toLowerCase()}`}>{priority}</i></span>
-      <button type="button" onClick={onSelect}>Добавить</button>
+      <button type="button" onClick={onAdd} disabled={!selected || !value.trim()}>Add</button>
     </div>
   );
 }
 
-function MissingAttributesPanel({ availableAttributes, isLoading, error, selectedOption, valueOptions, newAttributeName, setNewAttributeName, newAttributeValue, setNewAttributeValue, addAttribute, open, setOpen }: {
+function MissingAttributesPanel({ availableAttributes, isLoading, error, selectedOption, valueOptions, newAttributeName, setNewAttributeName, newAttributeValue, setNewAttributeValue, addAttribute, open, setOpen, query }: {
   availableAttributes: CategoryAttributeOption[]; isLoading: boolean; error: string; selectedOption: CategoryAttributeOption | null; valueOptions: string[];
   newAttributeName: string; setNewAttributeName: (value: string) => void; newAttributeValue: string; setNewAttributeValue: (value: string) => void;
-  addAttribute: () => void; open: boolean; setOpen: (value: boolean) => void;
+  addAttribute: () => void; open: boolean; setOpen: (value: boolean) => void; query: string;
 }) {
-  const query = newAttributeName.trim().toLowerCase();
-  const visible = availableAttributes.filter((item) => !query || [item.name, attributeDisplayName(item), attributeDisplayDescription(item), item.relevance, item.unit, item.type].join(" ").toLowerCase().includes(query)).slice(0, 80);
+  const normalizedQuery = query.trim().toLowerCase();
+  const visible = availableAttributes.filter((item) => !normalizedQuery || [item.name, attributeDisplayName(item), attributeDisplayDescription(item), item.relevance, item.unit, item.type].join(" ").toLowerCase().includes(normalizedQuery)).slice(0, 80);
+  useEffect(() => {
+    if (valueOptions.length === 0) return;
+    if (valueOptions.includes(newAttributeValue)) return;
+    setNewAttributeValue(valueOptions.length === 1 ? valueOptions[0] : "");
+  }, [newAttributeValue, setNewAttributeValue, valueOptions]);
+  if (!isLoading && !error && availableAttributes.length === 0) return null;
   return (
     <section className="missing-attributes-panel">
       <button type="button" className="missing-attributes-toggle" onClick={() => setOpen(!open)} aria-expanded={open}>
@@ -1857,20 +2675,13 @@ function MissingAttributesPanel({ availableAttributes, isLoading, error, selecte
         {open ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
       </button>
       {open ? <div className="missing-attributes-content">
-        <div className="missing-attributes-form">
-          <input list="product-review-category-attributes" value={newAttributeName} onChange={(event) => setNewAttributeName(event.target.value)} placeholder="Поиск атрибута..." aria-label="Поиск атрибута" />
-          <datalist id="product-review-category-attributes">{availableAttributes.map((item) => <option value={item.name} label={attributeDisplayName(item)} key={item.name} />)}</datalist>
-          <input list="product-review-category-attribute-values" value={newAttributeValue} onChange={(event) => setNewAttributeValue(event.target.value)} placeholder={selectedOption?.unit ? `Значение в ${selectedOption.unit}` : "Значение"} aria-label="Значение атрибута" />
-          <datalist id="product-review-category-attribute-values">{valueOptions.map((value) => <option value={value} label={selectedOption ? attributeAllowedValueLabel(selectedOption, value) : value} key={value} />)}</datalist>
-          <button className="primary-btn" type="button" onClick={addAttribute} disabled={!newAttributeName.trim() || !newAttributeValue.trim()}>Добавить</button>
-        </div>
         {error ? <p className="attribute-field-error">{error}</p> : null}
         <div className="missing-attribute-list">
-          <div className="missing-attribute-row is-head"><span>Атрибут</span><span>Ед.</span><span>Тип</span><span>Приоритет</span><span /></div>
+          <div className="missing-attribute-row is-head"><span>Attribute</span><span>Value</span><span>Unit</span><span>Type</span><span>Priority</span><span /></div>
           {visible.length ? visible.map((item) => <MissingAttributeRow key={item.name} item={item} selected={selectedOption?.name === item.name} onSelect={() => {
             setNewAttributeName(item.name);
             if ((item.allowedValues ?? []).length === 1) setNewAttributeValue(item.allowedValues?.[0] ?? "");
-          }} />) : <p className="missing-attributes-empty">{isLoading ? "Загрузка атрибутов..." : "Подходящие атрибуты не найдены."}</p>}
+          }} value={selectedOption?.name === item.name ? newAttributeValue : ""} onValueChange={setNewAttributeValue} onAdd={addAttribute} />) : <p className="missing-attributes-empty">{isLoading ? "Загрузка атрибутов..." : "Подходящие атрибуты не найдены."}</p>}
         </div>
       </div> : null}
     </section>
@@ -1888,6 +2699,7 @@ function AttributesToolbar({ query, setQuery, group, setGroup, groups, onlyEmpty
 
 function AttributeEditor({
   attributes,
+  basePrice,
   categoryAttributes,
   isLoadingCategoryAttributes,
   categoryAttributesError,
@@ -1906,6 +2718,7 @@ function AttributeEditor({
   invalidAttributeNames,
 }: {
   attributes: AttributeCard[];
+  basePrice: string;
   categoryAttributes: CategoryAttributeOption[];
   isLoadingCategoryAttributes: boolean;
   categoryAttributesError: string;
@@ -1918,7 +2731,7 @@ function AttributeEditor({
   editingDraft: string;
   setEditingDraft: (value: string) => void;
   startAttributeEdit: (index: number, field: AttributeEditField, value: string) => void;
-  saveAttributeEdit: () => void;
+  saveAttributeEdit: (index?: number, value?: string) => void;
   cancelAttributeEdit: () => void;
   deleteAttribute: (index: number) => void;
   invalidAttributeNames: Set<string>;
@@ -1954,19 +2767,246 @@ function AttributeEditor({
   const selectedOption = categoryAttributes.find((item) => item.name.toLowerCase() === newAttributeName.trim().toLowerCase()) ?? null;
   const valueOptions = selectedOption?.allowedValues ?? [];
   const normalizedQuery = query.trim().toLowerCase();
-  const groupEntries = Object.entries(groups).map(([title, items]) => [title, items.filter((item) => {
+  const filteredAttributes = Object.entries(groups).flatMap(([title, items]) => items.map((item) => ({ ...item, groupTitle: title }))).filter((item) => {
     if (onlyEmpty && item.values.trim()) return false;
+    if (groupFilter !== "all" && item.groupTitle !== groupFilter) return false;
     return !normalizedQuery || `${item.name} ${item.displayName} ${item.values} ${item.displayValues}`.toLowerCase().includes(normalizedQuery);
-  })] as const).filter(([title, items]) => items.length > 0 && (groupFilter === "all" || groupFilter === title));
+  }).sort((left, right) => left.sortRank - right.sortRank || left.index - right.index);
   return (
     <div className="product-review-attributes">
       <div className="attributes-title"><div><h3>Attributes</h3><p>{`${attributes.filter((item) => item.values.trim()).length} of ${attributes.length} filled`}</p></div></div>
       <AttributesToolbar query={query} setQuery={setQuery} group={groupFilter} setGroup={setGroupFilter} groups={Object.keys(groups).filter((title) => groups[title].length > 0)} onlyEmpty={onlyEmpty} setOnlyEmpty={setOnlyEmpty} onAdd={() => setMissingOpen(true)} />
-      <MissingAttributesPanel availableAttributes={availableAttributes} isLoading={isLoadingCategoryAttributes} error={categoryAttributesError} selectedOption={selectedOption} valueOptions={valueOptions} newAttributeName={newAttributeName} setNewAttributeName={setNewAttributeName} newAttributeValue={newAttributeValue} setNewAttributeValue={setNewAttributeValue} addAttribute={addAttribute} open={missingOpen} setOpen={setMissingOpen} />
-      <div className="attribute-groups">{groupEntries.length ? groupEntries.map(([title, items]) => (
-        <AttributeGroup key={title} title={title} items={items} editingAttribute={editingAttribute} editingDraft={editingDraft} setEditingDraft={setEditingDraft} startAttributeEdit={startAttributeEdit} saveAttributeEdit={saveAttributeEdit} cancelAttributeEdit={cancelAttributeEdit} deleteAttribute={deleteAttribute} invalidNames={invalidAttributeNames} />
-      )) : <div className="attributes-empty-state">No attributes match these filters.</div>}</div>
+      <MissingAttributesPanel availableAttributes={availableAttributes} isLoading={isLoadingCategoryAttributes} error={categoryAttributesError} selectedOption={selectedOption} valueOptions={valueOptions} newAttributeName={newAttributeName} setNewAttributeName={setNewAttributeName} newAttributeValue={newAttributeValue} setNewAttributeValue={setNewAttributeValue} addAttribute={addAttribute} open={missingOpen} setOpen={setMissingOpen} query={query} />
+      {filteredAttributes.length ? (
+        <AttributeFieldsSection title="All attributes" items={filteredAttributes} editingAttribute={editingAttribute} editingDraft={editingDraft} setEditingDraft={setEditingDraft} startAttributeEdit={startAttributeEdit} saveAttributeEdit={saveAttributeEdit} cancelAttributeEdit={cancelAttributeEdit} deleteAttribute={deleteAttribute} invalidNames={invalidAttributeNames} />
+      ) : <div className="attributes-empty-state">No attributes match these filters.</div>}
+      <AttributeProductVariants attributes={attributes} basePrice={basePrice} />
     </div>
+  );
+}
+
+function variantStatusLabel(status: VariantStatus): string {
+  if (status === "pending_generation") return "Pending";
+  if (status === "generating_image") return "Generating";
+  if (status === "manual_override") return "Manual";
+  if (status === "failed") return "Failed";
+  if (status === "ready") return "Ready";
+  return "Draft";
+}
+
+function VariantManager({
+  product,
+  categoryAttributes,
+  onGenerate,
+  onPatchVariant,
+  onDeleteVariant,
+  onRegenerateVariant,
+}: {
+  product: Record<string, unknown>;
+  categoryAttributes: CategoryAttributeOption[];
+  onGenerate: () => void;
+  onPatchVariant: (combinationKey: string, patch: Partial<ProductVariantDraft>) => void;
+  onDeleteVariant: (combinationKey: string) => void;
+  onRegenerateVariant: (combinationKey: string) => void | Promise<void>;
+}) {
+  const variants = readProductVariants(product);
+  const activeVariants = variants.filter((variant) => variant.active);
+  const preview = buildLocalVariantPreview(product, categoryAttributes);
+  const [editingKey, setEditingKey] = useState("");
+  const [uploadingKey, setUploadingKey] = useState("");
+  const [fullscreenImage, setFullscreenImage] = useState<{ src: string; label: string } | null>(null);
+  const editingVariant = variants.find((variant) => variant.combinationKey === editingKey) ?? null;
+  const columns = preview.variationAttributes.length > 0
+    ? preview.variationAttributes.map((item) => ({ attributeId: item.attributeId, name: item.name }))
+    : Array.from(
+      new Map(
+        variants.flatMap((variant) => variant.combination.map((item) => [item.attributeId, { attributeId: item.attributeId, name: item.name }] as const)),
+      ).values(),
+    );
+
+  async function uploadVariantImage(combinationKey: string, file: File | null) {
+    if (!file) return;
+    setUploadingKey(combinationKey);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const response = await fetch("/api/uploads/image", {
+        method: "POST",
+        body: form,
+        cache: "no-store",
+      });
+      const parsed = await readJsonResponse<{ url?: string; filename?: string }>(response);
+      if (!response.ok || !parsed?.url) {
+        throw new Error(readApiErrorMessage(parsed, "Image upload failed.", response.status));
+      }
+      onPatchVariant(combinationKey, {
+        imageUrl: parsed.url,
+        mediaAssets: [{ type: "IMAGE", location: parsed.url }],
+        status: "manual_override",
+        generationError: undefined,
+      });
+    } catch (error) {
+      onPatchVariant(combinationKey, {
+        status: "failed",
+        generationError: error instanceof Error ? error.message : "Image upload failed.",
+      });
+    } finally {
+      setUploadingKey("");
+    }
+  }
+
+  useEffect(() => {
+    if (!fullscreenImage) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFullscreenImage(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [fullscreenImage]);
+
+  return (
+    <section className="product-review-section variant-manager">
+      <div className="variant-manager-head">
+        <div>
+          <h3>Variants</h3>
+          <p>
+            {preview.totalCombinations > 0
+              ? `Будет создано ${preview.totalCombinations} комбинаций, уже существует ${preview.existingCombinations}, будет добавлено ${preview.newCombinations}.`
+              : "Для текущих attributes нет доступной variation matrix."}
+          </p>
+        </div>
+        <button className="primary-btn" type="button" onClick={onGenerate} disabled={preview.totalCombinations === 0}>
+          <RefreshCw size={15} />
+          Сгенерировать варианты
+        </button>
+      </div>
+      {preview.issues.length > 0 ? (
+        <div className="variant-issues">
+          {preview.issues.map((issue) => <span key={issue}>{issue}</span>)}
+        </div>
+      ) : null}
+      {preview.variationAttributes.length > 0 ? (
+        <div className="variant-theme-list">
+          {preview.variationAttributes.map((attribute) => (
+            <span key={attribute.attributeId}>
+              <strong>{attribute.name}</strong>
+              <small>{attribute.fixed ? "fixed" : `${attribute.values.length} values`}</small>
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <div className="variant-table-scroll">
+        <table className="variant-table">
+          <thead>
+            <tr>
+              {columns.map((column) => <th key={column.attributeId}>{column.name}</th>)}
+              <th>EAN</th>
+              <th>SKU</th>
+              <th>Price</th>
+              <th>Image</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {activeVariants.length > 0 ? activeVariants.map((variant) => {
+              const valueById = new Map(variant.combination.map((item) => [item.attributeId, item.value]));
+              const imageUrl = variant.imageUrl || variant.mediaAssets[0]?.location || "";
+              const missing = !variant.sku.trim() || !variant.ean.trim();
+              return (
+                <tr key={variant.combinationKey} className={missing ? "has-missing-fields" : ""}>
+                  {columns.map((column) => <td key={column.attributeId}>{valueById.get(column.attributeId) || "-"}</td>)}
+                  <td>{variant.ean || <span className="variant-missing">Missing</span>}</td>
+                  <td><code>{variant.sku || "Missing"}</code></td>
+                  <td>{variant.price || "-"}</td>
+                  <td>
+                    {imageUrl ? (
+                      <button className="variant-thumb-button" type="button" onClick={() => setFullscreenImage({ src: imageUrl, label: variant.combination.map((item) => item.value).join(" · ") })} aria-label="Open image fullscreen">
+                        <img className="variant-thumb" src={imageUrl} alt="" />
+                      </button>
+                    ) : <span className="variant-missing">No image</span>}
+                  </td>
+                  <td><span className={`variant-status status-${variant.status}`}>{variantStatusLabel(variant.status)}</span></td>
+                  <td>
+                    <div className="variant-actions">
+                      <button type="button" title="Open / edit" onClick={() => setEditingKey(variant.combinationKey)}><Pencil size={14} /></button>
+                      <button type="button" title="Regenerate image" onClick={() => void onRegenerateVariant(variant.combinationKey)} disabled={variant.status === "generating_image"}><RefreshCw size={14} /></button>
+                      <label title="Upload / replace image">
+                        <Plus size={14} />
+                        <input type="file" accept="image/*" onChange={(event) => void uploadVariantImage(variant.combinationKey, event.target.files?.[0] ?? null)} />
+                      </label>
+                      <button type="button" title="Delete" className="is-danger" onClick={() => onDeleteVariant(variant.combinationKey)}><Trash2 size={14} /></button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            }) : (
+              <tr>
+                <td colSpan={columns.length + 6}>
+                  <div className="variant-empty-state">Нажмите «Сгенерировать варианты», чтобы создать matrix для текущих attributes.</div>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      {editingVariant ? (
+        <div className="variant-drawer-backdrop" onClick={() => setEditingKey("")}>
+          <aside className="variant-drawer" onClick={(event) => event.stopPropagation()}>
+            <div className="category-drawer-head">
+              <div>
+                <h3>Variant editor</h3>
+                <p>{editingVariant.combination.map((item) => `${item.name}: ${item.value}`).join(" · ")}</p>
+              </div>
+              <button type="button" onClick={() => setEditingKey("")} aria-label="Close"><X size={18} /></button>
+            </div>
+            <div className="variant-drawer-body">
+              <div className="variant-image-preview">
+                {editingVariant.imageUrl || editingVariant.mediaAssets[0]?.location ? (
+                  <button type="button" onClick={() => setFullscreenImage({ src: editingVariant.imageUrl || editingVariant.mediaAssets[0]?.location || "", label: editingVariant.combination.map((item) => item.value).join(" · ") })} aria-label="Open image fullscreen">
+                    <img src={editingVariant.imageUrl || editingVariant.mediaAssets[0]?.location} alt="" />
+                  </button>
+                ) : (
+                  <span>No image</span>
+                )}
+              </div>
+              <div className="variant-combination-readonly">
+                {editingVariant.combination.map((item) => (
+                  <span key={`${item.attributeId}-${item.value}`}><small>{item.name}</small><strong>{item.value}</strong></span>
+                ))}
+              </div>
+              <label>EAN
+                <input value={editingVariant.ean} onChange={(event) => onPatchVariant(editingVariant.combinationKey, { ean: event.target.value })} />
+              </label>
+              <label>SKU
+                <input value={editingVariant.sku} onChange={(event) => onPatchVariant(editingVariant.combinationKey, { sku: event.target.value })} />
+              </label>
+              <label>Price
+                <input inputMode="decimal" value={editingVariant.price} onChange={(event) => onPatchVariant(editingVariant.combinationKey, { price: event.target.value })} />
+              </label>
+              <label>Image URL
+                <input value={editingVariant.imageUrl} onChange={(event) => onPatchVariant(editingVariant.combinationKey, { imageUrl: event.target.value, mediaAssets: event.target.value.trim() ? [{ type: "IMAGE", location: event.target.value.trim() }] : [] })} />
+              </label>
+              <label className="variant-upload-button">
+                <Plus size={15} />
+                {uploadingKey === editingVariant.combinationKey ? "Uploading..." : "Upload / replace image"}
+                <input type="file" accept="image/*" onChange={(event) => void uploadVariantImage(editingVariant.combinationKey, event.target.files?.[0] ?? null)} />
+              </label>
+              {editingVariant.generationError ? <p className="attribute-field-error">{editingVariant.generationError}</p> : null}
+            </div>
+          </aside>
+        </div>
+      ) : null}
+      {fullscreenImage ? (
+        <div className="variant-fullscreen-backdrop" onClick={() => setFullscreenImage(null)} role="dialog" aria-modal="true">
+          <button className="variant-fullscreen-close" type="button" onClick={() => setFullscreenImage(null)} aria-label="Close fullscreen image"><X size={20} /></button>
+          <figure className="variant-fullscreen-figure" onClick={(event) => event.stopPropagation()}>
+            <img src={fullscreenImage.src} alt="" />
+            {fullscreenImage.label ? <figcaption>{fullscreenImage.label}</figcaption> : null}
+          </figure>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -1994,6 +3034,7 @@ function ErrorDrawer({ open, errors, onClose }: { open: boolean; errors: ParsedS
 function StickyActionBar({
   onReject,
   onSave,
+  onRegenerate,
   onApprove,
   onSubmit,
   approved,
@@ -2004,6 +3045,7 @@ function StickyActionBar({
 }: {
   onReject: () => void;
   onSave: () => void;
+  onRegenerate: () => void;
   onApprove: () => void;
   onSubmit: () => void;
   approved: boolean;
@@ -2021,6 +3063,7 @@ function StickyActionBar({
       <div className="product-review-action-buttons">
         <button className="danger-btn" type="button" onClick={onReject} disabled={disabled}>Reject</button>
         <button className="secondary-btn" type="button" onClick={onSave} disabled={disabled}>Save Draft</button>
+        <button className="secondary-btn" type="button" onClick={onRegenerate} disabled={disabled}>Regenerate AI</button>
         <button className="primary-btn" type="button" onClick={onApprove} disabled={disabled}>{approved ? "Approved" : "Approve Product"}</button>
         {allApproved ? <button className="primary-btn product-review-submit-btn" type="button" onClick={onSubmit} disabled={disabled}>Send to OTTO</button> : null}
       </div>
@@ -2063,18 +3106,20 @@ function BulkSelectionBar({ count, onBulkEdit, onApprove, onReject, onClear }: {
 function BulkAttributeRow({ row, options, onChange, onRemove }: { row: BulkAttributePatch; options: CategoryAttributeOption[]; onChange: (patch: Partial<BulkAttributePatch>) => void; onRemove: () => void }) {
   const [attributeMenuOpen, setAttributeMenuOpen] = useState(false);
   const selectedOption = options.find((item) => normalizeFieldToken(item.name) === normalizeFieldToken(row.name));
-  const valuesListId = `bulk-attribute-values-${row.rowId}`;
   const query = normalizeFieldToken(row.name);
+  const valueOptions = selectedOption?.allowedValues ?? [];
   const visibleOptions = options.filter((item) => {
     if (!query || selectedOption) return true;
     return normalizeFieldToken(`${item.name} ${attributeDisplayName(item)} ${attributeDisplayDescription(item)} ${item.type ?? ""} ${item.relevance ?? ""} ${item.unit ?? ""}`).includes(query);
   }).slice(0, 80);
   const selectAttribute = (option: CategoryAttributeOption) => {
+    const allowedValues = option.allowedValues ?? [];
     onChange({
       name: option.name,
       attributeId: String(option.attributeId ?? option.id ?? "") || undefined,
       attributeKey: option.attributeKey || undefined,
       unit: option.unit || undefined,
+      value: allowedValues.length === 1 ? allowedValues[0] : allowedValues.includes(row.value) ? row.value : "",
     });
     setAttributeMenuOpen(false);
   };
@@ -2123,8 +3168,14 @@ function BulkAttributeRow({ row, options, onChange, onRemove }: { row: BulkAttri
       </div> : null}
     </div>
     <div>
-      <input list={valuesListId} value={row.value} onChange={(event) => onChange({ value: event.target.value })} placeholder={selectedOption?.unit ? `Value in ${selectedOption.unit}` : "Value"} aria-label="Value" />
-      <datalist id={valuesListId}>{(selectedOption?.allowedValues ?? []).map((value) => <option key={value} value={value} label={selectedOption ? attributeAllowedValueLabel(selectedOption, value) : value} />)}</datalist>
+      {valueOptions.length > 0 ? (
+        <select value={valueOptions.includes(row.value) ? row.value : ""} onChange={(event) => onChange({ value: event.target.value })} aria-label="Value">
+          <option value="">Choose value</option>
+          {valueOptions.map((value) => <option key={value} value={value}>{selectedOption ? attributeAllowedValueLabel(selectedOption, value) : value}</option>)}
+        </select>
+      ) : (
+        <input value={row.value} onChange={(event) => onChange({ value: event.target.value })} placeholder={selectedOption?.unit ? `Value in ${selectedOption.unit}` : "Value"} aria-label="Value" />
+      )}
     </div>
     <button type="button" onClick={onRemove} aria-label="Remove attribute"><Trash2 size={16} /></button>
   </div>;
@@ -2188,6 +3239,7 @@ export default function CreatorPage() {
   const [products, setProducts] = useState<Record<string, unknown>[]>([]);
   const [aiCategoryByIndex, setAiCategoryByIndex] = useState<Record<number, AiCategoryReview>>({});
   const [categoryDisplayByValue, setCategoryDisplayByValue] = useState<Record<string, string>>({});
+  const [categoryGroupDisplayByValue, setCategoryGroupDisplayByValue] = useState<Record<string, string>>({});
   const [selectedIndex, setSelectedIndex] = useState<number>(0);
   const [workflowStep, setWorkflowStep] = useState<WorkflowStep>("categories");
   const [currentStep, setCurrentStep] = useState<string>("prepare_initializing");
@@ -2236,6 +3288,7 @@ export default function CreatorPage() {
   const [approvedComparisonRowIndexes, setApprovedComparisonRowIndexes] = useState<number[]>([]);
   const [rejectedReviewRowIndexes, setRejectedReviewRowIndexes] = useState<number[]>([]);
   const [selectedReviewRowIndexes, setSelectedReviewRowIndexes] = useState<number[]>([]);
+  const imageGenerationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [bulkModifiedRowIndexes, setBulkModifiedRowIndexes] = useState<number[]>([]);
   const [bulkToast, setBulkToast] = useState<{ message: string; error: boolean } | null>(null);
   const [reviewQueueFilter, setReviewQueueFilter] = useState<ReviewQueueFilter>("all");
@@ -2369,17 +3422,20 @@ export default function CreatorPage() {
     if (liveRows.length > 0 && nextState === "IN_PROGRESS") {
       if (currentStepName === "building_category_preview" && liveRows.length < liveCategoryRowsCountRef.current) return;
       if (currentStepName === "building_category_preview") liveCategoryRowsCountRef.current = liveRows.length;
-      setProducts(liveRows);
+      const nextRows = currentStepName.startsWith("ai_enrichment")
+        ? mergeLiveProductRows(liveRows, products)
+        : liveRows.map((product) => asRecord(product));
+      setProducts(nextRows);
       // Partial products are compacted and can move to another array index while
       // parallel normalization is still running. Rebuild the index-based review
       // map from the same snapshot so stale categories cannot follow old indexes.
       setAiCategoryByIndex(
         Object.fromEntries(
-          liveRows.map((product, index) => [index, readAiCategoryReview(asRecord(product))]),
+          nextRows.map((product, index) => [index, readAiCategoryReview(asRecord(product))]),
         ),
       );
     }
-    if ((nextState === "DONE" || nextState === "FAILED") && (currentStepName === "otto_create_done" || currentStepName === "availability_done" || currentStepName === "otto_create_failed")) {
+    if ((nextState === "DONE" || nextState === "FAILED") && (currentStepName === "otto_create_done" || currentStepName === "availability_done" || currentStepName === "otto_create_failed" || currentStepName === "final_validation_failed")) {
       const update = asRecord(parsed?.otto_update_result);
       const failed = asRecord(parsed?.otto_failed_result);
       const failedCount = Number(update.failed ?? 0);
@@ -2395,40 +3451,29 @@ export default function CreatorPage() {
         failed: failedCount,
       });
 
-      const resultErrors = Array.isArray(failed.results) ? failed.results : [];
-      const ottoErrorRows: OttoErrorRow[] = resultErrors.flatMap((entry) => {
-        const rec = asRecord(entry);
-        const variation = String(rec.variation ?? "unknown");
-        const errs = Array.isArray(rec.errors) ? rec.errors : [];
-        return errs.map((err) => {
-          const errRec = asRecord(err);
-          return {
-            variation,
-            code: String(errRec.code ?? "error"),
-            title: String(errRec.title ?? "Unknown error"),
-            jsonPath: String(errRec.jsonPath ?? ""),
-          };
-        });
-      });
-      const nextErrors = availabilityErrors.length > 0 ? availabilityErrors : ottoErrorRows;
+      const ottoErrorRows = ottoErrorsFromPayload(failed);
+      const nextErrors = availabilityErrors.length > 0 ? (availabilityErrors as OttoErrorRow[]) : ottoErrorRows;
       setOttoErrors(nextErrors);
       setTableStatusPhase("result");
 
       if (nextState === "FAILED" || failedCount > 0 || nextErrors.length > 0) {
         setState("error");
-        setIssues(nextErrors.length > 0 ? nextErrors.map((item) => `${item.variation}: ${item.code}`) : (Array.isArray(parsed?.issues) ? parsed.issues : [`OTTO process ${ottoPid || "-"} failed`]));
+        const parsedIssues = Array.isArray(parsed?.issues) ? parsed.issues.map((item) => String(item)) : [];
+        setIssues(nextErrors.length > 0 ? nextErrors.map((item) => `${item.variation}: ${item.code}: ${item.title}`) : (parsedIssues.length > 0 ? parsedIssues : [`OTTO process ${ottoPid || "-"} failed`]));
         setUiMessage(currentStepName === "availability_done" ? "Availability завершен с ошибками." : "Загрузка завершена с ошибками.");
         return;
       }
 
-      setState("success");
-      setIssues([]);
-      setUiMessage(`Загружено товаров: ${parsed?.products_count ?? succeededCount}. Availability отправлен.`);
+      resetCreatorWorkspace("Успешно загружено.", "success");
+      void clearBackendProcess(processId);
       return;
     }
 
     if (nextState === "DONE") {
-      const rows = Array.isArray(parsed?.products) ? parsed.products : [];
+      const rawRows = Array.isArray(parsed?.products) ? parsed.products : [];
+      const rows = currentStepName === "ai_enrichment_done"
+        ? mergeLiveProductRows(rawRows, products)
+        : rawRows.map((product) => asRecord(product));
       setProducts(rows);
       if (currentStepName === "ai_enrichment_done") {
         applyFrontendDraft(parsed, { preserveWorkflowStep: true });
@@ -2957,10 +4002,12 @@ export default function CreatorPage() {
         if (!active || !response.ok) return;
         const nextEntries: Record<string, string[]> = {};
         const nextDisplayByValue: Record<string, string> = {};
+        const nextGroupDisplayByValue: Record<string, string> = {};
         const categoriesByGroupKey = new Map<string, string[]>();
         for (const item of Array.isArray(parsed?.items) ? parsed.items : []) {
           const group = String(item.categoryGroup ?? "").trim();
           if (!group) continue;
+          nextGroupDisplayByValue[group] = labelWithRu(group, item.categoryGroupRu);
           const categories = Array.isArray(item.categories)
             ? item.categories.filter((category): category is string => typeof category === "string" && category.trim().length > 0)
             : [];
@@ -2970,7 +4017,7 @@ export default function CreatorPage() {
           if (Array.isArray(item.categoriesDisplay)) {
             for (const displayItem of item.categoriesDisplay) {
               const value = String(displayItem.name ?? "").trim();
-              const label = String(displayItem.displayName ?? displayItem.nameRu ?? displayItem.name ?? "").trim();
+              const label = labelWithRu(value, displayItem.nameRu);
               if (value && label) nextDisplayByValue[value] = label;
             }
           }
@@ -2980,6 +4027,7 @@ export default function CreatorPage() {
         }
         setCategoryOptionsByGroup((prev) => ({ ...prev, ...nextEntries }));
         setCategoryDisplayByValue((prev) => ({ ...prev, ...nextDisplayByValue }));
+        setCategoryGroupDisplayByValue((prev) => ({ ...prev, ...nextGroupDisplayByValue }));
       } catch {
         if (!active) return;
       }
@@ -3076,7 +4124,10 @@ export default function CreatorPage() {
   const allFilteredRowsSelected = filteredRows.length > 0 && filteredRows.every((row) => selectedCategoryIndexSet.has(row.index));
   const missingCategoryCount = rows.filter((row) => !skippedCategoryIndexSet.has(row.index) && !row.selectedCategory.trim()).length;
   const isEnrichmentLoading = processState === "IN_PROGRESS" && currentStep.startsWith("ai_enrichment");
-  const isCategoryStage = !isEnrichmentLoading && workflowStep === "categories" && (products.length > 0 || processState === "IN_PROGRESS");
+  const isOttoSubmitLoading =
+    processState === "IN_PROGRESS" &&
+    (currentStep.startsWith("otto_create") || currentStep.startsWith("availability"));
+  const isCategoryStage = !isEnrichmentLoading && !isOttoSubmitLoading && workflowStep === "categories" && (products.length > 0 || processState === "IN_PROGRESS");
   const selectedConfirmableCount = useMemo(
     () =>
       selectedCategoryRowIndexes.filter((index) => {
@@ -3158,11 +4209,11 @@ export default function CreatorPage() {
       .map((row) => {
         const reviewStatus: ProductReviewStatus = rejectedReviewIndexSet.has(row.index)
           ? "rejected"
-          : bulkModifiedIndexSet.has(row.index) || (categoryChangeHistoryByIndex[row.index]?.length ?? 0) > 0
-              ? "modified"
-              : approvedComparisonIndexSet.has(row.index)
-                ? "approved"
-                : "pending";
+          : approvedComparisonIndexSet.has(row.index)
+              ? "approved"
+              : bulkModifiedIndexSet.has(row.index) || (categoryChangeHistoryByIndex[row.index]?.length ?? 0) > 0
+                  ? "modified"
+                  : "pending";
         return { ...row, reviewStatus };
       })
       .filter((row) => {
@@ -3173,11 +4224,11 @@ export default function CreatorPage() {
   }, [rows, reviewSearchQuery, reviewQueueFilter, rejectedReviewIndexSet, approvedComparisonIndexSet, bulkModifiedIndexSet, categoryChangeHistoryByIndex]);
   const selectedReviewStatus: ProductReviewStatus = rejectedReviewIndexSet.has(selectedIndex)
     ? "rejected"
-    : bulkModifiedIndexSet.has(selectedIndex) || (categoryChangeHistoryByIndex[selectedIndex]?.length ?? 0) > 0
-        ? "modified"
-        : approvedComparisonIndexSet.has(selectedIndex)
-          ? "approved"
-          : "pending";
+    : approvedComparisonIndexSet.has(selectedIndex)
+        ? "approved"
+        : bulkModifiedIndexSet.has(selectedIndex) || (categoryChangeHistoryByIndex[selectedIndex]?.length ?? 0) > 0
+            ? "modified"
+            : "pending";
   const selectedReviewRowForRender = useMemo<ProductReviewRow | null>(() => {
     const row = rowByIndex.get(selectedIndex);
     return row ? { ...row, reviewStatus: selectedReviewStatus } : null;
@@ -3217,16 +4268,25 @@ export default function CreatorPage() {
       const option = categoryAttributeByName.get(normalizeFieldToken(name));
       const rawValues = Array.isArray(attr.values) ? attr.values.map((value) => String(value)) : [];
       const values = rawValues.join(", ");
+      const variantKind: AttributeCard["variantKind"] = isColorVariantAttribute(name) ? "color" : isMaterialVariantAttribute(name) ? "material" : null;
       const displayValues = option
         ? rawValues.map((value) => attributeAllowedValueLabel(option, value) || value).join(", ")
         : values;
       return {
         index,
         name,
-        displayName: name,
+        displayName: option ? attributeDisplayName(option) : name,
         values,
+        valueList: rawValues,
         displayValues,
+        allowedValues: option?.allowedValues ?? [],
+        multiValue: Boolean(option?.multiValue),
+        variantKind,
+        option,
         group: readAttributeGroup(name),
+        layout: attributeFieldLayout(name),
+        controlKind: attributeControlKind(name, values),
+        sortRank: attributeLayoutRank(name),
       };
     });
   }, [selectedAttributes, categoryAttributeByName]);
@@ -3453,6 +4513,22 @@ export default function CreatorPage() {
       setRuntimeCopyErrorField(field);
       window.setTimeout(() => setRuntimeCopyErrorField((current) => (current === field ? null : current)), 1200);
     }
+  }
+
+  function persistProductsDraftNow(nextProducts: Record<string, unknown>[]) {
+    if (!hydratedDraft || !processId || nextProducts.length === 0) return;
+    if (processState === "IN_PROGRESS") return;
+    productsDraftSaveSkippedRef.current = true;
+    void fetch(`/api/products/create-from-fabric/${encodeURIComponent(processId)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        products: nextProducts,
+      }),
+      cache: "no-store",
+    }).catch(() => {
+      // Debounced autosave will retry later.
+    });
   }
 
   function updateSelected(path: string[], value: string) {
@@ -3688,7 +4764,13 @@ export default function CreatorPage() {
     setEditingDraft(sourceValue);
   }
 
-  function saveAttributeEdit() {
+  function saveAttributeEdit(attributeIndex?: number, value?: string) {
+    if (typeof attributeIndex === "number") {
+      updateAttributeField(attributeIndex, "values", value ?? "");
+      setEditingAttribute(null);
+      setEditingDraft("");
+      return;
+    }
     if (!editingAttribute) return;
     updateAttributeField(editingAttribute.index, editingAttribute.field, editingDraft);
     setEditingAttribute(null);
@@ -3746,6 +4828,155 @@ export default function CreatorPage() {
     });
     setEditingAttribute(null);
     setEditingDraft("");
+  }
+
+  function patchSelectedVariant(combinationKey: string, patch: Partial<ProductVariantDraft>) {
+    const copy = [...products];
+    const current = asRecord(copy[selectedIndex]);
+    if (Object.keys(current).length > 0) {
+      const variants = readProductVariants(current).map((variant) =>
+        variant.combinationKey === combinationKey
+          ? updateVariantPayloadFields({ ...variant, ...patch })
+          : variant,
+      );
+      copy[selectedIndex] = { ...current, variants };
+      setProducts(copy);
+      persistProductsDraftNow(copy);
+    }
+    setBulkModifiedRowIndexes((current) => Array.from(new Set([...current, selectedIndex])).sort((left, right) => left - right));
+    setApprovedComparisonRowIndexes((current) => current.filter((index) => index !== selectedIndex));
+  }
+
+  function generateVariantsForSelectedProduct() {
+    const copy = [...products];
+    const current = asRecord(copy[selectedIndex]);
+    if (Object.keys(current).length === 0) return;
+    const result = generateLocalVariantsForProduct(current, categoryAttributes);
+    copy[selectedIndex] = result.product;
+    const createdLabel = result.createdCount + (result.sourceCreated ? 1 : 0);
+    setUiMessage(
+      `Variants: ${result.preview.totalCombinations} combinations, added ${createdLabel}.`,
+    );
+    setProducts(copy);
+    persistProductsDraftNow(copy);
+    setBulkModifiedRowIndexes((current) => Array.from(new Set([...current, selectedIndex])).sort((left, right) => left - right));
+    setApprovedComparisonRowIndexes((current) => current.filter((index) => index !== selectedIndex));
+  }
+
+  function deleteSelectedVariant(combinationKey: string) {
+    patchSelectedVariant(combinationKey, { active: false });
+  }
+
+  async function runVariantImageGeneration(combinationKey: string) {
+    const currentProduct = asRecord(products[selectedIndex]);
+    const variant = readProductVariants(currentProduct).find((item) => item.combinationKey === combinationKey);
+    if (!variant) return;
+    const requestId = stableVariantImageRequestId(selectedIndex, combinationKey);
+    const recoverableImageUrl = `/generated-media/${requestId}.jpg`;
+    patchSelectedVariant(combinationKey, {
+      status: "generating_image",
+      generationError: undefined,
+    });
+    try {
+      const response = await fetch("/v1/products/variant-image/generate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          combination: variant.combination,
+          sourceImageUrl: firstImage(currentProduct),
+          requestId,
+        }),
+        cache: "no-store",
+      });
+      const parsed = await readJsonResponse<{ imageUrl?: string; imagePath?: string }>(response);
+      if (!response.ok || !parsed?.imageUrl) {
+        throw new Error(readApiErrorMessage(parsed, "Image generation failed.", response.status));
+      }
+      patchSelectedVariant(combinationKey, {
+        imageUrl: parsed.imageUrl,
+        mediaAssets: [{ type: "IMAGE", location: parsed.imageUrl }],
+        status: "ready",
+        generationError: undefined,
+      });
+    } catch (error) {
+      const recovered = await waitForGeneratedImage(recoverableImageUrl);
+      if (recovered) {
+        patchSelectedVariant(combinationKey, {
+          imageUrl: recoverableImageUrl,
+          mediaAssets: [{ type: "IMAGE", location: recoverableImageUrl }],
+          status: "ready",
+          generationError: undefined,
+        });
+        return;
+      }
+      const message = error instanceof Error && error.name === "AbortError"
+        ? "Image generation request was interrupted. Try again."
+        : error instanceof Error
+          ? error.message
+          : "Image generation failed.";
+      patchSelectedVariant(combinationKey, {
+        status: "failed",
+        generationError: message,
+      });
+    }
+  }
+
+  function regenerateSelectedVariant(combinationKey: string) {
+    imageGenerationQueueRef.current = imageGenerationQueueRef.current
+      .catch(() => undefined)
+      .then(() => runVariantImageGeneration(combinationKey));
+    return imageGenerationQueueRef.current;
+  }
+
+  function resetCreatorWorkspace(nextMessage: string, nextState: UploadState = "idle") {
+    window.localStorage.removeItem(CREATOR_DRAFT_KEY);
+    setState(nextState);
+    setUiMessage(nextMessage);
+    setIssues([]);
+    setProcessId("");
+    setProcessState("IDLE");
+    setProducts([]);
+    productsDraftSaveSkippedRef.current = false;
+    liveCategoryRowsCountRef.current = 0;
+    taskProgressSnapshotRef.current = { step: "", completed: 0, percent: 0 };
+    setAiCategoryByIndex({});
+    setSelectedIndex(0);
+    setWorkflowStep("categories");
+    setCurrentStep("prepare_initializing");
+    setStepElapsed(0);
+    setHeartbeatLag(0);
+    setStuckMessage("");
+    setOttoProcessId("");
+    setOttoSummary(null);
+    setOttoErrors([]);
+    setTableStatusPhase("pending");
+    setLastSubmitTotal(0);
+    setConfirmedCategoryRowIndexes([]);
+    setSkippedCategoryRowIndexes([]);
+    setCategoryChangeHistoryByIndex({});
+    setCategoryCommentsByIndex({});
+    setEditingCategoryIndex(null);
+    setDetailsCategoryIndex(null);
+    setApprovedComparisonRowIndexes([]);
+    setRejectedReviewRowIndexes([]);
+    setSelectedReviewRowIndexes([]);
+    setBulkModifiedRowIndexes([]);
+    setTaskProgress({ total: 0, completed: 0, percent: 0 });
+    setPreparationCounts({ source: 0, mapped: 0, payload: 0 });
+    setRealtimeMode("websocket");
+    setSelectedFabricId((prev) =>
+      prev && fabrics.some((item) => item.id === prev) ? prev : (fabrics[0]?.id ?? ""),
+    );
+  }
+
+  async function clearBackendProcess(processIdToClear: string) {
+    if (!processIdToClear) return;
+    await fetch(`/api/products/create-from-fabric/${encodeURIComponent(processIdToClear)}`, {
+      method: "DELETE",
+      cache: "no-store",
+    }).catch(() => {
+      // Client-side reset is still useful if the backend task was already gone.
+    });
   }
 
   async function handleCreate() {
@@ -3866,6 +5097,48 @@ export default function CreatorPage() {
     }
   }
 
+  async function regenerateAiProducts() {
+    if (!processId || products.length === 0) return;
+    setState("loading");
+    setProcessState("IN_PROGRESS");
+    setCurrentStep("ai_enrichment_queued");
+    setUiMessage("Перегенерирую AI-описания, bullet points и атрибуты из текущих данных...");
+    setOttoSummary(null);
+    setOttoErrors([]);
+    setIssues([]);
+    setTableStatusPhase("pending");
+    setApprovedComparisonRowIndexes([]);
+    setRejectedReviewRowIndexes([]);
+    setSelectedReviewRowIndexes([]);
+    setBulkModifiedRowIndexes([]);
+    setTaskProgress({ total: products.length, completed: 0, percent: 0 });
+
+    try {
+      const response = await fetch(`/api/products/create-from-fabric/${processId}/enrich`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          products,
+          controller,
+          factory_id: selectedFabricId,
+          regenerate: true,
+        }),
+        cache: "no-store",
+      });
+      const parsed = await readJsonResponse<EnrichPreparedResponse>(response);
+      if (!response.ok || parsed?.success === false) {
+        setState("error");
+        setUiMessage(readApiErrorMessage(parsed, "Не удалось перегенерировать товары", response.status));
+        return;
+      }
+      setRealtimeMode("websocket");
+      setUiMessage("Перегенерация запущена. Дожидаюсь нового AI-результата...");
+    } catch (caughtError) {
+      setState("error");
+      setUiMessage(caughtError instanceof Error ? `Ошибка запроса: ${caughtError.message}` : "Ошибка запроса");
+    }
+  }
+
   async function submitEditedProducts() {
     if (!processId || products.length === 0) return;
     if (!allComparisonsApproved) {
@@ -3873,12 +5146,25 @@ export default function CreatorPage() {
       setUiMessage(`Approve-ните сравнение для всех товаров: ${comparisonApprovedCount} из ${rows.length}.`);
       return;
     }
+    const variantIssues = collectVariantExportIssues(products);
+    if (variantIssues.length > 0) {
+      setState("error");
+      setOttoErrors(variantIssues);
+      setIssues(variantIssues.map((item) => `${item.variation}: ${item.code}`));
+      setTableStatusPhase("result");
+      setUiMessage(`Проверьте variants перед отправкой: ${variantIssues.length} ошибок.`);
+      return;
+    }
+    const submitTotal = expandedProductCount(products);
     setState("loading");
     setUiMessage("Загрузить: отправляю все продукты в OTTO...");
     setOttoSummary(null);
     setOttoErrors([]);
+    setProcessState("IN_PROGRESS");
+    setCurrentStep("otto_create_queued");
+    setTaskProgress({ total: submitTotal, completed: 0, percent: 0 });
     setTableStatusPhase("processing");
-    setLastSubmitTotal(products.length);
+    setLastSubmitTotal(submitTotal);
     try {
       const response = await fetch(`/api/products/create-from-fabric/${processId}`, {
         method: "POST",
@@ -3887,6 +5173,7 @@ export default function CreatorPage() {
           products,
           controller,
           factory_id: selectedFabricId,
+          media_base_url: window.location.origin,
         }),
         cache: "no-store",
       });
@@ -3899,7 +5186,7 @@ export default function CreatorPage() {
       if (parsed?.queued) {
         setProcessState(parsed?.process_state ?? "IN_PROGRESS");
         setCurrentStep("otto_create_queued");
-        setTaskProgress({ total: products.length, completed: 0, percent: 0 });
+        setTaskProgress({ total: submitTotal, completed: 0, percent: 0 });
         setRealtimeMode("websocket");
         setUiMessage("Загрузка в OTTO запущена. Дожидаюсь live-результата...");
         return;
@@ -3918,39 +5205,27 @@ export default function CreatorPage() {
         failed: Number(update.failed ?? 0),
       });
 
-      const resultErrors = Array.isArray(failed.results) ? failed.results : [];
-      const nextErrors: OttoErrorRow[] = resultErrors.flatMap((entry) => {
-        const rec = asRecord(entry);
-        const variation = String(rec.variation ?? "unknown");
-        const errs = Array.isArray(rec.errors) ? rec.errors : [];
-        return errs.map((err) => {
-          const errRec = asRecord(err);
-          return {
-            variation,
-            code: String(errRec.code ?? "error"),
-            title: String(errRec.title ?? "Unknown error"),
-            jsonPath: String(errRec.jsonPath ?? ""),
-          };
-        });
-      });
+      const nextErrors = ottoErrorsFromPayload(failed);
       setOttoErrors(nextErrors);
       setTableStatusPhase("result");
 
       if (failedCount > 0) {
         setState("error");
-        const nextIssues: string[] = nextErrors.map((item) => `${item.variation}: ${item.code}`);
+        const nextIssues: string[] = nextErrors.map((item) => `${item.variation}: ${item.code}: ${item.title}`);
         setIssues(nextIssues.length > 0 ? nextIssues : [`OTTO process ${ottoPid}: failed=${failedCount}`]);
         setUiMessage("Загрузка завершена с ошибками.");
         return;
       }
-      if (succeededCount < products.length) {
+      if (succeededCount < submitTotal) {
         setState("error");
-        setIssues([`Создано меньше товаров, чем ожидалось: ${succeededCount} из ${products.length}`]);
+        setIssues([`Создано меньше товаров, чем ожидалось: ${succeededCount} из ${submitTotal}`]);
         setUiMessage("Availability не запущен: не все товары подтверждены как созданные.");
         return;
       }
 
-      setUiMessage(`Товары созданы. Отправляю availability партиями по ${AVAILABILITY_CONCURRENCY}...`);
+      setUiMessage("Товары созданы. Жду, пока OTTO завершит создание variations...");
+      await sleep(AVAILABILITY_AFTER_CREATE_DELAY_MS);
+      setUiMessage(`Отправляю stock=20 и shipping profile партиями по ${AVAILABILITY_CONCURRENCY}...`);
       const availabilityResults = await runWithConcurrency(
         products,
         AVAILABILITY_CONCURRENCY,
@@ -4007,9 +5282,8 @@ export default function CreatorPage() {
         return;
       }
 
-      setState("success");
-      setUiMessage(`Загружено товаров: ${parsed?.products_count ?? products.length}. Availability отправлен для ${products.length}.`);
-      setIssues([]);
+      resetCreatorWorkspace("Успешно загружено.", "success");
+      void clearBackendProcess(processId);
     } catch (caughtError) {
       setState("error");
       setUiMessage(caughtError instanceof Error ? `Ошибка запроса: ${caughtError.message}` : "Ошибка запроса");
@@ -4018,48 +5292,8 @@ export default function CreatorPage() {
 
   async function handleClear() {
     const staleProcessId = processId;
-    window.localStorage.removeItem(CREATOR_DRAFT_KEY);
-    setState("idle");
-    setUiMessage("Состояние очищено.");
-    setIssues([]);
-    setProcessId("");
-    setProcessState("IDLE");
-    setProducts([]);
-    setAiCategoryByIndex({});
-    setSelectedIndex(0);
-    setWorkflowStep("categories");
-    setCurrentStep("prepare_initializing");
-    setStepElapsed(0);
-    setHeartbeatLag(0);
-    setStuckMessage("");
-    setOttoProcessId("");
-    setOttoSummary(null);
-    setOttoErrors([]);
-    setTableStatusPhase("pending");
-    setLastSubmitTotal(0);
-    setConfirmedCategoryRowIndexes([]);
-    setSkippedCategoryRowIndexes([]);
-    setCategoryChangeHistoryByIndex({});
-    setCategoryCommentsByIndex({});
-    setEditingCategoryIndex(null);
-    setDetailsCategoryIndex(null);
-    setApprovedComparisonRowIndexes([]);
-    setRejectedReviewRowIndexes([]);
-    setSelectedReviewRowIndexes([]);
-    setBulkModifiedRowIndexes([]);
-    setTaskProgress({ total: 0, completed: 0, percent: 0 });
-    setRealtimeMode("websocket");
-    setSelectedFabricId((prev) =>
-      prev && fabrics.some((item) => item.id === prev) ? prev : (fabrics[0]?.id ?? ""),
-    );
-    if (staleProcessId) {
-      await fetch(`/api/products/create-from-fabric/${encodeURIComponent(staleProcessId)}`, {
-        method: "DELETE",
-        cache: "no-store",
-      }).catch(() => {
-        // Client-side reset is still useful if the backend task was already gone.
-      });
-    }
+    resetCreatorWorkspace("Состояние очищено.");
+    await clearBackendProcess(staleProcessId);
   }
 
   if (isLoading || !hydratedDraft || isRestoringProcess) {
@@ -4092,12 +5326,12 @@ export default function CreatorPage() {
     >
       <div className={`creator-workspace creator-ref-workspace ${isCategoryStage ? "is-category-stage" : ""}`}>
         {error ? <p className="helper-banner">{error}</p> : null}
-        {isEnrichmentLoading ? (
+        {isEnrichmentLoading || isOttoSubmitLoading ? (
           <section className="product-enrichment-loading" role="status" aria-live="polite">
             <RefreshCw className="spin" size={34} aria-hidden="true" />
             <div>
-              <h2>Подготавливаем данные товаров</h2>
-              <p>Загружаем описания, атрибуты и изображения. Работа с товарами станет доступна после завершения подготовки.</p>
+              <h2>{isOttoSubmitLoading ? "Отправляем товары в OTTO" : "Подготавливаем данные товаров"}</h2>
+              <p>{isOttoSubmitLoading ? "Идёт создание товаров и отправка availability. Дождитесь результата обработки." : "Загружаем описания, атрибуты и изображения. Работа с товарами станет доступна после завершения подготовки."}</p>
             </div>
             <div className="product-enrichment-loading-progress" aria-hidden="true">
               <span style={{ width: `${Math.max(0, Math.min(100, Math.round(taskProgress.percent || 0)))}%` }} />
@@ -4307,10 +5541,6 @@ export default function CreatorPage() {
                 <p>{processState === "IN_PROGRESS" ? "Live updates включены. Новые строки появляются по мере готовности." : "Проверьте, подтвердите или измените категории перед генерацией данных."}</p>
               </div>
               <div className="category-check-panel-actions">
-                <button className="secondary-btn creator-category-reset-btn" type="button" onClick={handleClear}>
-                  <Trash2 size={14} aria-hidden="true" />
-                  Начать заново
-                </button>
                 <button className="primary-btn creator-category-submit-btn" type="button" onClick={confirmCategories} disabled={state === "loading" || filteredRows.length === 0 || missingCategoryCount > 0 || categoryKpis.requiresReview > 0}>
                   Создать товары
                   <ChevronRight size={16} aria-hidden="true" />
@@ -4323,6 +5553,7 @@ export default function CreatorPage() {
               categoryFilter={categoryFilter}
               setCategoryFilter={setCategoryFilter}
               categoryFilterOptions={categoryFilterOptions}
+              categoryGroupDisplayByValue={categoryGroupDisplayByValue}
               statusFilter={categoryStatusFilter}
               setStatusFilter={setCategoryStatusFilter}
               categorySort={categorySort}
@@ -4344,6 +5575,8 @@ export default function CreatorPage() {
             <CategoryCheckTable
               rows={pagedRows}
               categoryRowStatuses={categoryRowStatuses}
+              categoryDisplayByValue={categoryDisplayByValue}
+              categoryGroupDisplayByValue={categoryGroupDisplayByValue}
               selectedCategoryIndexSet={selectedCategoryIndexSet}
               allFilteredRowsSelected={allFilteredRowsSelected}
               toggleAllFilteredRows={toggleAllFilteredRows}
@@ -4367,6 +5600,7 @@ export default function CreatorPage() {
           <CategoryEditDrawer
             row={editingCategoryRow}
             categoryOptionsByGroup={categoryOptionsByGroup}
+            categoryGroupDisplayByValue={categoryGroupDisplayByValue}
             categoryDisplayByValue={categoryDisplayByValue}
             open={editingCategoryIndex !== null}
             onSave={(category, comment) => {
@@ -4378,6 +5612,8 @@ export default function CreatorPage() {
             open={isBulkCategoryDrawerOpen}
             count={selectedCategoryRowIndexes.length}
             groups={selectedCategoryGroups}
+            categoryGroupDisplayByValue={categoryGroupDisplayByValue}
+            categoryDisplayByValue={categoryDisplayByValue}
             options={bulkCategoryOptions}
             value={bulkCategoryValue}
             setValue={setBulkCategoryValue}
@@ -4390,6 +5626,7 @@ export default function CreatorPage() {
             statuses={categoryRowStatuses}
             status={detailsCategoryStatus}
             categoryOptionsByGroup={categoryOptionsByGroup}
+            categoryGroupDisplayByValue={categoryGroupDisplayByValue}
             categoryDisplayByValue={categoryDisplayByValue}
             open={detailsCategoryIndex !== null}
             onSave={(category, comment) => {
@@ -4436,7 +5673,12 @@ export default function CreatorPage() {
                   <div className="product-review-empty workspace"><strong>Select a product to review</strong></div>
                 ) : (
                   <>
-                    <ProductReviewHeader row={selectedReviewRowForRender} image={selectedImage} />
+                    <ProductReviewHeader
+                      row={selectedReviewRowForRender}
+                      image={selectedImage}
+                      categoryDisplayByValue={categoryDisplayByValue}
+                      categoryGroupDisplayByValue={categoryGroupDisplayByValue}
+                    />
                     {selectedProductErrors.length > 0 ? (
                       <button className="product-review-error-indicator" type="button" onClick={() => setIsErrorDrawerOpen(true)}>
                         <AlertCircle size={16} />
@@ -4572,25 +5814,36 @@ export default function CreatorPage() {
                       </div>
                     ) : null}
                     {editorTab === "attributes" ? (
-                      <AttributeEditor
-                        attributes={attributeCards}
-                        categoryAttributes={categoryAttributes}
-                        isLoadingCategoryAttributes={isLoadingCategoryAttributes}
-                        categoryAttributesError={categoryAttributesError}
-                        newAttributeName={newAttributeName}
-                        setNewAttributeName={setNewAttributeName}
-                        newAttributeValue={newAttributeValue}
-                        setNewAttributeValue={setNewAttributeValue}
-                        addAttribute={addAttribute}
-                        editingAttribute={editingAttribute}
-                        editingDraft={editingDraft}
-                        setEditingDraft={setEditingDraft}
-                        startAttributeEdit={startAttributeEdit}
-                        saveAttributeEdit={saveAttributeEdit}
-                        cancelAttributeEdit={cancelAttributeEdit}
-                        deleteAttribute={deleteAttribute}
-                        invalidAttributeNames={invalidAttributeNames}
-                      />
+                      <>
+                        <AttributeEditor
+                          attributes={attributeCards}
+                          basePrice={String(selectedStandardPrice.amount ?? "")}
+                          categoryAttributes={categoryAttributes}
+                          isLoadingCategoryAttributes={isLoadingCategoryAttributes}
+                          categoryAttributesError={categoryAttributesError}
+                          newAttributeName={newAttributeName}
+                          setNewAttributeName={setNewAttributeName}
+                          newAttributeValue={newAttributeValue}
+                          setNewAttributeValue={setNewAttributeValue}
+                          addAttribute={addAttribute}
+                          editingAttribute={editingAttribute}
+                          editingDraft={editingDraft}
+                          setEditingDraft={setEditingDraft}
+                          startAttributeEdit={startAttributeEdit}
+                          saveAttributeEdit={saveAttributeEdit}
+                          cancelAttributeEdit={cancelAttributeEdit}
+                          deleteAttribute={deleteAttribute}
+                          invalidAttributeNames={invalidAttributeNames}
+                        />
+                        <VariantManager
+                          product={selectedProduct}
+                          categoryAttributes={categoryAttributes}
+                          onGenerate={generateVariantsForSelectedProduct}
+                          onPatchVariant={patchSelectedVariant}
+                          onDeleteVariant={deleteSelectedVariant}
+                          onRegenerateVariant={regenerateSelectedVariant}
+                        />
+                      </>
                     ) : null}
                     {editorTab === "json" ? (
                       <section className="product-review-section">
@@ -4606,6 +5859,7 @@ export default function CreatorPage() {
             <StickyActionBar
               onReject={() => rejectReviewProduct(selectedIndex)}
               onSave={saveReviewDraft}
+              onRegenerate={regenerateAiProducts}
               onApprove={() => approveReviewProduct(selectedIndex)}
               onSubmit={submitEditedProducts}
               approved={approvedComparisonIndexSet.has(selectedIndex)}
@@ -4626,6 +5880,7 @@ export default function CreatorPage() {
             <CategoryEditDrawer
               row={rowByIndex.get(selectedIndex) ?? null}
               categoryOptionsByGroup={categoryOptionsByGroup}
+              categoryGroupDisplayByValue={categoryGroupDisplayByValue}
               categoryDisplayByValue={categoryDisplayByValue}
               open={editingCategoryIndex === selectedIndex}
               onSave={(category, comment) => saveCategoryEdit(selectedIndex, category, comment)}

@@ -58,10 +58,13 @@ services:
       ARQ_QUEUE_NAME: arq:otto-bot
       FRONTEND_APP_URL: http://127.0.0.1:3000
       UPLOADS_DIR: /app/uploads
+      GENERATED_MEDIA_ROOT: /app/storage/generated
+      GENERATED_MEDIA_URL_PREFIX: /generated-media
     ports:
       - "8000:8000"
     volumes:
       - uploads-data:/app/uploads
+      - generated-media-data:/app/storage/generated
       - backend-logs:/app/logs
     depends_on:
       postgres:
@@ -91,4 +94,5 @@ volumes:
   redis-data:
   mongodb-data:
   uploads-data:
+  generated-media-data:
   backend-logs:

@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 import httpx
 
+from app.core.logger import logging
 from app.core.otto_auth import OttoAuth
 from app.schemas.enums import Controller
 
@@ -18,6 +19,8 @@ from app.schemas.product_response import ProductCreateResponse, OttoCategoryResp
 
 # Helper
 from app.utils.helpers import to_json, parse
+
+LOGGER = logging.getLogger(__name__)
 
 
 class OttoClient:
@@ -154,9 +157,18 @@ class OttoClient:
         """GET a single product by SKU without raising, returning status and body."""
         return await self._request_with_status("GET", f"/v5/products/{sku}")
 
-    async def get_products(self, payload: dict | None = None) -> ProductResponse:
+    async def get_products(
+        self,
+        payload: dict | None = None,
+        controller: Controller | str = Controller.JV,
+    ) -> ProductResponse:
         """GET paginated products list."""
-        response = await self._request("GET", "/v5/products", params=payload)
+        response = await self._request(
+            "GET",
+            "/v5/products",
+            params=payload,
+            controller=controller,
+        )
         return ProductResponse.model_validate(response)
 
     async def get_active_products(self, payload: dict | None = None):
@@ -192,6 +204,12 @@ class OttoClient:
         controller: Controller | str = Controller.JV,
     ):
         """POST marketplace quantity for given sku(product)"""
+        request_payload = payload if isinstance(payload, list) else [payload]
+        LOGGER.info(
+            "step=otto_update_quantity_request controller=%s payload=%s",
+            controller.value if isinstance(controller, Controller) else controller,
+            request_payload,
+        )
         if isinstance(payload, list):
             return await self._request(
                 "POST",
@@ -213,6 +231,11 @@ class OttoClient:
         controller: Controller | str = Controller.JV,
     ):
         """POST product shippinig profile with given SKU"""
+        LOGGER.info(
+            "step=otto_update_delivery_request controller=%s payload=%s",
+            controller.value if isinstance(controller, Controller) else controller,
+            [payload],
+        )
         return await self._request(
             "POST",
             "/v1/availability/product-delivery-information",

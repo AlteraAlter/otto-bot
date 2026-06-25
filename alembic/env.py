@@ -14,6 +14,7 @@ import app.models.factory_task_states
 import app.models.jv_lister
 import app.models.product_attributes
 import app.models.product_import_tasks
+import app.models.product_variants
 import app.models.products
 import app.models.user_roles
 import app.models.users

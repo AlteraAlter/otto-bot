@@ -91,7 +91,7 @@ class AfterbuyClient:
         result = response.json()
         return FactoriesFetchResponse(factory=result.get("items"))
 
-    async def get_products_by_factory_id(
+    async def                   get_products_by_factory_id(
         self,
         session,
         controller,

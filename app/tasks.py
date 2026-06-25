@@ -81,12 +81,27 @@ async def submit_factory_products_task(
     )
 
 
+async def regenerate_product_variant_image_task(
+    ctx: dict[str, Any],
+    *,
+    variant_id: int,
+) -> None:
+    """Regenerate one product variant image without blocking API requests."""
+    del ctx
+    from app.database import SessionLocal
+    from app.services.variant_image_service import regenerate_variant_image
+
+    async with SessionLocal() as session:
+        await regenerate_variant_image(session, variant_id=variant_id)
+
+
 class WorkerSettings:
     functions = [
         sync_afterbuy_jv_lister_task,
         prepare_factory_products_task,
         enrich_factory_products_task,
         submit_factory_products_task,
+        regenerate_product_variant_image_task,
     ]
     redis_settings = redis_settings
     queue_name = settings.arq_queue_name

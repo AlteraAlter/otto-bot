@@ -10,6 +10,7 @@ from app.api.routes.afterbuy import router as afterbuy_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.products import otto_v5_router, router as products_router
 from app.api.routes.uploads import router as uploads_router
+from app.core.configs import settings
 
 app = FastAPI(title="FastAPI Template")
 app.include_router(auth_router)
@@ -21,6 +22,14 @@ app.include_router(uploads_router)
 uploads_dir = Path(os.getenv("UPLOADS_DIR", "storage/uploads"))
 uploads_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
+
+generated_media_dir = Path(settings.generated_media_root)
+generated_media_dir.mkdir(parents=True, exist_ok=True)
+app.mount(
+    settings.generated_media_url_prefix,
+    StaticFiles(directory=generated_media_dir),
+    name="generated-media",
+)
 
 
 @app.get("/health")
