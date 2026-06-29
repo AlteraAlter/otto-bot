@@ -34,6 +34,7 @@ from sqlalchemy.orm import selectinload
 
 from app.arq_app import enqueue_job
 from app.core.configs import settings
+from app.core.user_auth import UserAuth
 from app.database import SessionLocal, get_db
 from app.dependencies import (
     get_afterbuy_login,
@@ -44,9 +45,11 @@ from app.mapper.normalizer import build_normalized_product
 from app.models.attributes import Attribute
 from app.models.categories import Category
 from app.models.category_group import CategoryGroup
+from app.models.factory_task_states import FactoryTaskState
 from app.models.product_import_tasks import ProductImportTask
 from app.models.products import Product
 from app.models.variation_theme import VariationTheme
+from app.repository.user_repository import UserRepository
 from app.schemas.enums import Controller, RoleEnum, SortOrderEnum
 from app.schemas.product import (
     Availability,
@@ -157,6 +160,12 @@ FACTORY_QUEUED_STEPS = {
     "ai_enrichment_queued",
     "otto_create_queued",
 }
+FACTORY_FINAL_STEPS = {
+    "otto_create_done",
+    "availability_done",
+    "otto_create_failed",
+    "availability_failed",
+}
 FACTORY_FETCH_TIMEOUT_SEC = 120
 FACTORY_MAP_TIMEOUT_SEC = 1800
 FACTORY_NORMALIZE_TIMEOUT_SEC = 20
@@ -214,6 +223,64 @@ async def _get_factory_task_state(process_id: str) -> dict[str, Any] | None:
     return None
 
 
+async def _get_owned_factory_task_state(
+    process_id: str,
+    user_id: int,
+) -> dict[str, Any] | None:
+    task = await _get_factory_task_state(process_id)
+    if task is None:
+        return None
+
+    owner = task.get("created_by_user_id")
+    if owner is None:
+        async with SessionLocal() as session:
+            record = await session.get(FactoryTaskState, process_id)
+            owner = record.created_by_user_id if record is not None else None
+
+    if owner is None:
+        task["created_by_user_id"] = user_id
+        return await _save_factory_task_state(
+            process_id,
+            task,
+            created_by_user_id=user_id,
+        )
+
+    try:
+        owner_id = int(owner)
+    except (TypeError, ValueError):
+        return None
+
+    if owner_id != user_id:
+        return None
+    return task
+
+
+async def _get_websocket_user(websocket: WebSocket):
+    auth_header = websocket.headers.get("authorization", "")
+    token = ""
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+    if not token:
+        token = websocket.cookies.get("otto_access_token", "")
+    if not token:
+        return None
+
+    async with SessionLocal() as session:
+        auth = UserAuth(
+            user_repository=UserRepository(db=session),
+            secret_key=settings.jwt_secret_key,
+            algorithm=settings.jwt_algorithm,
+            access_token_expire_minutes=settings.jwt_access_token_expire_minutes,
+        )
+        try:
+            user = await auth.get_current_user(token)
+        except HTTPException:
+            return None
+    if user.role != RoleEnum.SEO:
+        return None
+    return user
+
+
 def _drop_stale_heartbeat_issues(task: dict[str, Any]) -> None:
     issues = task.get("issues")
     if not isinstance(issues, list):
@@ -224,6 +291,20 @@ def _drop_stale_heartbeat_issues(task: dict[str, Any]) -> None:
         if "без heartbeat" not in str(issue)
         and "Процесс был остановлен или потерян" not in str(issue)
     ]
+
+
+def _has_factory_task_products(task: dict[str, Any]) -> bool:
+    products = task.get("products")
+    return isinstance(products, list) and bool(products)
+
+
+def _is_empty_stale_factory_failure(task: dict[str, Any]) -> bool:
+    if task.get("status") != "FAILED":
+        return False
+    if _has_factory_task_products(task):
+        return False
+    current_step = str(task.get("current_step") or "")
+    return bool(task.get("stuck")) or current_step.startswith(("prepare_", "building_category_"))
 
 
 async def _mark_factory_task_stale_if_needed(
@@ -524,6 +605,121 @@ def _save_final_edited_payloads_snapshot(
     return file_path
 
 
+def _translation_lookup_key(value: Any) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _clean_translation(value: Any) -> str | None:
+    cleaned = str(value or "").strip()
+    return cleaned or None
+
+
+def _display_with_ru(value: Any, ru_value: Any) -> str:
+    original = str(value or "").strip()
+    ru = str(ru_value or "").strip()
+    if not original:
+        return ru
+    if not ru or original.casefold() == ru.casefold():
+        return original
+    return f"{original} ({ru})"
+
+
+def _collect_attribute_translation_fallbacks(
+    attributes: list[Attribute],
+) -> tuple[dict[str, dict[str, str]], dict[tuple[str, str], str]]:
+    attribute_fallbacks: dict[str, dict[str, str]] = {}
+    value_fallbacks: dict[tuple[str, str], str] = {}
+    for attr in attributes:
+        attr_key = _translation_lookup_key(attr.name)
+        if not attr_key:
+            continue
+        bucket = attribute_fallbacks.setdefault(attr_key, {})
+        attr_name_ru = _clean_translation(attr.name_ru)
+        if attr_name_ru and "nameRu" not in bucket:
+            bucket["nameRu"] = attr_name_ru
+        attr_description_ru = _clean_translation(attr.description_ru)
+        if attr_description_ru and "descriptionRu" not in bucket:
+            bucket["descriptionRu"] = attr_description_ru
+
+        for item in attr.allowed_values:
+            value_key = _translation_lookup_key(item.value)
+            value_ru = _clean_translation(item.value_ru)
+            if value_key and value_ru and (attr_key, value_key) not in value_fallbacks:
+                value_fallbacks[(attr_key, value_key)] = value_ru
+    return attribute_fallbacks, value_fallbacks
+
+
+async def _load_attribute_translation_fallbacks_for_names(
+    db: AsyncSession,
+    names: list[str],
+) -> tuple[dict[str, dict[str, str]], dict[tuple[str, str], str]]:
+    lowered_names = sorted({name.strip().lower() for name in names if name.strip()})
+    if not lowered_names:
+        return {}, {}
+    result = await db.execute(
+        select(Attribute)
+        .options(selectinload(Attribute.allowed_values))
+        .where(func.lower(Attribute.name).in_(lowered_names))
+    )
+    return _collect_attribute_translation_fallbacks(
+        list(result.scalars().unique().all())
+    )
+
+
+def _attribute_payload(
+    attr: Attribute,
+    attribute_fallbacks: dict[str, dict[str, str]],
+    value_fallbacks: dict[tuple[str, str], str],
+    *,
+    is_variation_theme: bool | None = None,
+) -> dict[str, Any]:
+    attr_key = _translation_lookup_key(attr.name)
+    fallback = attribute_fallbacks.get(attr_key, {})
+    name_ru = _clean_translation(attr.name_ru) or fallback.get("nameRu")
+    description_ru = (
+        _clean_translation(attr.description_ru) or fallback.get("descriptionRu")
+    )
+    allowed_values = sorted(
+        {item.value for item in attr.allowed_values if item.value},
+        key=str.casefold,
+    )
+    allowed_values_display = sorted(
+        [
+            {
+                "value": item.value,
+                "valueRu": _clean_translation(item.value_ru)
+                or value_fallbacks.get(
+                    (attr_key, _translation_lookup_key(item.value))
+                ),
+                "displayValue": item.value,
+            }
+            for item in attr.allowed_values
+            if item.value
+        ],
+        key=lambda item: str(item["displayValue"]).casefold(),
+    )
+    payload: dict[str, Any] = {
+        "id": attr.id,
+        "attributeId": attr.id,
+        "attributeKey": str(attr.id),
+        "name": attr.name,
+        "nameRu": name_ru,
+        "displayName": _display_with_ru(attr.name, name_ru),
+        "description": attr.description,
+        "descriptionRu": description_ru,
+        "displayDescription": description_ru or attr.description,
+        "type": attr.type,
+        "multiValue": attr.multi_value,
+        "relevance": attr.relevance,
+        "unit": attr.unit,
+        "allowedValues": allowed_values,
+        "allowedValuesDisplay": allowed_values_display,
+    }
+    if is_variation_theme is not None:
+        payload["isVariationTheme"] = is_variation_theme
+    return payload
+
+
 async def _load_category_group_contexts() -> dict[str, dict[str, Any]]:
     async with SessionLocal() as session:
         result = await session.execute(
@@ -537,6 +733,10 @@ async def _load_category_group_contexts() -> dict[str, dict[str, Any]]:
             .order_by(CategoryGroup.name.asc())
         )
         groups = result.scalars().unique().all()
+        all_attributes = [attr for group in groups for attr in group.attributes]
+        attribute_fallbacks, value_fallbacks = _collect_attribute_translation_fallbacks(
+            all_attributes
+        )
 
         contexts: dict[str, dict[str, Any]] = {}
         for group in groups:
@@ -559,30 +759,7 @@ async def _load_category_group_contexts() -> dict[str, dict[str, Any]]:
             attributes = []
             for attr in group.attributes:
                 attributes.append(
-                    {
-                        "name": attr.name,
-                        "nameRu": attr.name_ru,
-                        "displayName": attr.name_ru or attr.name,
-                        "description": attr.description,
-                        "descriptionRu": attr.description_ru,
-                        "displayDescription": attr.description_ru or attr.description,
-                        "type": attr.type,
-                        "multiValue": attr.multi_value,
-                        "relevance": attr.relevance,
-                        "unit": attr.unit,
-                        "allowedValues": [
-                            item.value for item in attr.allowed_values if item.value
-                        ],
-                        "allowedValuesDisplay": [
-                            {
-                                "value": item.value,
-                                "valueRu": item.value_ru,
-                                "displayValue": item.value,
-                            }
-                            for item in attr.allowed_values
-                            if item.value
-                        ],
-                    }
+                    _attribute_payload(attr, attribute_fallbacks, value_fallbacks)
                 )
             contexts[group.name] = {
                 "categoryGroup": group.name,
@@ -1824,40 +2001,18 @@ async def get_db_category_attributes(
             )
         ).all()
     )
+    attribute_fallbacks, value_fallbacks = await _load_attribute_translation_fallbacks_for_names(
+        db,
+        [attr.name for attr in group.attributes if attr.name],
+    )
 
     items = [
-        {
-            "id": attr.id,
-            "attributeId": attr.id,
-            "attributeKey": str(attr.id),
-            "name": attr.name,
-            "nameRu": attr.name_ru,
-            "displayName": attr.name_ru or attr.name,
-            "description": attr.description,
-            "descriptionRu": attr.description_ru,
-            "displayDescription": attr.description_ru or attr.description,
-            "type": attr.type,
-            "multiValue": attr.multi_value,
-            "relevance": attr.relevance,
-            "unit": attr.unit,
-            "isVariationTheme": attr.id in variation_attribute_ids,
-            "allowedValues": sorted(
-                {item.value for item in attr.allowed_values if item.value},
-                key=str.casefold,
-            ),
-            "allowedValuesDisplay": sorted(
-                [
-                    {
-                        "value": item.value,
-                        "valueRu": item.value_ru,
-                        "displayValue": item.value,
-                    }
-                    for item in attr.allowed_values
-                    if item.value
-                ],
-                key=lambda item: str(item["displayValue"]).casefold(),
-            ),
-        }
+        _attribute_payload(
+            attr,
+            attribute_fallbacks,
+            value_fallbacks,
+            is_variation_theme=attr.id in variation_attribute_ids,
+        )
         for attr in sorted(group.attributes, key=lambda item: item.name.casefold())
         if attr.name
     ]
@@ -1992,9 +2147,9 @@ async def generate_product_variant_image(
     for item in combination_payload:
         if not isinstance(item, dict):
             continue
-        name = str(item.get("name") or item.get("attributeName") or "").strip()
-        value = str(item.get("value") or "").strip()
-        attribute_id = str(item.get("attributeId") or item.get("attribute_id") or name).strip()
+        name = str(item.get("name")).strip()
+        value = str(item.get("value")).strip()
+        attribute_id = str(item.get("attributeId")).strip()
         if name and value:
             combination.append({"attributeId": attribute_id, "name": name, "value": value})
     if not combination:
@@ -2293,11 +2448,12 @@ async def create_xlsx_import_task(
 )
 async def list_product_import_tasks(
     db: AsyncSession = Depends(get_db),
-    _current_user=Depends(require_role([RoleEnum.SEO])),
+    current_user=Depends(require_role([RoleEnum.SEO])),
     limit: int = Query(default=20, ge=1, le=100),
 ):
     stmt = (
         select(ProductImportTask)
+        .where(ProductImportTask.created_by_user_id == current_user.id)
         .order_by(ProductImportTask.created_at.desc())
         .limit(limit)
     )
@@ -2313,10 +2469,10 @@ async def list_product_import_tasks(
 async def get_product_import_task(
     task_id: str,
     db: AsyncSession = Depends(get_db),
-    _current_user=Depends(require_role([RoleEnum.SEO])),
+    current_user=Depends(require_role([RoleEnum.SEO])),
 ):
     task = await db.get(ProductImportTask, task_id)
-    if task is None:
+    if task is None or task.created_by_user_id != current_user.id:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
             content=ProductCreationErrorResponse(
@@ -2402,60 +2558,95 @@ async def create_product_task_from_factory(
 @router.get("/tasks/create-from-factory/latest")
 async def get_latest_factory_prepare_task(
     db: AsyncSession = Depends(get_db),
-    _current_user=Depends(require_role([RoleEnum.SEO])),
+    current_user=Depends(require_role([RoleEnum.SEO])),
 ):
-    final_steps = {
-        "otto_create_done",
-        "availability_done",
-        "otto_create_failed",
-        "availability_failed",
-    }
     stmt = (
         select(FactoryTaskState)
         .where(
+            FactoryTaskState.created_by_user_id == current_user.id,
             or_(
                 FactoryTaskState.current_step.is_(None),
-                FactoryTaskState.current_step.notin_(final_steps),
+                FactoryTaskState.current_step.notin_(FACTORY_FINAL_STEPS),
             )
         )
         .order_by(FactoryTaskState.updated_at.desc())
-        .limit(1)
+        .limit(10)
     )
-    record = (await db.execute(stmt)).scalars().first()
-    if record is None:
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={"success": False, "message": "No saved creation draft"},
+    records = list((await db.execute(stmt)).scalars().all())
+    if not records:
+        legacy_stmt = (
+            select(FactoryTaskState)
+            .where(
+                FactoryTaskState.created_by_user_id.is_(None),
+                or_(
+                    FactoryTaskState.current_step.is_(None),
+                    FactoryTaskState.current_step.notin_(FACTORY_FINAL_STEPS),
+                ),
+            )
+            .order_by(FactoryTaskState.updated_at.desc())
+            .limit(10)
         )
+        records = list((await db.execute(legacy_stmt)).scalars().all())
 
-    process_id = record.process_id
-    task = await _get_factory_task_state(process_id)
-    if task is None:
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={"success": False, "message": "Saved creation draft not found"},
+    for record in records:
+        process_id = record.process_id
+        task = await _get_owned_factory_task_state(process_id, current_user.id)
+        if task is None:
+            continue
+        (
+            task,
+            heartbeat_lag_sec,
+            step_elapsed_sec,
+            is_stuck,
+        ) = await _mark_factory_task_stale_if_needed(process_id, task)
+        if _is_empty_stale_factory_failure(task):
+            continue
+        return {
+            "success": True,
+            "process_id": process_id,
+            "process_state": task.get("status"),
+            "heartbeat_lag_sec": heartbeat_lag_sec,
+            "step_elapsed_sec": step_elapsed_sec,
+            "stuck": is_stuck or bool(task.get("stuck")),
+            "stuck_message": task.get("stuck_message"),
+            **task,
+        }
+
+    return JSONResponse(
+        status_code=status.HTTP_404_NOT_FOUND,
+        content={"success": False, "message": "No saved creation draft"},
+    )
+
+
+@router.delete("/tasks/create-from-factory")
+async def delete_factory_prepare_tasks(
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_role([RoleEnum.SEO])),
+):
+    stmt = select(FactoryTaskState.process_id).where(
+        or_(
+            FactoryTaskState.created_by_user_id == current_user.id,
+            FactoryTaskState.created_by_user_id.is_(None),
         )
-    (
-        task,
-        heartbeat_lag_sec,
-        step_elapsed_sec,
-        is_stuck,
-    ) = await _mark_factory_task_stale_if_needed(process_id, task)
+    )
+    process_ids = [str(item) for item in (await db.execute(stmt)).scalars().all()]
+
+    for process_id in process_ids:
+        FACTORY_PREPARE_TASKS.pop(process_id, None)
+        await FACTORY_TASK_STATE_SERVICE.delete_task(process_id)
+
     return {
         "success": True,
-        "process_id": process_id,
-        "process_state": task.get("status"),
-        "heartbeat_lag_sec": heartbeat_lag_sec,
-        "step_elapsed_sec": step_elapsed_sec,
-        "stuck": is_stuck or bool(task.get("stuck")),
-        "stuck_message": task.get("stuck_message"),
-        **task,
+        "deleted": len(process_ids),
     }
 
 
 @router.get("/tasks/create-from-factory/{process_id}")
-async def get_factory_prepare_task(process_id: str):
-    task = await _get_factory_task_state(process_id)
+async def get_factory_prepare_task(
+    process_id: str,
+    current_user=Depends(require_role([RoleEnum.SEO])),
+):
+    task = await _get_owned_factory_task_state(process_id, current_user.id)
     if task is None:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -2485,7 +2676,20 @@ async def get_factory_prepare_task(process_id: str):
 
 
 @router.delete("/tasks/create-from-factory/{process_id}")
-async def delete_factory_prepare_task(process_id: str):
+async def delete_factory_prepare_task(
+    process_id: str,
+    current_user=Depends(require_role([RoleEnum.SEO])),
+):
+    task = await _get_owned_factory_task_state(process_id, current_user.id)
+    if task is None:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "success": False,
+                "message": "Task not found",
+                "process_id": process_id,
+            },
+        )
     FACTORY_PREPARE_TASKS.pop(process_id, None)
     await FACTORY_TASK_STATE_SERVICE.delete_task(process_id)
     return {
@@ -2500,7 +2704,7 @@ async def save_factory_prepare_task_draft(
     payload: dict[str, Any],
     current_user=Depends(require_role([RoleEnum.SEO])),
 ):
-    task = await _get_factory_task_state(process_id)
+    task = await _get_owned_factory_task_state(process_id, current_user.id)
     if task is None:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -2561,9 +2765,20 @@ async def save_factory_prepare_task_draft(
 @router.websocket("/tasks/create-from-factory/{process_id}/ws")
 async def factory_prepare_task_ws(websocket: WebSocket, process_id: str):
     await websocket.accept()
+    current_user = await _get_websocket_user(websocket)
+    if current_user is None:
+        await websocket.send_json(
+            {
+                "success": False,
+                "process_id": process_id,
+                "message": "Unauthorized",
+            }
+        )
+        await websocket.close(code=4401)
+        return
     try:
         while True:
-            task = await _get_factory_task_state(process_id)
+            task = await _get_owned_factory_task_state(process_id, current_user.id)
             if task is None:
                 await websocket.send_json(
                     {
@@ -3030,13 +3245,23 @@ async def enrich_factory_prepared_products(
     process_id: str,
     payload: dict[str, Any],
     product_service: ProductService = Depends(get_product_service),
+    current_user=Depends(require_role([RoleEnum.SEO])),
 ):
-    task = await _get_factory_task_state(process_id)
+    task = await _get_owned_factory_task_state(process_id, current_user.id)
     MAPPER_LOGGER.info(
         "step=category_approval_enrichment_start process_id=%s has_task=%s",
         process_id,
         task is not None,
     )
+    if task is None:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "success": False,
+                "message": "Task not found",
+                "process_id": process_id,
+            },
+        )
     products = payload.get("products")
     if not isinstance(products, list) or not products:
         return JSONResponse(
@@ -3085,7 +3310,11 @@ async def enrich_factory_prepared_products(
         task["progress_percent"] = 0
         task["products"] = products
         task["partial_products_by_index"] = {}
-        await _save_factory_task_state(process_id, task)
+        await _save_factory_task_state(
+            process_id,
+            task,
+            created_by_user_id=current_user.id,
+        )
 
     await enqueue_job(
         "enrich_factory_products_task",
@@ -3741,13 +3970,23 @@ async def submit_factory_prepared_products(
     process_id: str,
     payload: dict[str, Any],
     request: Request,
+    current_user=Depends(require_role([RoleEnum.SEO])),
 ):
-    task = await _get_factory_task_state(process_id)
+    task = await _get_owned_factory_task_state(process_id, current_user.id)
     MAPPER_LOGGER.info(
         "step=submit_final_products_queue_start process_id=%s has_task=%s",
         process_id,
         task is not None,
     )
+    if task is None:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "success": False,
+                "message": "Task not found",
+                "process_id": process_id,
+            },
+        )
     products = payload.get("products")
     if not isinstance(products, list) or not products:
         return JSONResponse(
@@ -3793,7 +4032,11 @@ async def submit_factory_prepared_products(
         task["progress_percent"] = 0
         task["products"] = submitted_products
         task["submitted_products"] = submitted_products
-        await _save_factory_task_state(process_id, task)
+        await _save_factory_task_state(
+            process_id,
+            task,
+            created_by_user_id=current_user.id,
+        )
 
     payload_for_job = dict(payload)
     payload_for_job["media_base_url"] = (

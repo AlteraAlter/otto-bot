@@ -1,11 +1,10 @@
 "use client";
 
-import Link from "next/link";
 import { FormEvent, useState } from "react";
 
 import { useCurrentUser } from "../hooks/use-current-user";
 import { readApiErrorMessage } from "../lib/api";
-import { AuthShell } from "../ui/auth-shell";
+import { AppWorkspaceShell } from "../ui/app-workspace-shell";
 import { PageLoadingShell } from "../ui/page-loading-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -89,19 +88,14 @@ export default function InternalOpsPage() {
     (!isSeoUser ? "Только SEO-пользователь может создавать новых пользователей." : null);
 
   return (
-    <AuthShell
+    <AppWorkspaceShell
+      activeHref="/"
+      currentUser={currentUser}
+      sectionLabel="Внутреннее"
       title="Внутреннее создание пользователей"
       description="Страница не видна в навигации и ведёт в тот же backend flow создания пользователя, что и остальные служебные сценарии."
-      sideContent={
-        <div className="auth-note">
-          <p>Текущий пользователь:</p>
-          <strong>{currentUser?.email ?? "неизвестно"}</strong>
-          <Link className="auth-link" href="/">
-            Назад в панель
-          </Link>
-        </div>
-      }
     >
+      <section className="workspace-form-panel internal-ops-panel">
       <form onSubmit={handleSubmit}>
         <div className="form-stack">
           <label className="field">
@@ -180,6 +174,7 @@ export default function InternalOpsPage() {
           </Button>
         </div>
       </form>
-    </AuthShell>
+      </section>
+    </AppWorkspaceShell>
   );
 }

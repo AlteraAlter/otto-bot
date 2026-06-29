@@ -93,24 +93,16 @@ export default function Home() {
       title="Управление товарами"
       description="Минималистичный обзор базы товаров с правильными полями из импортированной таблицы."
     >
-      <section className="topbar">
-        <div className="topbar-copy">
-          <p className="page-section-label">Каталог</p>
-          <h1>Управление товарами</h1>
-          <p>
-            Минималистичный обзор базы товаров с правильными полями из
-            импортированной таблицы.
-          </p>
-          <div className="hero-stats" aria-label="Ключевые показатели каталога">
-            {heroStats.map((item) => (
-              <div className={`hero-stat ${item.tone}`} key={item.label}>
-                <span>{item.label}</span>
-                <strong>{item.value}</strong>
-                <em>{item.caption}</em>
-                <i aria-hidden="true" />
-              </div>
-            ))}
-          </div>
+      <section className="workspace-summary-strip" aria-label="Ключевые показатели каталога">
+        <div className="hero-stats">
+          {heroStats.map((item) => (
+            <div className={`hero-stat ${item.tone}`} key={item.label}>
+              <span>{item.label}</span>
+              <strong>{item.value}</strong>
+              <em>{item.caption}</em>
+              <i aria-hidden="true" />
+            </div>
+          ))}
         </div>
       </section>
 

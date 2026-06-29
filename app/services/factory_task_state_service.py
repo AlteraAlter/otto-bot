@@ -66,6 +66,17 @@ class FactoryTaskStateService:
         task["process_id"] = process_id
         return task
 
+    @staticmethod
+    def _with_owner(
+        process_id: str,
+        payload: dict[str, Any],
+        created_by_user_id: int | None,
+    ) -> dict[str, Any]:
+        task = FactoryTaskStateService._normalize_task(process_id, payload)
+        if created_by_user_id is not None:
+            task["created_by_user_id"] = created_by_user_id
+        return task
+
     async def get_task(self, process_id: str) -> dict[str, Any] | None:
         mongo_collection = await self._get_mongo_collection()
         if mongo_collection is not None:
@@ -74,7 +85,11 @@ class FactoryTaskStateService:
                 if isinstance(document, dict):
                     payload = document.get("task_payload")
                     if isinstance(payload, dict):
-                        return self._normalize_task(process_id, payload)
+                        return self._with_owner(
+                            process_id,
+                            payload,
+                            document.get("created_by_user_id"),
+                        )
             except Exception:
                 self._logger.debug("mongo_get_failed process_id=%s", process_id)
 
@@ -93,7 +108,11 @@ class FactoryTaskStateService:
             record = await session.get(FactoryTaskState, process_id)
             if record is None:
                 return None
-            task = self._normalize_task(process_id, dict(record.task_payload or {}))
+            task = self._with_owner(
+                process_id,
+                dict(record.task_payload or {}),
+                record.created_by_user_id,
+            )
 
         await self.cache_task(process_id, task)
         return task
@@ -105,8 +124,22 @@ class FactoryTaskStateService:
         *,
         created_by_user_id: int | None = None,
     ) -> dict[str, Any]:
-        normalized = self._normalize_task(process_id, task)
         now = datetime.now(UTC)
+        owner_id = created_by_user_id
+        if owner_id is None:
+            raw_owner = task.get("created_by_user_id")
+            if raw_owner is not None:
+                try:
+                    owner_id = int(raw_owner)
+                except (TypeError, ValueError):
+                    owner_id = None
+
+        async with SessionLocal() as session:
+            record = await session.get(FactoryTaskState, process_id)
+            if owner_id is None and record is not None:
+                owner_id = record.created_by_user_id
+
+        normalized = self._with_owner(process_id, task, owner_id)
         status = str(normalized.get("status") or "IN_PROGRESS")
         current_step = normalized.get("current_step")
         controller = normalized.get("controller")
@@ -121,7 +154,7 @@ class FactoryTaskStateService:
             if record is None:
                 record = FactoryTaskState(
                     process_id=process_id,
-                    created_by_user_id=created_by_user_id,
+                    created_by_user_id=owner_id,
                     controller=str(controller) if controller else None,
                     factory_id=str(factory_id) if factory_id is not None else None,
                     status=status,
@@ -132,8 +165,8 @@ class FactoryTaskStateService:
                 )
                 session.add(record)
             else:
-                if created_by_user_id is not None and record.created_by_user_id is None:
-                    record.created_by_user_id = created_by_user_id
+                if owner_id is not None and record.created_by_user_id is None:
+                    record.created_by_user_id = owner_id
                 if controller:
                     record.controller = str(controller)
                 if factory_id is not None:
@@ -153,7 +186,7 @@ class FactoryTaskStateService:
                     {
                         "$set": {
                             "process_id": process_id,
-                            "created_by_user_id": created_by_user_id,
+                            "created_by_user_id": owner_id,
                             "controller": str(controller) if controller else None,
                             "factory_id": (
                                 str(factory_id) if factory_id is not None else None

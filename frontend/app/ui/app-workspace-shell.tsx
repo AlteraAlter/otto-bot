@@ -24,6 +24,7 @@ export function AppWorkspaceShell({
   activeHref,
   sectionLabel,
   title,
+  description,
   children,
 }: AppWorkspaceShellProps) {
   const router = useRouter();
@@ -177,6 +178,13 @@ export function AppWorkspaceShell({
         ) : null}
 
         <section className="workspace workspace-content" aria-label={`${sectionLabel}: ${title}`}>
+          <header className="workspace-page-head">
+            <div>
+              <p className="page-section-label">{sectionLabel}</p>
+              <h1>{title}</h1>
+              <p>{description}</p>
+            </div>
+          </header>
           {children}
         </section>
       </section>

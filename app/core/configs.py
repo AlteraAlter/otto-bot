@@ -52,8 +52,10 @@ class Settings(BaseSettings):
     generated_media_root: str = "storage/generated"
     generated_media_url_prefix: str = "/generated-media"
     openai_api_key: str | None = None
-    openai_image_model: str = "gpt-image-1"
+    openai_image_model: str = "gpt-image-2"
+    openai_image_fallback_model: str = "gpt-image-1"
     openai_image_size: str = "1536x1024"
+    openai_image_edit_size: str = "auto"
     openai_image_quality: str = "high"
     openai_image_background: str = "opaque"
     openai_image_output_format: str = "jpeg"

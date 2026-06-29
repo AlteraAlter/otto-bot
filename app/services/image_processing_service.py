@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app.core.configs import settings
 
-try:  # Pillow is optional in the current project dependency set.
+try:
     from PIL import Image
 except ImportError:  # pragma: no cover - depends on deployment image
     Image = None
@@ -17,14 +17,18 @@ def normalize_generated_image(
     *,
     target_size: tuple[int, int] | None = None,
 ) -> Path:
-    """Normalize generated image files when Pillow is available.
+    """Normalize generated image files.
 
     The byte limit is an internal configurable target, not an official OTTO
-    maximum. If Pillow is not installed, the original file is left untouched so
-    variant generation can still complete.
+    maximum. When target_size is provided, the saved image must match those
+    exact pixel dimensions.
     """
     source = Path(path)
-    if Image is None or not source.exists():
+    if Image is None:
+        if target_size is not None:
+            raise RuntimeError("Pillow is required to preserve source image dimensions.")
+        return source
+    if not source.exists():
         return source
 
     allowed_formats = {
@@ -42,9 +46,9 @@ def normalize_generated_image(
             rgb = background.convert("RGB")
         else:
             rgb = image.convert("RGB")
-        rgb = center_product_on_light_canvas(rgb)
 
-        if target_size is not None:
+        preserve_exact_size = target_size is not None
+        if preserve_exact_size:
             rgb = fit_image_on_canvas(rgb, target_size)
         else:
             max_side = max(1, int(settings.otto_image_max_side))
@@ -52,9 +56,15 @@ def normalize_generated_image(
             if max(width, height) > max_side:
                 rgb.thumbnail((max_side, max_side))
 
+        if preserve_exact_size and rgb.size != target_size:
+            raise ValueError(
+                f"Generated image size mismatch: {rgb.width}x{rgb.height}, "
+                f"expected {target_size[0]}x{target_size[1]}."
+            )
+
         min_width = max(1, int(settings.otto_image_min_width))
         min_height = max(1, int(settings.otto_image_min_height))
-        if rgb.width < min_width or rgb.height < min_height:
+        if not preserve_exact_size and (rgb.width < min_width or rgb.height < min_height):
             raise ValueError(
                 f"Image is too small: {rgb.width}x{rgb.height}, "
                 f"minimum {min_width}x{min_height}."
@@ -69,6 +79,14 @@ def normalize_generated_image(
                 quality -= 5
         else:
             rgb.save(target, format=target_format, optimize=True)
+
+    if target_size is not None:
+        with Image.open(target) as saved:
+            if saved.size != target_size:
+                raise ValueError(
+                    f"Saved generated image size mismatch: {saved.width}x{saved.height}, "
+                    f"expected {target_size[0]}x{target_size[1]}."
+                )
 
     return target
 
@@ -91,43 +109,4 @@ def fit_image_on_canvas(
     paste_x = max(0, (target_width - fitted.width) // 2)
     paste_y = max(0, (target_height - fitted.height) // 2)
     canvas.paste(fitted, (paste_x, paste_y))
-    return canvas
-
-
-def center_product_on_light_canvas(image: "Image.Image") -> "Image.Image":
-    """Center the non-background area on a light product-image canvas."""
-    if Image is None:
-        return image
-
-    rgb = image.convert("RGB")
-    pixels = rgb.load()
-    width, height = rgb.size
-    threshold = 246
-    min_x, min_y = width, height
-    max_x, max_y = -1, -1
-
-    for y in range(height):
-        for x in range(width):
-            r, g, b = pixels[x, y]
-            if r < threshold or g < threshold or b < threshold:
-                min_x = min(min_x, x)
-                min_y = min(min_y, y)
-                max_x = max(max_x, x)
-                max_y = max(max_y, y)
-
-    if max_x < min_x or max_y < min_y:
-        return rgb
-
-    margin_x = max(24, int(width * 0.04))
-    margin_y = max(24, int(height * 0.04))
-    crop_left = max(0, min_x - margin_x)
-    crop_top = max(0, min_y - margin_y)
-    crop_right = min(width, max_x + margin_x + 1)
-    crop_bottom = min(height, max_y + margin_y + 1)
-    crop = rgb.crop((crop_left, crop_top, crop_right, crop_bottom))
-
-    canvas = Image.new("RGB", (width, height), (255, 255, 255))
-    paste_x = max(0, (width - crop.width) // 2)
-    paste_y = max(0, (height - crop.height) // 2)
-    canvas.paste(crop, (paste_x, paste_y))
     return canvas

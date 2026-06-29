@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type Ref } from "react";
-import { AlertCircle, Box, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Funnel, Info, MoreVertical, Package, Pencil, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
+import { createPortal } from "react-dom";
+import { AlertCircle, Box, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Funnel, Info, MoreVertical, Package, Pencil, Plus, RefreshCw, Search, Sparkles, Trash2, X } from "lucide-react";
 
 import { readApiErrorMessage, readJsonResponse } from "../lib/api";
 import { useCurrentUser } from "../hooks/use-current-user";
@@ -109,7 +110,8 @@ type CategoryReviewStatus = "confirmed" | "requires_review" | "manually_changed"
 type CategoryStatusFilter = "all" | "requires_review" | "confirmed" | "manually_changed" | "skipped";
 type CategorySortOption = "title" | "status";
 type ProductReviewStatus = "pending" | "approved" | "modified" | "rejected";
-type ReviewQueueFilter = "all" | ProductReviewStatus;
+type ReviewQueueFilter = "all" | ProductReviewStatus | "errors";
+type ReviewQueueSort = "upload" | "unreviewed" | "modified" | "errors" | "approved" | "title-asc" | "title-desc" | "sku";
 type CategoryChangeEvent = {
   at: string;
   by: string;
@@ -381,15 +383,17 @@ function HoverPreviewImage({
   alt,
   className,
   block = false,
+  loading,
 }: {
   src: string;
   alt: string;
   className?: string;
   block?: boolean;
+  loading?: "eager" | "lazy";
 }) {
   return (
     <span className={`image-hover-source${block ? " is-block" : ""}`}>
-      <img className={className} src={src} alt={alt} />
+      <img className={className} src={src} alt={alt} loading={loading} />
     </span>
   );
 }
@@ -549,6 +553,24 @@ function readProductVariants(product: Record<string, unknown>): ProductVariantDr
     : [];
 }
 
+function patchVariantInProducts(
+  currentProducts: Record<string, unknown>[],
+  productIndex: number,
+  combinationKey: string,
+  patch: Partial<ProductVariantDraft>,
+): Record<string, unknown>[] {
+  const copy = [...currentProducts];
+  const current = asRecord(copy[productIndex]);
+  if (Object.keys(current).length === 0) return currentProducts;
+  const variants = readProductVariants(current).map((variant) =>
+    variant.combinationKey === combinationKey
+      ? updateVariantPayloadFields({ ...variant, ...patch })
+      : variant,
+  );
+  copy[productIndex] = { ...current, variants };
+  return copy;
+}
+
 function variationDimensionsForProduct(
   product: Record<string, unknown>,
   categoryAttributes: CategoryAttributeOption[],
@@ -561,8 +583,27 @@ function variationDimensionsForProduct(
     if (key) attributesByName.set(key, attribute);
   }
 
-  return categoryAttributes
-    .filter((option) => option.isVariationTheme)
+  const themeOptions = categoryAttributes.filter((option) => option.isVariationTheme);
+  if (themeOptions.length === 0) {
+    return attributes
+      .filter((attribute) => {
+        const name = String(attribute.name ?? "");
+        return isColorVariantAttribute(name) || isMaterialVariantAttribute(name);
+      })
+      .map((attribute) => {
+        const name = String(attribute.name ?? "");
+        const values = splitVariationValues(attribute.values ?? attribute.value ?? "");
+        return {
+          attributeId: String(attribute.attributeId ?? attribute.attribute_id ?? attribute.id ?? attribute.attributeKey ?? name).trim() || name,
+          name,
+          values,
+          fixed: values.length === 1,
+        };
+      })
+      .filter((dimension) => dimension.attributeId && dimension.name && dimension.values.length > 0);
+  }
+
+  return themeOptions
     .map((option) => {
       const attr = attributesByName.get(normalizeFieldToken(option.name));
       const values = splitVariationValues(attr?.values ?? attr?.value ?? "");
@@ -652,7 +693,7 @@ function buildLocalVariantPreview(
   const allKeys = new Set(combinations.map((item) => item.key));
   const issues: string[] = [];
   const themeCount = categoryAttributes.filter((item) => item.isVariationTheme).length;
-  if (themeCount === 0) issues.push("Для этой category group не настроены variationThemes.");
+  if (categoryAttributes.length > 0 && themeCount === 0) issues.push("Для этой category group не настроены variationThemes.");
   if (themeCount > 0 && dimensions.length === 0) issues.push("У variation attributes нет заполненных значений.");
   return {
     totalCombinations: combinations.length,
@@ -711,13 +752,64 @@ function generateLocalVariantsForProduct(
   };
 }
 
+function syncLocalVariantsForProduct(
+  product: Record<string, unknown>,
+  categoryAttributes: CategoryAttributeOption[],
+): Record<string, unknown> {
+  const preview = buildLocalVariantPreview(product, categoryAttributes);
+  if (preview.totalCombinations <= 1) {
+    if (readProductVariants(product).length > 0) return product;
+    const payload = { ...product };
+    delete payload.variants;
+    delete payload.variantSummary;
+    return payload;
+  }
+
+  const existing = readProductVariants(product);
+  const existingByKey = new Map(existing.map((variant) => [variant.combinationKey, variant]));
+  const baseImage = firstImage(product);
+  const basePrice = variantPriceFromProduct(product);
+  const syncedVariants: ProductVariantDraft[] = [];
+
+  for (const item of preview.combinations) {
+    const current = existingByKey.get(item.key);
+    if (current) {
+      syncedVariants.push(updateVariantPayloadFields({
+        ...current,
+        combination: item.combination,
+        productPayload: current.productPayload ?? applyCombinationToProductPayload(product, item.combination),
+      }));
+      continue;
+    }
+
+    const isSource = item.key === preview.sourceCombinationKey;
+    const imageUrl = baseImage;
+    syncedVariants.push(updateVariantPayloadFields({
+      id: item.key,
+      combinationKey: item.key,
+      combination: item.combination,
+      ean: isSource ? String(product.ean ?? "") : "",
+      sku: isSource ? String(product.sku ?? "") : "",
+      price: basePrice,
+      imageUrl,
+      mediaAssets: imageUrl ? [{ type: "IMAGE", location: imageUrl }] : [],
+      status: isSource && product.ean && product.sku ? "ready" : "pending_generation",
+      source: isSource ? "source" : "generated",
+      active: true,
+      productPayload: applyCombinationToProductPayload(product, item.combination),
+    }));
+  }
+
+  return { ...product, variants: syncedVariants };
+}
+
 function updateVariantPayloadFields(variant: ProductVariantDraft): ProductVariantDraft {
   const payload = variant.productPayload ? cloneProductRecord(variant.productPayload) : undefined;
   if (!payload) return variant;
   payload.sku = variant.sku;
   payload.ean = variant.ean || null;
-  const price = Number(variant.price);
-  if (!Number.isNaN(price)) {
+  const price = parseMoneyValue(variant.price);
+  if (price !== null) {
     payload.pricing = {
       ...asRecord(payload.pricing),
       standardPrice: {
@@ -807,7 +899,8 @@ function labelWithRu(value: unknown, ruValue?: unknown): string {
 }
 
 function attributeDisplayName(item: CategoryAttributeOption): string {
-  return labelWithRu(item.name, item.nameRu);
+  const labeled = labelWithRu(item.name, item.nameRu);
+  return labeled || String(item.displayName ?? item.name ?? "").trim();
 }
 
 function attributeDisplayDescription(item: CategoryAttributeOption): string {
@@ -816,7 +909,105 @@ function attributeDisplayDescription(item: CategoryAttributeOption): string {
 
 function attributeAllowedValueLabel(item: CategoryAttributeOption, value: string): string {
   const displayItem = item.allowedValuesDisplay?.find((option) => option.value === value);
-  return labelWithRu(displayItem?.value || value, displayItem?.valueRu);
+  const withRu = labelWithRu(displayItem?.value || value, displayItem?.valueRu);
+  return withRu || String(displayItem?.displayValue ?? value).trim();
+}
+
+function firstTextField(record: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = String(record[key] ?? "").trim();
+    if (value) return value;
+  }
+  return "";
+}
+
+function arrayTextField(record: Record<string, unknown>, keys: string[]): string[] {
+  for (const key of keys) {
+    const value = record[key];
+    if (Array.isArray(value)) return value.map((item) => String(item ?? "").trim());
+  }
+  return [];
+}
+
+function immediateAttributeOption(attr: Record<string, unknown>, name: string, rawValues: string[]): CategoryAttributeOption {
+  const nameRu = firstTextField(attr, ["nameRu", "attributeNameRu", "name_ru", "attribute_name_ru", "ruName"]);
+  const displayName = firstTextField(attr, ["displayName", "display_name"]) || labelWithRu(name, nameRu);
+  const attributeId = attr.attribute_id ?? attr.attributeId;
+  const normalizedAttributeId = typeof attributeId === "number" || typeof attributeId === "string" ? attributeId : null;
+  const explicitAllowedValues = arrayTextField(attr, ["allowedValues", "allowed_values"]);
+  const valueRuByValue = new Map<string, string>();
+  const valueDisplayByValue = new Map<string, string>();
+  const valuesRu = arrayTextField(attr, ["valuesRu", "valueRuList", "values_ru", "value_ru_list"]);
+  const displayValues = attr.valuesDisplay ?? attr.displayValues ?? attr.allowedValuesDisplay;
+
+  if (Array.isArray(displayValues)) {
+    for (const item of displayValues) {
+      const row = asRecord(item);
+      const value = firstTextField(row, ["value", "name", "original"]);
+      const key = normalizeFieldToken(value);
+      if (!key) continue;
+      const valueRu = firstTextField(row, ["valueRu", "nameRu", "ru", "translation"]);
+      const displayValue = firstTextField(row, ["displayValue", "displayName", "label"]);
+      if (valueRu) valueRuByValue.set(key, valueRu);
+      if (displayValue) valueDisplayByValue.set(key, displayValue);
+    }
+  } else if (displayValues && typeof displayValues === "object") {
+    for (const [value, label] of Object.entries(displayValues as Record<string, unknown>)) {
+      const key = normalizeFieldToken(value);
+      const text = String(label ?? "").trim();
+      if (key && text) valueDisplayByValue.set(key, text);
+    }
+  }
+
+  rawValues.forEach((value, index) => {
+    const key = normalizeFieldToken(value);
+    if (key && valuesRu[index]) valueRuByValue.set(key, valuesRu[index]);
+  });
+  if (rawValues.length === 1) {
+    const singleValueRu = firstTextField(attr, ["valueRu", "value_ru"]);
+    const key = normalizeFieldToken(rawValues[0]);
+    if (key && singleValueRu) valueRuByValue.set(key, singleValueRu);
+  }
+
+  return {
+    id: normalizedAttributeId,
+    attributeId: normalizedAttributeId,
+    attributeKey: String(attr.attribute_key ?? attr.attributeKey ?? "").trim() || null,
+    name,
+    nameRu: nameRu || null,
+    displayName,
+    allowedValues: explicitAllowedValues,
+    allowedValuesDisplay: (explicitAllowedValues.length ? explicitAllowedValues : rawValues).map((value) => {
+      const key = normalizeFieldToken(value);
+      return {
+        value,
+        valueRu: valueRuByValue.get(key) ?? null,
+        displayValue: valueDisplayByValue.get(key) ?? value,
+      };
+    }),
+  };
+}
+
+function mergeAttributeOption(preferred: CategoryAttributeOption, fallback: CategoryAttributeOption): CategoryAttributeOption {
+  const fallbackDisplayByValue = new Map((fallback.allowedValuesDisplay ?? []).map((item) => [normalizeFieldToken(String(item.value ?? "")), item]));
+  const preferredDisplay = preferred.allowedValuesDisplay ?? [];
+  const mergedDisplay = preferredDisplay.length
+    ? preferredDisplay.map((item) => {
+        const fallbackItem = fallbackDisplayByValue.get(normalizeFieldToken(String(item.value ?? "")));
+        return {
+          ...item,
+          valueRu: item.valueRu || fallbackItem?.valueRu || null,
+          displayValue: item.displayValue || fallbackItem?.displayValue || item.value || "",
+        };
+      })
+    : fallback.allowedValuesDisplay;
+  return {
+    ...preferred,
+    nameRu: preferred.nameRu || fallback.nameRu || null,
+    displayName: preferred.displayName || fallback.displayName,
+    allowedValues: preferred.allowedValues?.length ? preferred.allowedValues : fallback.allowedValues,
+    allowedValuesDisplay: mergedDisplay,
+  };
 }
 
 function isColorVariantAttribute(name: string): boolean {
@@ -1842,9 +2033,9 @@ function CategoryCategorySection({ row, categoryOptionsByGroup, categoryGroupDis
 function CategoryReviewNavigation({ position, total, onPrevious, onNext }: { position: number; total: number; onPrevious: () => void; onNext: () => void }) {
   return (
     <div className="category-review-navigation">
-      <button className="secondary-btn" type="button" onClick={onPrevious} disabled={position <= 0}><ChevronLeft size={16} /> Предыдущий</button>
+      <button className="ghost-btn" type="button" onClick={onPrevious} disabled={position <= 0}><ChevronLeft size={16} /> Предыдущий</button>
       <span className="category-review-position">{`${Math.max(0, position) + 1} / ${total}`}</span>
-      <button className="secondary-btn" type="button" onClick={onNext} disabled={position < 0 || position >= total - 1}>Следующий <ChevronRight size={16} /></button>
+      <button className="ghost-btn" type="button" onClick={onNext} disabled={position < 0 || position >= total - 1}>Следующий <ChevronRight size={16} /></button>
     </div>
   );
 }
@@ -2059,6 +2250,24 @@ function ProductReviewPage({ children }: { children: ReactNode }) {
   return <section className="product-review-page">{children}</section>;
 }
 
+const PRODUCT_REVIEW_ROW_HEIGHT = 74;
+const PRODUCT_REVIEW_OVERSCAN = 8;
+
+function productReviewRowKey(row: ProductReviewRow): string {
+  return row.productReference || row.sku || row.ean || String(row.index);
+}
+
+function productReviewCategory(row: ProductReviewRow): string {
+  return row.selectedCategory || row.aiCategory || row.sourceCategory || "";
+}
+
+function productReviewStatusIcon(status: ProductReviewStatus, errors: number): ReactNode {
+  if (status === "approved") return <Check size={13} aria-hidden="true" />;
+  if (status === "modified") return <Pencil size={12} aria-hidden="true" />;
+  if (status === "rejected" || errors > 0) return <AlertCircle size={13} aria-hidden="true" />;
+  return null;
+}
+
 function ProductListItem({
   row,
   active,
@@ -2072,93 +2281,204 @@ function ProductListItem({
   onOpen: () => void;
   onToggle: () => void;
 }) {
+  const statusTitle = row.errors > 0 ? `Errors: ${row.errors}` : reviewStatusLabel(row.reviewStatus);
   return (
-    <article className={`product-review-list-item ${active ? "active" : ""}`} data-product-index={row.index}>
+    <article className={`product-review-list-item ${active ? "active" : ""}`} data-product-index={row.index} data-product-key={productReviewRowKey(row)}>
       <span className="product-review-list-checkbox">
-        <input type="checkbox" checked={selected} onChange={onToggle} aria-label={`Select ${row.sku}`} />
+        <input type="checkbox" checked={selected} onChange={onToggle} onClick={(event) => event.stopPropagation()} aria-label={`Select ${row.sku}`} />
       </span>
       <button type="button" className="product-review-list-open" onClick={onOpen}>
-        {row.image ? <HoverPreviewImage src={row.image} alt="" /> : <span className="product-review-list-no-image">-</span>}
+        {row.image ? <HoverPreviewImage src={row.image} alt="" loading="lazy" /> : <span className="product-review-list-no-image">-</span>}
       </button>
       <button type="button" className="product-review-list-copy" onClick={onOpen}>
         <strong title={row.title}>{row.title || "-"}</strong>
-        <small>{`SKU: ${row.sku || "-"}`}</small>
-        <em>{row.selectedCategory || row.aiCategory || "-"}</em>
+        <small>{`SKU ${row.sku || "-"} · ${productReviewCategory(row) || "-"}`}</small>
       </button>
-      <span className={`product-review-status ${row.reviewStatus}`}>{reviewStatusLabel(row.reviewStatus)}</span>
+      <span className={`product-review-status ${row.reviewStatus}${row.errors > 0 ? " has-errors" : ""}`} title={statusTitle} aria-label={statusTitle}>
+        {productReviewStatusIcon(row.reviewStatus, row.errors)}
+      </span>
     </article>
   );
 }
 
 function ProductList({
+  allRows,
   rows,
   selectedIndex,
   selectedReviewIndexes,
   onSelect,
   onToggleSelect,
+  onClearSelection,
   searchRef,
   query,
   setQuery,
   filter,
   setFilter,
+  categoryFilter,
+  setCategoryFilter,
+  sort,
+  setSort,
 }: {
+  allRows: ProductReviewRow[];
   rows: ProductReviewRow[];
   selectedIndex: number;
   selectedReviewIndexes: number[];
   onSelect: (index: number) => void;
   onToggleSelect: (index: number) => void;
+  onClearSelection: () => void;
   searchRef: Ref<HTMLInputElement>;
   query: string;
   setQuery: (value: string) => void;
   filter: ReviewQueueFilter;
   setFilter: (value: ReviewQueueFilter) => void;
+  categoryFilter: string;
+  setCategoryFilter: (value: string) => void;
+  sort: ReviewQueueSort;
+  setSort: (value: ReviewQueueSort) => void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(520);
+  const selectedSet = useMemo(() => new Set(selectedReviewIndexes), [selectedReviewIndexes]);
+  const reviewedCount = useMemo(() => allRows.filter((row) => row.reviewStatus === "approved" || row.reviewStatus === "rejected").length, [allRows]);
+  const statusCounts = useMemo(() => ({
+    all: allRows.length,
+    modified: allRows.filter((row) => row.reviewStatus === "modified").length,
+    errors: allRows.filter((row) => row.errors > 0 || row.reviewStatus === "rejected").length,
+    approved: allRows.filter((row) => row.reviewStatus === "approved").length,
+    pending: allRows.filter((row) => row.reviewStatus === "pending").length,
+  }), [allRows]);
+  const categoryOptions = useMemo(() => Array.from(new Set(allRows.map(productReviewCategory).filter(Boolean))).sort((a, b) => a.localeCompare(b)), [allRows]);
+  const activePosition = rows.findIndex((row) => row.index === selectedIndex);
+  const totalHeight = rows.length * PRODUCT_REVIEW_ROW_HEIGHT;
+  const startIndex = Math.max(0, Math.floor(scrollTop / PRODUCT_REVIEW_ROW_HEIGHT) - PRODUCT_REVIEW_OVERSCAN);
+  const visibleCount = Math.ceil(viewportHeight / PRODUCT_REVIEW_ROW_HEIGHT) + PRODUCT_REVIEW_OVERSCAN * 2;
+  const endIndex = Math.min(rows.length, startIndex + visibleCount);
+  const visibleRows = rows.slice(startIndex, endIndex);
+  const offsetY = startIndex * PRODUCT_REVIEW_ROW_HEIGHT;
+  const quickFilters = [
+    { value: "all", label: "Все", count: statusCounts.all },
+    { value: "modified", label: "Изменённые", count: statusCounts.modified },
+    { value: "errors", label: "Ошибки", count: statusCounts.errors },
+    { value: "approved", label: "Проверенные", count: statusCounts.approved },
+    { value: "pending", label: "Непроверенные", count: statusCounts.pending },
+  ] satisfies Array<{ value: ReviewQueueFilter; label: string; count: number }>;
+  const visibleQuickFilters = quickFilters.filter((item) => item.value === "all" || item.count > 0);
 
   useEffect(() => {
     const container = listRef.current;
     if (!container) return;
-    const activeItem = listRef.current?.querySelector<HTMLElement>(`[data-product-index="${selectedIndex}"]`);
-    if (!activeItem) return;
-    const itemTop = activeItem.offsetTop;
-    const itemBottom = itemTop + activeItem.offsetHeight;
+    const position = rows.findIndex((row) => row.index === selectedIndex);
+    if (position < 0) return;
+    const itemTop = position * PRODUCT_REVIEW_ROW_HEIGHT;
+    const itemBottom = itemTop + PRODUCT_REVIEW_ROW_HEIGHT;
     const visibleTop = container.scrollTop;
     const visibleBottom = visibleTop + container.clientHeight;
     if (itemTop < visibleTop) {
-      container.scrollTo({ top: Math.max(0, itemTop - 8), behavior: "smooth" });
+      container.scrollTo({ top: Math.max(0, itemTop - 6), behavior: "smooth" });
     } else if (itemBottom > visibleBottom) {
-      container.scrollTo({ top: itemBottom - container.clientHeight + 8, behavior: "smooth" });
+      container.scrollTo({ top: itemBottom - container.clientHeight + 6, behavior: "smooth" });
     }
-  }, [selectedIndex, rows.length]);
+  }, [selectedIndex, rows]);
+
+  useLayoutEffect(() => {
+    const container = listRef.current;
+    if (!container) return;
+    const update = () => setViewportHeight(container.clientHeight || 520);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  const resetFilters = () => {
+    setQuery("");
+    setFilter("all");
+    setCategoryFilter("all");
+    setSort("upload");
+  };
+  const goToPosition = (position: number) => {
+    const target = rows[position];
+    if (target) onSelect(target.index);
+  };
+  const searchActive = query.trim().length > 0;
 
   return (
     <aside className="product-review-list">
       <div className="product-review-list-tools">
+        <div className="product-review-list-head">
+          <div>
+            <h3>Товары</h3>
+            <p>{`Проверено ${reviewedCount} · Осталось ${Math.max(0, allRows.length - reviewedCount)}`}</p>
+          </div>
+          <strong>{allRows.length.toLocaleString("ru-RU")}</strong>
+        </div>
+        {selectedReviewIndexes.length > 0 ? (
+          <div className="product-review-list-selected">
+            <span>{`Выбрано: ${selectedReviewIndexes.length}`}</span>
+            <button type="button" onClick={onClearSelection}>Снять выбор</button>
+          </div>
+        ) : null}
         <div className="creator-search-wrap">
           <Search size={16} className="creator-search-icon" />
-          <input ref={searchRef} className="creator-search-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search SKU, EAN, product" />
+          <input ref={searchRef} className="creator-search-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по SKU, EAN или названию" />
+          {query ? <button type="button" className="product-review-search-clear" onClick={() => setQuery("")} aria-label="Очистить поиск"><X size={14} /></button> : null}
         </div>
-        <select value={filter} onChange={(event) => setFilter(event.target.value as ReviewQueueFilter)}>
-          <option value="all">All</option>
-          <option value="pending">Pending</option>
-          <option value="approved">Approved</option>
-          <option value="modified">Modified</option>
-          <option value="rejected">Rejected</option>
-        </select>
+        {searchActive ? <div className="product-review-found">{`Найдено: ${rows.length}`}</div> : null}
+        <div className="product-review-filter-row">
+          <select value={filter} onChange={(event) => setFilter(event.target.value as ReviewQueueFilter)} aria-label="Фильтр статуса">
+            <option value="all">Все статусы</option>
+            <option value="pending">Непроверенные</option>
+            <option value="approved">Проверенные</option>
+            <option value="modified">Изменённые</option>
+            <option value="errors">Ошибки</option>
+          </select>
+          {categoryOptions.length > 0 ? (
+            <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)} aria-label="Фильтр категории">
+              <option value="all">Все категории</option>
+              {categoryOptions.map((category) => <option key={category} value={category}>{category}</option>)}
+            </select>
+          ) : null}
+          <select value={sort} onChange={(event) => setSort(event.target.value as ReviewQueueSort)} aria-label="Сортировка">
+            <option value="upload">Порядок загрузки</option>
+            <option value="unreviewed">Непроверенные сначала</option>
+            <option value="modified">Изменённые сначала</option>
+            <option value="errors">Ошибки сначала</option>
+            <option value="approved">Проверенные сначала</option>
+            <option value="title-asc">Название A-Z</option>
+            <option value="title-desc">Название Z-A</option>
+            <option value="sku">По SKU</option>
+          </select>
+        </div>
       </div>
-      <div ref={listRef} className="product-review-list-scroll">
+      <div ref={listRef} className="product-review-list-scroll" onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
         {rows.length === 0 ? (
-          <div className="product-review-empty"><strong>No products found</strong><span>Try changing filters or search query</span></div>
-        ) : rows.map((row) => (
-          <ProductListItem
-            key={row.index}
-            row={row}
-            active={selectedIndex === row.index}
-            selected={selectedReviewIndexes.includes(row.index)}
-            onOpen={() => onSelect(row.index)}
-            onToggle={() => onToggleSelect(row.index)}
-          />
-        ))}
+          <div className="product-review-empty">
+            <strong>Товары не найдены</strong>
+            <span>Измените запрос или сбросьте фильтры</span>
+            <button type="button" className="secondary-btn" onClick={resetFilters}>Сбросить фильтры</button>
+          </div>
+        ) : (
+          <div className="product-review-virtual-space" style={{ height: totalHeight }}>
+            <div className="product-review-virtual-window" style={{ transform: `translateY(${offsetY}px)` }}>
+              {visibleRows.map((row) => (
+                <ProductListItem
+                  key={productReviewRowKey(row)}
+                  row={row}
+                  active={selectedIndex === row.index}
+                  selected={selectedSet.has(row.index)}
+                  onOpen={() => onSelect(row.index)}
+                  onToggle={() => onToggleSelect(row.index)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="product-review-list-nav">
+        <button className="ghost-btn" type="button" onClick={() => goToPosition(activePosition - 1)} disabled={activePosition <= 0}><ChevronLeft size={16} />Предыдущий</button>
+        <span>{activePosition >= 0 ? `${activePosition + 1} / ${rows.length}` : `- / ${rows.length}`}</span>
+        <button className="ghost-btn" type="button" onClick={() => goToPosition(activePosition + 1)} disabled={activePosition < 0 || activePosition >= rows.length - 1}>Следующий<ChevronRight size={16} /></button>
       </div>
     </aside>
   );
@@ -2173,18 +2493,18 @@ function ProductReviewHeader({ row, image, categoryDisplayByValue, categoryGroup
   if (!row) {
     return <div className="product-review-empty workspace"><strong>Select a product to review</strong></div>;
   }
+  const group = categoryGroupDisplayByValue[row.aiCategoryGroup] || row.aiCategoryGroup || "-";
+  const category = categoryDisplayByValue[row.selectedCategory] || row.selectedCategory || "-";
   return (
     <section className="product-review-header">
       {image ? <HoverPreviewImage src={image} alt="" /> : <div className="product-review-header-empty">No image</div>}
-      <div>
+      <div className="product-review-header-main">
         <h2>{row.title || "-"}</h2>
-        <dl>
-          <div><dt>SKU</dt><dd>{row.sku || "-"}</dd></div>
-          <div><dt>EAN</dt><dd>{row.ean || "-"}</dd></div>
-          <div><dt>Price</dt><dd>{row.price || "-"}</dd></div>
-          <div><dt>Category</dt><dd>{categoryGroupDisplayByValue[row.aiCategoryGroup] || row.aiCategoryGroup || "-"}</dd></div>
-          <div><dt>Subcategory</dt><dd>{categoryDisplayByValue[row.selectedCategory] || row.selectedCategory || "-"}</dd></div>
-        </dl>
+        <p className="product-review-header-meta">{`SKU ${row.sku || "-"} · EAN ${row.ean || "-"} · ${group} / ${category}`}</p>
+      </div>
+      <div className="product-review-header-side">
+        <strong>{row.price || "-"}</strong>
+        <span className={`product-review-status ${row.reviewStatus}`}>{reviewStatusLabel(row.reviewStatus)}</span>
       </div>
     </section>
   );
@@ -2217,7 +2537,7 @@ function ReviewTabs({ value, setValue }: { value: EditorTab; setValue: (value: E
         ["diff", "Diff"],
         ["json", "JSON"],
       ].map(([key, label]) => (
-        <button key={key} className={value === key ? "active" : ""} type="button" onClick={() => setValue(key as EditorTab)}>{label}</button>
+        <button key={key} className={value === key ? "active" : ""} type="button" role="tab" aria-selected={value === key} onClick={() => setValue(key as EditorTab)}>{label}</button>
       ))}
     </div>
   );
@@ -2289,8 +2609,8 @@ function OverviewActionsMenu({ onEdit, onCopy, canCopy = true, copied = false }:
 }
 
 function AttributeValueChips({ values, option, onChange }: { values: string[]; option?: CategoryAttributeOption; onChange: (values: string[]) => void }) {
-  const [draft, setDraft] = useState("");
   const allowedValues = option?.allowedValues ?? [];
+  const [draft, setDraft] = useState("");
   const addValue = (raw: string) => {
     const next = raw.trim().replace(/,$/, "").trim();
     if (!next) return;
@@ -2306,37 +2626,47 @@ function AttributeValueChips({ values, option, onChange }: { values: string[]; o
   return (
     <div className={`attribute-chip-control${values.length > 1 ? " has-multiple" : ""}`}>
       <div className="attribute-chip-list">
-        {values.map((item) => (
-          <span className="attribute-chip" key={item}>
-            {option ? attributeAllowedValueLabel(option, item) : item}
-            <button type="button" onClick={() => removeValue(item)} aria-label={`Remove ${item}`}><X size={12} /></button>
-          </span>
-        ))}
         {allowedValues.length > 0 ? (
-          <select value="" onChange={(event) => addValue(event.target.value)} aria-label="Add value">
-            <option value="">Add value</option>
-            {availableOptions.map((item) => (
-              <option value={item} key={item}>{option ? attributeAllowedValueLabel(option, item) : item}</option>
+          <>
+            {values.map((item) => (
+              <span className="attribute-chip" key={item}>
+                {option ? attributeAllowedValueLabel(option, item) : item}
+                <button type="button" onClick={() => removeValue(item)} aria-label={`Remove ${item}`}><X size={12} /></button>
+              </span>
             ))}
-          </select>
+            <select value="" onChange={(event) => addValue(event.target.value)} aria-label="Add value">
+              <option value="">Add value</option>
+              {availableOptions.map((item) => (
+                <option value={item} key={item}>{option ? attributeAllowedValueLabel(option, item) : item}</option>
+              ))}
+            </select>
+          </>
         ) : (
-          <input
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === "Tab" || event.key === ",") {
-                event.preventDefault();
-                addValue(draft);
-              }
-              if (event.key === "Backspace" && !draft && values.length > 0) {
-                removeValue(values[values.length - 1]);
-              }
-              if (event.key === "Escape") setDraft("");
-            }}
-            onBlur={() => addValue(draft)}
-            placeholder=""
-            aria-label="Add value"
-          />
+          <>
+            {values.map((item) => (
+              <span className="attribute-chip" key={item}>
+                {option ? attributeAllowedValueLabel(option, item) : item}
+                <button type="button" onClick={() => removeValue(item)} aria-label={`Remove ${item}`}><X size={12} /></button>
+              </span>
+            ))}
+            <input
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === "Tab" || event.key === ",") {
+                  event.preventDefault();
+                  addValue(draft);
+                }
+                if (event.key === "Backspace" && !draft && values.length > 0) {
+                  removeValue(values[values.length - 1]);
+                }
+                if (event.key === "Escape") setDraft("");
+              }}
+              onBlur={() => addValue(draft)}
+              placeholder=""
+              aria-label="Value"
+            />
+          </>
         )}
       </div>
     </div>
@@ -2353,7 +2683,7 @@ function AttributeFieldCard({ attribute, onChange, onDelete, invalid }: {
   return (
     <article className={`attribute-form-field${invalid ? " is-invalid" : ""}${values.length > 1 ? " has-multiple-values" : ""}`}>
       <div className="attribute-form-field-head">
-        <span title={attribute.name}>{attribute.displayName || attribute.name || "Unnamed"}</span>
+        <span title={attribute.displayName || attribute.name || "Unnamed"}>{attribute.displayName || attribute.name || "Unnamed"}</span>
         <AttributeBadges invalid={invalid} />
         <AttributeActionsMenu onDelete={onDelete} value={attribute.values} />
       </div>
@@ -2484,135 +2814,79 @@ function buildAttributeVariantRows(attributes: AttributeCard[]): { dimensions: A
   return { dimensions, rows: additional, total: combinations.length, mainCombination: main?.combination ?? "", mainParts: main?.parts ?? [] };
 }
 
-function AttributeProductVariants({ attributes, basePrice }: { attributes: AttributeCard[]; basePrice: string }) {
+function AttributeProductVariants({ attributes, basePrice, onMaterialPriceChange }: { attributes: AttributeCard[]; basePrice: string; onMaterialPriceChange?: (materialValue: string, price: string) => void }) {
   const preview = useMemo(() => buildAttributeVariantRows(attributes), [attributes]);
-  const [drafts, setDrafts] = useState<Record<string, { sku: string; ean: string; price: string }>>({});
   const [priceAdjustments, setPriceAdjustments] = useState<Record<string, VariantPriceAdjustment>>({});
   const parsedBasePrice = useMemo(() => parseMoneyValue(basePrice), [basePrice]);
   const materialDimension = preview.dimensions.find((dimension) => isMaterialVariantAttribute(dimension.label));
   const priceRuleDimension = materialDimension ?? null;
 
-  useEffect(() => {
-    const keys = new Set(preview.rows.map((row) => row.key));
-    setDrafts((current) =>
-      Object.fromEntries(
-        Object.entries(current).filter(([key]) => keys.has(key)),
-      ),
-    );
-  }, [preview.rows]);
+  if (preview.rows.length === 0 || !priceRuleDimension) return null;
 
-  if (preview.rows.length === 0) return null;
-
-  const updateDraft = (key: string, patch: Partial<{ sku: string; ean: string; price: string }>) => {
-    setDrafts((current) => {
-      const previous = current[key] ?? { sku: "", ean: "", price: "" };
-      return { ...current, [key]: { ...previous, ...patch } };
-    });
-  };
-  const updatePriceAdjustment = (key: string, patch: Partial<VariantPriceAdjustment>) => {
-    setPriceAdjustments((current) => {
-      const previous = current[key] ?? { direction: "add", mode: "percent", value: "" };
-      return { ...current, [key]: { ...previous, ...patch } };
-    });
-  };
   const basePriceLabel = parsedBasePrice === null ? "0,00" : formatMoneyValue(parsedBasePrice);
-  const resultForPriceValue = (value: string, index: number) => {
+  const resultForPriceValue = (value: string, index: number, adjustments = priceAdjustments) => {
     if (parsedBasePrice === null) return "";
     if (!priceRuleDimension || index === 0) return basePriceLabel;
     const key = `${priceRuleDimension.key}:${normalizeFieldToken(value)}`;
-    const adjustment = priceAdjustments[key];
+    const adjustment = adjustments[key];
     const amount = parseMoneyValue(adjustment?.value);
     if (!adjustment || amount === null) return basePriceLabel;
     const delta = adjustment.mode === "percent" ? parsedBasePrice * (amount / 100) : amount;
     const next = adjustment.direction === "subtract" ? parsedBasePrice - delta : parsedBasePrice + delta;
     return formatMoneyValue(Math.max(0, next));
   };
+  const updatePriceAdjustment = (key: string, value: string, index: number, patch: Partial<VariantPriceAdjustment>) => {
+    setPriceAdjustments((current) => {
+      const previous = current[key] ?? { direction: "add", mode: "percent", value: "" };
+      const next = { ...current, [key]: { ...previous, ...patch } };
+      if (onMaterialPriceChange && index > 0) {
+        onMaterialPriceChange(value, resultForPriceValue(value, index, next));
+      }
+      return next;
+    });
+  };
 
   return (
     <section className="attribute-variants-panel">
-      <div className="attribute-variants-head">
+      <details className="attribute-price-rules" open>
+        <summary className="attribute-price-rules-head">
+          <span>
+            <h5>Price adjustments</h5>
+            <small>{`${priceRuleDimension.label} · Base price: ${basePriceLabel}`}</small>
+          </span>
+          <span className="attribute-price-rules-actions">
+            <span className="attribute-price-rules-count">{`${priceRuleDimension.values.length} rules`}</span>
+            <ChevronDown size={15} aria-hidden="true" />
+          </span>
+        </summary>
         <div>
-          <div className="attribute-variants-title-line">
-            <h4>Product variants <Info size={13} aria-hidden="true" /></h4>
-            <span className="attribute-variants-count">{`${preview.rows.length} variants`}</span>
-          </div>
-          <div className="attribute-main-product">
-            <p><strong>Main product:</strong></p>
-            <div className="attribute-main-chips">
-              {preview.mainParts.map((part) => (
-                <span key={`${part.key}:${part.value}`} title={`${part.label}: ${part.value}`}>
-                  <small>{part.label}:</small>
-                  <strong>{part.value}</strong>
-                </span>
-              ))}
-            </div>
-          </div>
-          <p className="attribute-variants-description">{`${preview.rows.length} additional variants generated from selected attributes`}</p>
-        </div>
-      </div>
-      {priceRuleDimension ? (
-        <details className="attribute-price-rules" open>
-          <summary className="attribute-price-rules-head">
-            <span>
-              <h5>Price adjustments</h5>
-              <small>{`Base price: ${basePriceLabel}`}</small>
-            </span>
-            <span className="attribute-price-rules-actions">
-              <span className="attribute-price-rules-count">{`${priceRuleDimension.values.length} rules`}</span>
-              <ChevronDown size={15} aria-hidden="true" />
-            </span>
-          </summary>
-          <div>
-            <div className="attribute-price-rule-row is-head"><span>Value</span><span>Adjustment</span><span>Result</span></div>
-            {priceRuleDimension.values.map((value, index) => {
-              const key = `${priceRuleDimension.key}:${normalizeFieldToken(value)}`;
-              const adjustment = priceAdjustments[key] ?? { direction: "add", mode: "percent", value: "" };
-              const isBase = index === 0;
-              return (
-                <label key={key} className={`attribute-price-rule-row${isBase ? " is-base" : ""}`}>
-                  <span>{value}</span>
-                  {isBase ? <em>Base price</em> : (
-                    <span className="attribute-price-rule-controls">
-                      <select value={adjustment.direction} onChange={(event) => updatePriceAdjustment(key, { direction: event.target.value as VariantPriceAdjustment["direction"] })} aria-label={`${value} price direction`}>
-                        <option value="add">+</option>
-                        <option value="subtract">-</option>
-                      </select>
-                      <input inputMode="decimal" value={adjustment.value} onChange={(event) => updatePriceAdjustment(key, { value: event.target.value })} placeholder="0" aria-label={`${value} price adjustment`} />
-                      <select value={adjustment.mode} onChange={(event) => updatePriceAdjustment(key, { mode: event.target.value as VariantPriceAdjustment["mode"] })} aria-label={`${value} price mode`}>
-                        <option value="percent">%</option>
-                        <option value="amount">€</option>
-                      </select>
-                    </span>
-                  )}
-                  <strong>{resultForPriceValue(value, index)}</strong>
-                </label>
-              );
-            })}
-          </div>
-        </details>
-      ) : null}
-      <div className="attribute-variants-table-meta"><span>{`Showing ${preview.rows.length} additional variants`}</span><span>{`${preview.rows.length} total`}</span></div>
-      <div className="attribute-variants-table">
-        <div className="attribute-variants-row is-head"><span>Variant combination</span><span>SKU</span><span>EAN</span><span>Price</span></div>
-        {preview.rows.map((row) => {
-          const draft = drafts[row.key] ?? { sku: "", ean: "", price: "" };
-          const calculatedPrice = applyVariantPriceAdjustments(parsedBasePrice, row, priceAdjustments);
-          return (
-            <div className="attribute-variants-row" key={row.key}>
-              <div className="attribute-variant-combination" aria-label={row.combination}>
-                {row.parts.map((part) => (
-                  <span key={`${part.key}:${part.value}`} title={`${part.label}: ${part.value}`}>
-                    {variantPartChipLabel(part, "row")}
+          <div className="attribute-price-rule-row is-head"><span>Value</span><span>Adjustment</span><span>Result</span></div>
+          {priceRuleDimension.values.map((value, index) => {
+            const key = `${priceRuleDimension.key}:${normalizeFieldToken(value)}`;
+            const adjustment = priceAdjustments[key] ?? { direction: "add", mode: "percent", value: "" };
+            const isBase = index === 0;
+            return (
+              <label key={key} className={`attribute-price-rule-row${isBase ? " is-base" : ""}`}>
+                <span>{value}</span>
+                {isBase ? <em>Base price</em> : (
+                  <span className="attribute-price-rule-controls">
+                    <select value={adjustment.direction} onChange={(event) => updatePriceAdjustment(key, value, index, { direction: event.target.value as VariantPriceAdjustment["direction"] })} aria-label={`${value} price direction`}>
+                      <option value="add">+</option>
+                      <option value="subtract">-</option>
+                    </select>
+                    <input inputMode="decimal" value={adjustment.value} onChange={(event) => updatePriceAdjustment(key, value, index, { value: event.target.value })} placeholder="0" aria-label={`${value} price adjustment`} />
+                    <select value={adjustment.mode} onChange={(event) => updatePriceAdjustment(key, value, index, { mode: event.target.value as VariantPriceAdjustment["mode"] })} aria-label={`${value} price mode`}>
+                      <option value="percent">%</option>
+                      <option value="amount">€</option>
+                    </select>
                   </span>
-                ))}
-              </div>
-              <input value={draft.sku} onChange={(event) => updateDraft(row.key, { sku: event.target.value })} placeholder="SKU" aria-label={`${row.combination} SKU`} />
-              <input type="text" inputMode="numeric" value={draft.ean} onChange={(event) => updateDraft(row.key, { ean: event.target.value })} placeholder="EAN" aria-label={`${row.combination} EAN`} />
-              <input type="text" inputMode="decimal" value={draft.price || calculatedPrice} onChange={(event) => updateDraft(row.key, { price: event.target.value })} placeholder="0,00" aria-label={`${row.combination} price`} />
-            </div>
-          );
-        })}
-      </div>
+                )}
+                <strong>{resultForPriceValue(value, index)}</strong>
+              </label>
+            );
+          })}
+        </div>
+      </details>
     </section>
   );
 }
@@ -2700,6 +2974,7 @@ function AttributesToolbar({ query, setQuery, group, setGroup, groups, onlyEmpty
 function AttributeEditor({
   attributes,
   basePrice,
+  onMaterialPriceChange,
   categoryAttributes,
   isLoadingCategoryAttributes,
   categoryAttributesError,
@@ -2719,6 +2994,7 @@ function AttributeEditor({
 }: {
   attributes: AttributeCard[];
   basePrice: string;
+  onMaterialPriceChange?: (materialValue: string, price: string) => void;
   categoryAttributes: CategoryAttributeOption[];
   isLoadingCategoryAttributes: boolean;
   categoryAttributesError: string;
@@ -2780,7 +3056,7 @@ function AttributeEditor({
       {filteredAttributes.length ? (
         <AttributeFieldsSection title="All attributes" items={filteredAttributes} editingAttribute={editingAttribute} editingDraft={editingDraft} setEditingDraft={setEditingDraft} startAttributeEdit={startAttributeEdit} saveAttributeEdit={saveAttributeEdit} cancelAttributeEdit={cancelAttributeEdit} deleteAttribute={deleteAttribute} invalidNames={invalidAttributeNames} />
       ) : <div className="attributes-empty-state">No attributes match these filters.</div>}
-      <AttributeProductVariants attributes={attributes} basePrice={basePrice} />
+      <AttributeProductVariants attributes={attributes} basePrice={basePrice} onMaterialPriceChange={onMaterialPriceChange} />
     </div>
   );
 }
@@ -2794,35 +3070,62 @@ function variantStatusLabel(status: VariantStatus): string {
   return "Draft";
 }
 
+function variantWorkflowStatus(variant: ProductVariantDraft, missing: boolean, imageUrl: string) {
+  if (variant.status === "generating_image") return { label: "Generating", tone: "generating" };
+  if (variant.status === "failed") return { label: "Failed", tone: "failed" };
+  if (missing) return { label: "Needs input", tone: "needs-input" };
+  if (!imageUrl) return { label: "Needs image", tone: "needs-image" };
+  return { label: "Ready", tone: "ready" };
+}
+
+function materialValueForVariant(variant: ProductVariantDraft): string {
+  return variant.combination.find((item) => isMaterialVariantAttribute(item.name))?.value.trim() || "";
+}
+
 function VariantManager({
   product,
   categoryAttributes,
-  onGenerate,
   onPatchVariant,
   onDeleteVariant,
   onRegenerateVariant,
 }: {
   product: Record<string, unknown>;
   categoryAttributes: CategoryAttributeOption[];
-  onGenerate: () => void;
   onPatchVariant: (combinationKey: string, patch: Partial<ProductVariantDraft>) => void;
   onDeleteVariant: (combinationKey: string) => void;
   onRegenerateVariant: (combinationKey: string) => void | Promise<void>;
 }) {
-  const variants = readProductVariants(product);
-  const activeVariants = variants.filter((variant) => variant.active);
   const preview = buildLocalVariantPreview(product, categoryAttributes);
+  const liveProduct = syncLocalVariantsForProduct(product, categoryAttributes);
+  const variants = readProductVariants(liveProduct);
+  const activeVariants = variants.filter((variant) => variant.active);
   const [editingKey, setEditingKey] = useState("");
   const [uploadingKey, setUploadingKey] = useState("");
   const [fullscreenImage, setFullscreenImage] = useState<{ src: string; label: string } | null>(null);
+  const [quickEdit, setQuickEdit] = useState<{ combinationKey: string; field: "ean" | "sku" } | null>(null);
   const editingVariant = variants.find((variant) => variant.combinationKey === editingKey) ?? null;
-  const columns = preview.variationAttributes.length > 0
-    ? preview.variationAttributes.map((item) => ({ attributeId: item.attributeId, name: item.name }))
-    : Array.from(
-      new Map(
-        variants.flatMap((variant) => variant.combination.map((item) => [item.attributeId, { attributeId: item.attributeId, name: item.name }] as const)),
-      ).values(),
-    );
+  const variableAttributeIds = new Set(preview.variationAttributes.filter((item) => !item.fixed).map((item) => item.attributeId));
+  const baseVariantPrice = variantPriceFromProduct(product);
+  const materialPriceRows = Array.from(
+    activeVariants.reduce((rows, variant) => {
+      const materialValue = materialValueForVariant(variant);
+      if (!materialValue) return rows;
+      const current = rows.get(materialValue);
+      rows.set(materialValue, {
+        value: materialValue,
+        count: (current?.count ?? 0) + 1,
+        price: current?.price ?? (variant.price || baseVariantPrice),
+      });
+      return rows;
+    }, new Map<string, { value: string; count: number; price: string }>()),
+  ).map(([, row]) => row);
+
+  function updateMaterialVariantPrices(materialValue: string, price: string) {
+    for (const variant of activeVariants) {
+      if (materialValueForVariant(variant) !== materialValue) continue;
+      onPatchVariant(variant.combinationKey, { price });
+    }
+  }
 
   async function uploadVariantImage(combinationKey: string, file: File | null) {
     if (!file) return;
@@ -2855,6 +3158,57 @@ function VariantManager({
     }
   }
 
+  function renderRequiredVariantField(variant: ProductVariantDraft, field: "ean" | "sku") {
+    const value = variant[field];
+    const isEditing = quickEdit?.combinationKey === variant.combinationKey && quickEdit.field === field;
+    if (isEditing) {
+      return (
+        <input
+          className="variant-inline-input"
+          autoFocus
+          value={value}
+          placeholder={field.toUpperCase()}
+          onChange={(event) => onPatchVariant(variant.combinationKey, field === "ean" ? { ean: event.target.value } : { sku: event.target.value })}
+          onBlur={() => setQuickEdit(null)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === "Escape") {
+              event.currentTarget.blur();
+            }
+          }}
+        />
+      );
+    }
+    if (value.trim()) {
+      return field === "sku" ? <code>{value}</code> : value;
+    }
+    return (
+      <button
+        className="variant-missing-chip"
+        type="button"
+        title="Значение не заполнено. Нажмите, чтобы исправить."
+        onClick={() => setQuickEdit({ combinationKey: variant.combinationKey, field })}
+      >
+        <AlertCircle size={13} />
+        Missing
+      </button>
+    );
+  }
+
+  function renderVariantCombination(variant: ProductVariantDraft) {
+    const variableItems = variant.combination.filter((item) => variableAttributeIds.has(item.attributeId));
+    const contextItems = variant.combination.filter((item) => !variableAttributeIds.has(item.attributeId));
+    const primaryItems = contextItems.length ? contextItems.slice(0, 2) : variant.combination.slice(0, 2);
+    const secondaryItems = variableItems.length ? variableItems : variant.combination.slice(primaryItems.length);
+    return (
+      <div className="variant-combination-cell" title={variant.combination.map((item) => `${item.name}: ${item.value}`).join(" · ")}>
+        <strong>{primaryItems.map((item) => item.value).join(" · ") || "-"}</strong>
+        {secondaryItems.length ? (
+          <span>{secondaryItems.map((item) => `${item.name}: ${item.value}`).join(" · ")}</span>
+        ) : null}
+      </div>
+    );
+  }
+
   useEffect(() => {
     if (!fullscreenImage) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2864,42 +3218,51 @@ function VariantManager({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [fullscreenImage]);
 
+  if (preview.totalCombinations <= 1) return null;
+
   return (
     <section className="product-review-section variant-manager">
       <div className="variant-manager-head">
         <div>
           <h3>Variants</h3>
           <p>
-            {preview.totalCombinations > 0
-              ? `Будет создано ${preview.totalCombinations} комбинаций, уже существует ${preview.existingCombinations}, будет добавлено ${preview.newCombinations}.`
-              : "Для текущих attributes нет доступной variation matrix."}
+            {`Показано ${activeVariants.length} актуальных комбинаций из текущих attributes.`}
           </p>
         </div>
-        <button className="primary-btn" type="button" onClick={onGenerate} disabled={preview.totalCombinations === 0}>
-          <RefreshCw size={15} />
-          Сгенерировать варианты
-        </button>
       </div>
       {preview.issues.length > 0 ? (
         <div className="variant-issues">
           {preview.issues.map((issue) => <span key={issue}>{issue}</span>)}
         </div>
       ) : null}
-      {preview.variationAttributes.length > 0 ? (
-        <div className="variant-theme-list">
-          {preview.variationAttributes.map((attribute) => (
-            <span key={attribute.attributeId}>
-              <strong>{attribute.name}</strong>
-              <small>{attribute.fixed ? "fixed" : `${attribute.values.length} values`}</small>
-            </span>
-          ))}
+      {materialPriceRows.length > 0 ? (
+        <div className="variant-material-price-panel">
+          <div>
+            <h4>Bezug price</h4>
+            <p>Цена применяется ко всем variants с выбранным Bezug.</p>
+          </div>
+          <div className="variant-material-price-grid">
+            {materialPriceRows.map((row) => (
+              <label key={row.value} className="variant-material-price-row">
+                <span>
+                  <strong>{row.value}</strong>
+                  <small>{`${row.count} variant${row.count === 1 ? "" : "s"}`}</small>
+                </span>
+                <input
+                  inputMode="decimal"
+                  value={row.price}
+                  onChange={(event) => updateMaterialVariantPrices(row.value, event.target.value)}
+                />
+              </label>
+            ))}
+          </div>
         </div>
       ) : null}
       <div className="variant-table-scroll">
         <table className="variant-table">
           <thead>
             <tr>
-              {columns.map((column) => <th key={column.attributeId}>{column.name}</th>)}
+              <th>Variant</th>
               <th>EAN</th>
               <th>SKU</th>
               <th>Price</th>
@@ -2910,31 +3273,55 @@ function VariantManager({
           </thead>
           <tbody>
             {activeVariants.length > 0 ? activeVariants.map((variant) => {
-              const valueById = new Map(variant.combination.map((item) => [item.attributeId, item.value]));
               const imageUrl = variant.imageUrl || variant.mediaAssets[0]?.location || "";
               const missing = !variant.sku.trim() || !variant.ean.trim();
+              const workflow = variantWorkflowStatus(variant, missing, imageUrl);
+              const isGenerating = variant.status === "generating_image";
               return (
-                <tr key={variant.combinationKey} className={missing ? "has-missing-fields" : ""}>
-                  {columns.map((column) => <td key={column.attributeId}>{valueById.get(column.attributeId) || "-"}</td>)}
-                  <td>{variant.ean || <span className="variant-missing">Missing</span>}</td>
-                  <td><code>{variant.sku || "Missing"}</code></td>
+                <tr
+                  key={variant.combinationKey}
+                  className={[
+                    "variant-work-row",
+                    missing ? "has-missing-fields" : "",
+                    !imageUrl ? "needs-image" : "",
+                    isGenerating ? "is-generating-image" : "",
+                    workflow.tone === "ready" ? "is-ready" : "",
+                  ].filter(Boolean).join(" ")}
+                >
+                  <td>{renderVariantCombination(variant)}</td>
+                  <td>{renderRequiredVariantField(variant, "ean")}</td>
+                  <td>{renderRequiredVariantField(variant, "sku")}</td>
                   <td>{variant.price || "-"}</td>
-                  <td>
-                    {imageUrl ? (
+                  <td className="variant-image-cell">
+                    {isGenerating ? (
+                      <div className="variant-generating-card" aria-label="Generating image">
+                        <span className="variant-generating-glow" />
+                        <Sparkles size={17} aria-hidden="true" />
+                        <strong>Generating...</strong>
+                      </div>
+                    ) : imageUrl ? (
                       <button className="variant-thumb-button" type="button" onClick={() => setFullscreenImage({ src: imageUrl, label: variant.combination.map((item) => item.value).join(" · ") })} aria-label="Open image fullscreen">
                         <img className="variant-thumb" src={imageUrl} alt="" />
                       </button>
-                    ) : <span className="variant-missing">No image</span>}
+                    ) : (
+                      <div className="variant-image-placeholder">
+                        <Package size={17} aria-hidden="true" />
+                        <strong>No image yet</strong>
+                        <button type="button" title="Generate image" onClick={() => void onRegenerateVariant(variant.combinationKey)} disabled={isGenerating}>
+                          <Sparkles size={13} /> Generate
+                        </button>
+                        {variant.generationError ? <small title={variant.generationError}>{variant.generationError}</small> : null}
+                      </div>
+                    )}
                   </td>
-                  <td><span className={`variant-status status-${variant.status}`}>{variantStatusLabel(variant.status)}</span></td>
+                  <td><span className={`variant-status workflow-${workflow.tone}`}>{workflow.label}</span></td>
                   <td>
                     <div className="variant-actions">
-                      <button type="button" title="Open / edit" onClick={() => setEditingKey(variant.combinationKey)}><Pencil size={14} /></button>
-                      <button type="button" title="Regenerate image" onClick={() => void onRegenerateVariant(variant.combinationKey)} disabled={variant.status === "generating_image"}><RefreshCw size={14} /></button>
-                      <label title="Upload / replace image">
-                        <Plus size={14} />
-                        <input type="file" accept="image/*" onChange={(event) => void uploadVariantImage(variant.combinationKey, event.target.files?.[0] ?? null)} />
-                      </label>
+                      <button className={missing ? "variant-action-primary" : ""} type="button" title={missing ? "Fill missing fields" : "Open / edit"} onClick={() => setEditingKey(variant.combinationKey)}><Pencil size={14} />{missing ? <span>Fix</span> : null}</button>
+                      <button className="variant-action-generate" type="button" title={imageUrl ? "Regenerate image" : "Generate image"} onClick={() => void onRegenerateVariant(variant.combinationKey)} disabled={variant.status === "generating_image"}>
+                        {variant.status === "generating_image" ? <Sparkles size={14} /> : imageUrl ? <RefreshCw size={14} /> : <Sparkles size={14} />}
+                        <span>{imageUrl ? "Regen" : "Generate"}</span>
+                      </button>
                       <button type="button" title="Delete" className="is-danger" onClick={() => onDeleteVariant(variant.combinationKey)}><Trash2 size={14} /></button>
                     </div>
                   </td>
@@ -2942,8 +3329,8 @@ function VariantManager({
               );
             }) : (
               <tr>
-                <td colSpan={columns.length + 6}>
-                  <div className="variant-empty-state">Нажмите «Сгенерировать варианты», чтобы создать matrix для текущих attributes.</div>
+                <td colSpan={7}>
+                  <div className="variant-empty-state">Для текущих attributes нет активных variants.</div>
                 </td>
               </tr>
             )}
@@ -3063,7 +3450,7 @@ function StickyActionBar({
       <div className="product-review-action-buttons">
         <button className="danger-btn" type="button" onClick={onReject} disabled={disabled}>Reject</button>
         <button className="secondary-btn" type="button" onClick={onSave} disabled={disabled}>Save Draft</button>
-        <button className="secondary-btn" type="button" onClick={onRegenerate} disabled={disabled}>Regenerate AI</button>
+        <button className="secondary-btn" type="button" onClick={onRegenerate} disabled={disabled}><Sparkles size={16} aria-hidden="true" /> Regenerate AI</button>
         <button className="primary-btn" type="button" onClick={onApprove} disabled={disabled}>{approved ? "Approved" : "Approve Product"}</button>
         {allApproved ? <button className="primary-btn product-review-submit-btn" type="button" onClick={onSubmit} disabled={disabled}>Send to OTTO</button> : null}
       </div>
@@ -3292,9 +3679,12 @@ export default function CreatorPage() {
   const [bulkModifiedRowIndexes, setBulkModifiedRowIndexes] = useState<number[]>([]);
   const [bulkToast, setBulkToast] = useState<{ message: string; error: boolean } | null>(null);
   const [reviewQueueFilter, setReviewQueueFilter] = useState<ReviewQueueFilter>("all");
+  const [reviewCategoryFilter, setReviewCategoryFilter] = useState("all");
+  const [reviewQueueSort, setReviewQueueSort] = useState<ReviewQueueSort>("upload");
   const [reviewSearchQuery, setReviewSearchQuery] = useState("");
   const [isErrorDrawerOpen, setIsErrorDrawerOpen] = useState(false);
   const [taskProgress, setTaskProgress] = useState<TaskProgress>({ total: 0, completed: 0, percent: 0 });
+  const [dummyProgressPercent, setDummyProgressPercent] = useState(0);
   const [preparationCounts, setPreparationCounts] = useState({ source: 0, mapped: 0, payload: 0 });
   const [realtimeMode, setRealtimeMode] = useState<"websocket" | "polling">("websocket");
   const productsDraftSaveSkippedRef = useRef(false);
@@ -3302,13 +3692,40 @@ export default function CreatorPage() {
   const liveCategoryRowsCountRef = useRef(0);
   const taskProgressSnapshotRef = useRef({ step: "", completed: 0, percent: 0 });
   const reviewSearchRef = useRef<HTMLInputElement>(null);
+  const fabricTriggerRef = useRef<HTMLButtonElement>(null);
+  const fabricMenuRef = useRef<HTMLDivElement>(null);
+  const fabricSearchRef = useRef<HTMLInputElement>(null);
+  const fabricOptionRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const bulkAttributeEdit = useBulkAttributeEdit();
+  const [fabricMenuStyle, setFabricMenuStyle] = useState<CSSProperties>({});
+  const [highlightedFabricId, setHighlightedFabricId] = useState("");
 
   useEffect(() => {
     if (!bulkToast) return;
     const timer = window.setTimeout(() => setBulkToast(null), 4500);
     return () => window.clearTimeout(timer);
   }, [bulkToast]);
+
+  useEffect(() => {
+    if (processState === "DONE") {
+      setDummyProgressPercent(100);
+      return;
+    }
+    if (processState !== "IN_PROGRESS") return;
+
+    const startedAt = Date.now();
+    setDummyProgressPercent((current) => Math.max(1, Math.min(99, current)));
+
+    const timer = window.setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      const progressWindowMs = 75_000;
+      const ratio = Math.min(1, elapsed / progressWindowMs);
+      const easedTarget = Math.floor(99 * (1 - Math.pow(1 - ratio, 3)));
+      setDummyProgressPercent((current) => Math.min(99, Math.max(current, easedTarget)));
+    }, 800);
+
+    return () => window.clearInterval(timer);
+  }, [processId, processState]);
 
   function setUiMessage(nextMessage: string) {
     setMessage(sanitizeUiMessage(nextMessage));
@@ -3321,6 +3738,35 @@ export default function CreatorPage() {
     if (step === "otto_create_queued" || step === "otto_create_in_progress") return "Отправка в OTTO";
     if (step === "availability_in_progress") return "Отправка availability";
     return "Подготовка данных";
+  }
+
+  const displayProgressPercent = processState === "DONE"
+    ? 100
+    : processState === "IN_PROGRESS"
+      ? dummyProgressPercent
+      : Math.max(0, Math.min(100, Math.round(taskProgress.percent || 0)));
+
+  function applyLegacyBrowserDraft(): boolean {
+    try {
+      const raw = window.localStorage.getItem(CREATOR_DRAFT_KEY);
+      if (!raw) return false;
+      const draft = JSON.parse(raw) as Record<string, unknown>;
+      setController((draft.controller as ControllerOption) ?? "jv");
+      setSelectedFabricId(String(draft.selectedFabricId ?? ""));
+      setState((draft.state as UploadState) ?? "idle");
+      setUiMessage(String(draft.message ?? "Выберите fabric и нажмите «Выставить»."));
+      setIssues(Array.isArray(draft.issues) ? (draft.issues as string[]) : []);
+      setProcessId(String(draft.processId ?? ""));
+      setProcessState(String(draft.processState ?? "IDLE"));
+      setWorkflowStep((draft.workflowStep as WorkflowStep) ?? "categories");
+      setCurrentStep(String(draft.currentStep ?? "prepare_initializing"));
+      setStepElapsed(Number(draft.stepElapsed ?? 0));
+      setHeartbeatLag(Number(draft.heartbeatLag ?? 0));
+      setStuckMessage(String(draft.stuckMessage ?? ""));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function applyFrontendDraft(parsed: PrepareStatusResponse, options?: { preserveWorkflowStep?: boolean }) {
@@ -3524,73 +3970,17 @@ export default function CreatorPage() {
         setUiMessage("Процесс ожидает worker. Продолжаю проверять статус...");
         return;
       }
+      if (parsed?.stuck) {
+        setUiMessage(String(parsed.stuck_message ?? "Процесс был остановлен или потерян. Запустите подготовку заново."));
+        return;
+      }
       setUiMessage(failedStep.startsWith("ai_enrichment") ? "Генерация товаров завершилась с ошибкой." : "Подготовка завершилась с ошибкой.");
     }
   }
 
   useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(CREATOR_DRAFT_KEY);
-      if (!raw) {
-        setHydratedDraft(true);
-        return;
-      }
-      const draft = JSON.parse(raw) as Record<string, unknown>;
-      setController((draft.controller as ControllerOption) ?? "jv");
-      setSelectedFabricId(String(draft.selectedFabricId ?? ""));
-      setState((draft.state as UploadState) ?? "idle");
-      setUiMessage(String(draft.message ?? "Выберите fabric и нажмите «Выставить»."));
-      setIssues(Array.isArray(draft.issues) ? (draft.issues as string[]) : []);
-      setProcessId(String(draft.processId ?? ""));
-      setProcessState(String(draft.processState ?? "IDLE"));
-      setWorkflowStep((draft.workflowStep as WorkflowStep) ?? "categories");
-      setCurrentStep(String(draft.currentStep ?? "prepare_initializing"));
-      setStepElapsed(Number(draft.stepElapsed ?? 0));
-      setHeartbeatLag(Number(draft.heartbeatLag ?? 0));
-      setStuckMessage(String(draft.stuckMessage ?? ""));
-    } catch {
-      // ignore broken draft and continue with clean state
-    } finally {
-      setHydratedDraft(true);
-    }
+    setHydratedDraft(true);
   }, []);
-
-  useEffect(() => {
-    if (!hydratedDraft) return;
-    const draft = {
-      controller,
-      selectedFabricId,
-      state,
-      message,
-      issues,
-      processId,
-      processState,
-      workflowStep,
-      currentStep,
-      stepElapsed,
-      heartbeatLag,
-      stuckMessage,
-    };
-    try {
-      window.localStorage.setItem(CREATOR_DRAFT_KEY, JSON.stringify(draft));
-    } catch {
-      // ignore storage failures and continue without browser draft persistence
-    }
-  }, [
-    hydratedDraft,
-    controller,
-    selectedFabricId,
-    state,
-    message,
-    issues,
-    processId,
-    processState,
-    workflowStep,
-    currentStep,
-    stepElapsed,
-    heartbeatLag,
-    stuckMessage,
-  ]);
 
   useEffect(() => {
     if (!hydratedDraft || serverDraftRestoreAttemptedRef.current) return;
@@ -3605,15 +3995,24 @@ export default function CreatorPage() {
           cache: "no-store",
         });
         const parsed = await readJsonResponse<PrepareStatusResponse>(response);
-        if (!active || !response.ok || !parsed || parsed.success === false || !parsed.process_id) return;
+        if (!active) return;
+        if (!response.ok || !parsed || parsed.success === false || !parsed.process_id) {
+          if (applyLegacyBrowserDraft()) {
+            setUiMessage("Восстановлен старый browser draft. Дальше он будет сохранен в workspace.");
+          }
+          return;
+        }
 
         setProcessId(String(parsed.process_id));
         setController(String((parsed as Record<string, unknown>).controller ?? "jv") as ControllerOption);
         setSelectedFabricId(String((parsed as Record<string, unknown>).factory_id ?? ""));
         applyProcessUpdate(parsed);
+        window.localStorage.removeItem(CREATOR_DRAFT_KEY);
         setUiMessage("Восстановлен текущий процесс создания из workspace.");
       } catch {
-        // A missing workspace task is a valid clean state.
+        if (active && applyLegacyBrowserDraft()) {
+          setUiMessage("Восстановлен старый browser draft. Дальше он будет сохранен в workspace.");
+        }
       } finally {
         if (active) setIsRestoringProcess(false);
       }
@@ -4203,25 +4602,44 @@ export default function CreatorPage() {
   const bulkModifiedIndexSet = useMemo(() => new Set(bulkModifiedRowIndexes), [bulkModifiedRowIndexes]);
   const comparisonApprovedCount = rows.filter((row) => approvedComparisonIndexSet.has(row.index)).length;
   const allComparisonsApproved = rows.length > 0 && comparisonApprovedCount === rows.length;
+  const allReviewRows = useMemo<ProductReviewRow[]>(() => {
+    return rows.map((row) => {
+      const reviewStatus: ProductReviewStatus = rejectedReviewIndexSet.has(row.index)
+        ? "rejected"
+        : approvedComparisonIndexSet.has(row.index)
+            ? "approved"
+            : bulkModifiedIndexSet.has(row.index) || (categoryChangeHistoryByIndex[row.index]?.length ?? 0) > 0
+                ? "modified"
+                : "pending";
+      return { ...row, reviewStatus };
+    });
+  }, [rows, rejectedReviewIndexSet, approvedComparisonIndexSet, bulkModifiedIndexSet, categoryChangeHistoryByIndex]);
   const reviewRows = useMemo<ProductReviewRow[]>(() => {
     const query = reviewSearchQuery.trim().toLowerCase();
-    return rows
-      .map((row) => {
-        const reviewStatus: ProductReviewStatus = rejectedReviewIndexSet.has(row.index)
-          ? "rejected"
-          : approvedComparisonIndexSet.has(row.index)
-              ? "approved"
-              : bulkModifiedIndexSet.has(row.index) || (categoryChangeHistoryByIndex[row.index]?.length ?? 0) > 0
-                  ? "modified"
-                  : "pending";
-        return { ...row, reviewStatus };
-      })
+    const statusRank = (row: ProductReviewRow) => {
+      if (reviewQueueSort === "errors") return row.errors > 0 || row.reviewStatus === "rejected" ? 0 : 1;
+      if (reviewQueueSort === "modified") return row.reviewStatus === "modified" ? 0 : 1;
+      if (reviewQueueSort === "approved") return row.reviewStatus === "approved" ? 0 : 1;
+      if (reviewQueueSort === "unreviewed") return row.reviewStatus === "pending" || row.reviewStatus === "modified" ? 0 : 1;
+      return 0;
+    };
+    return [...allReviewRows]
       .filter((row) => {
-        if (reviewQueueFilter !== "all" && row.reviewStatus !== reviewQueueFilter) return false;
+        if (reviewQueueFilter === "errors") {
+          if (row.errors <= 0 && row.reviewStatus !== "rejected") return false;
+        } else if (reviewQueueFilter !== "all" && row.reviewStatus !== reviewQueueFilter) return false;
+        if (reviewCategoryFilter !== "all" && productReviewCategory(row) !== reviewCategoryFilter) return false;
         if (!query) return true;
         return [row.sku, row.ean, row.title, row.productReference].join(" ").toLowerCase().includes(query);
+      })
+      .sort((left, right) => {
+        if (reviewQueueSort === "title-asc") return left.title.localeCompare(right.title);
+        if (reviewQueueSort === "title-desc") return right.title.localeCompare(left.title);
+        if (reviewQueueSort === "sku") return left.sku.localeCompare(right.sku);
+        const ranked = statusRank(left) - statusRank(right);
+        return ranked || left.index - right.index;
       });
-  }, [rows, reviewSearchQuery, reviewQueueFilter, rejectedReviewIndexSet, approvedComparisonIndexSet, bulkModifiedIndexSet, categoryChangeHistoryByIndex]);
+  }, [allReviewRows, reviewSearchQuery, reviewQueueFilter, reviewCategoryFilter, reviewQueueSort]);
   const selectedReviewStatus: ProductReviewStatus = rejectedReviewIndexSet.has(selectedIndex)
     ? "rejected"
     : approvedComparisonIndexSet.has(selectedIndex)
@@ -4251,13 +4669,29 @@ export default function CreatorPage() {
     : [];
 
   useEffect(() => {
+    if (selectedIndex < 0 || selectedIndex >= products.length) return;
+    const current = asRecord(products[selectedIndex]);
+    if (Object.keys(current).length === 0) return;
+    const synced = syncLocalVariantsForProduct(current, categoryAttributes);
+    const currentVariants = JSON.stringify(current.variants ?? null);
+    const syncedVariants = JSON.stringify(synced.variants ?? null);
+    if (currentVariants === syncedVariants) return;
+    const copy = [...products];
+    copy[selectedIndex] = synced;
+    setProducts(copy);
+    persistProductsDraftNow(copy);
+  }, [categoryAttributes, products, selectedIndex]);
+
+  useEffect(() => {
     setEditingOverviewField(null);
   }, [selectedIndex]);
   const categoryAttributeByName = useMemo(() => {
     const map = new Map<string, CategoryAttributeOption>();
     for (const option of categoryAttributes) {
-      const key = normalizeFieldToken(option.name);
-      if (key) map.set(key, option);
+      for (const value of [option.id, option.attributeId, option.attributeKey, option.name, option.nameRu, option.displayName, attributeDisplayName(option)]) {
+        const key = normalizeFieldToken(String(value ?? ""));
+        if (key && !map.has(key)) map.set(key, option);
+      }
     }
     return map;
   }, [categoryAttributes]);
@@ -4265,8 +4699,14 @@ export default function CreatorPage() {
     return selectedAttributes.map((item, index) => {
       const attr = asRecord(item);
       const name = String(attr.name ?? "");
-      const option = categoryAttributeByName.get(normalizeFieldToken(name));
       const rawValues = Array.isArray(attr.values) ? attr.values.map((value) => String(value)) : [];
+      const localOption = immediateAttributeOption(attr, name, rawValues);
+      const attrId = String(attr.attribute_id ?? attr.attributeId ?? "").trim();
+      const attrKey = String(attr.attribute_key ?? attr.attributeKey ?? "").trim();
+      const loadedOption = categoryAttributeByName.get(normalizeFieldToken(attrId))
+        ?? categoryAttributeByName.get(normalizeFieldToken(attrKey))
+        ?? categoryAttributeByName.get(normalizeFieldToken(name));
+      const option = loadedOption ? mergeAttributeOption(loadedOption, localOption) : localOption;
       const values = rawValues.join(", ");
       const variantKind: AttributeCard["variantKind"] = isColorVariantAttribute(name) ? "color" : isMaterialVariantAttribute(name) ? "material" : null;
       const displayValues = option
@@ -4515,20 +4955,28 @@ export default function CreatorPage() {
     }
   }
 
-  function persistProductsDraftNow(nextProducts: Record<string, unknown>[]) {
+  function persistProductsDraftNow(nextProducts: Record<string, unknown>[], options?: { force?: boolean }) {
     if (!hydratedDraft || !processId || nextProducts.length === 0) return;
-    if (processState === "IN_PROGRESS") return;
+    if (processState === "IN_PROGRESS" && !options?.force) return;
     productsDraftSaveSkippedRef.current = true;
-    void fetch(`/api/products/create-from-fabric/${encodeURIComponent(processId)}`, {
+    void saveProductsDraftNow(nextProducts).catch(() => {
+      // Debounced autosave will retry later.
+    });
+  }
+
+  async function saveProductsDraftNow(nextProducts: Record<string, unknown>[]) {
+    if (!hydratedDraft || !processId || nextProducts.length === 0) return false;
+    productsDraftSaveSkippedRef.current = true;
+    const response = await fetch(`/api/products/create-from-fabric/${encodeURIComponent(processId)}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         products: nextProducts,
       }),
       cache: "no-store",
-    }).catch(() => {
-      // Debounced autosave will retry later.
     });
+    if (!response.ok) return false;
+    return true;
   }
 
   function updateSelected(path: string[], value: string) {
@@ -4689,7 +5137,7 @@ export default function CreatorPage() {
   }
 
   function saveReviewDraft() {
-    setUiMessage("Draft сохранен локально и синхронизируется с процессом.");
+    setUiMessage("Draft сохранен в workspace и доступен с других устройств.");
   }
 
   function toggleReviewSelection(rowIndex: number) {
@@ -4831,34 +5279,12 @@ export default function CreatorPage() {
   }
 
   function patchSelectedVariant(combinationKey: string, patch: Partial<ProductVariantDraft>) {
-    const copy = [...products];
-    const current = asRecord(copy[selectedIndex]);
-    if (Object.keys(current).length > 0) {
-      const variants = readProductVariants(current).map((variant) =>
-        variant.combinationKey === combinationKey
-          ? updateVariantPayloadFields({ ...variant, ...patch })
-          : variant,
-      );
-      copy[selectedIndex] = { ...current, variants };
-      setProducts(copy);
-      persistProductsDraftNow(copy);
-    }
-    setBulkModifiedRowIndexes((current) => Array.from(new Set([...current, selectedIndex])).sort((left, right) => left - right));
-    setApprovedComparisonRowIndexes((current) => current.filter((index) => index !== selectedIndex));
-  }
-
-  function generateVariantsForSelectedProduct() {
-    const copy = [...products];
-    const current = asRecord(copy[selectedIndex]);
-    if (Object.keys(current).length === 0) return;
-    const result = generateLocalVariantsForProduct(current, categoryAttributes);
-    copy[selectedIndex] = result.product;
-    const createdLabel = result.createdCount + (result.sourceCreated ? 1 : 0);
-    setUiMessage(
-      `Variants: ${result.preview.totalCombinations} combinations, added ${createdLabel}.`,
-    );
-    setProducts(copy);
-    persistProductsDraftNow(copy);
+    setProducts((previousProducts) => {
+      const nextProducts = patchVariantInProducts(previousProducts, selectedIndex, combinationKey, patch);
+      if (nextProducts === previousProducts) return previousProducts;
+      persistProductsDraftNow(nextProducts, { force: true });
+      return nextProducts;
+    });
     setBulkModifiedRowIndexes((current) => Array.from(new Set([...current, selectedIndex])).sort((left, right) => left - right));
     setApprovedComparisonRowIndexes((current) => current.filter((index) => index !== selectedIndex));
   }
@@ -4878,7 +5304,7 @@ export default function CreatorPage() {
       generationError: undefined,
     });
     try {
-      const response = await fetch("/v1/products/variant-image/generate", {
+      const response = await fetch("/api/products/variant-image/generate", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -4892,21 +5318,25 @@ export default function CreatorPage() {
       if (!response.ok || !parsed?.imageUrl) {
         throw new Error(readApiErrorMessage(parsed, "Image generation failed.", response.status));
       }
-      patchSelectedVariant(combinationKey, {
+      const readyPatch = {
         imageUrl: parsed.imageUrl,
         mediaAssets: [{ type: "IMAGE", location: parsed.imageUrl }],
         status: "ready",
         generationError: undefined,
-      });
+      } satisfies Partial<ProductVariantDraft>;
+      patchSelectedVariant(combinationKey, readyPatch);
+      await saveProductsDraftNow(patchVariantInProducts(products, selectedIndex, combinationKey, readyPatch));
     } catch (error) {
       const recovered = await waitForGeneratedImage(recoverableImageUrl);
       if (recovered) {
-        patchSelectedVariant(combinationKey, {
+        const recoveredPatch = {
           imageUrl: recoverableImageUrl,
           mediaAssets: [{ type: "IMAGE", location: recoverableImageUrl }],
           status: "ready",
           generationError: undefined,
-        });
+        } satisfies Partial<ProductVariantDraft>;
+        patchSelectedVariant(combinationKey, recoveredPatch);
+        await saveProductsDraftNow(patchVariantInProducts(products, selectedIndex, combinationKey, recoveredPatch));
         return;
       }
       const message = error instanceof Error && error.name === "AbortError"
@@ -4962,6 +5392,7 @@ export default function CreatorPage() {
     setSelectedReviewRowIndexes([]);
     setBulkModifiedRowIndexes([]);
     setTaskProgress({ total: 0, completed: 0, percent: 0 });
+    setDummyProgressPercent(0);
     setPreparationCounts({ source: 0, mapped: 0, payload: 0 });
     setRealtimeMode("websocket");
     setSelectedFabricId((prev) =>
@@ -4976,6 +5407,15 @@ export default function CreatorPage() {
       cache: "no-store",
     }).catch(() => {
       // Client-side reset is still useful if the backend task was already gone.
+    });
+  }
+
+  async function clearAllBackendProcesses() {
+    await fetch("/api/products/create-from-fabric", {
+      method: "DELETE",
+      cache: "no-store",
+    }).catch(() => {
+      // Client-side reset is still useful if backend cleanup is temporarily unavailable.
     });
   }
 
@@ -5015,6 +5455,7 @@ export default function CreatorPage() {
     setSelectedReviewRowIndexes([]);
     setBulkModifiedRowIndexes([]);
     setTaskProgress({ total: 0, completed: 0, percent: 0 });
+    setDummyProgressPercent(0);
     setPreparationCounts({ source: 0, mapped: 0, payload: 0 });
     setRealtimeMode("websocket");
     try {
@@ -5089,6 +5530,7 @@ export default function CreatorPage() {
       setSelectedReviewRowIndexes([]);
       setBulkModifiedRowIndexes([]);
       setTaskProgress({ total: productsForEnrichment.length, completed: 0, percent: 0 });
+      setDummyProgressPercent(1);
       setRealtimeMode("websocket");
       setUiMessage("Создание товаров запущено. Дожидаюсь генерации атрибутов, описаний и bullet points...");
     } catch (caughtError) {
@@ -5112,6 +5554,7 @@ export default function CreatorPage() {
     setSelectedReviewRowIndexes([]);
     setBulkModifiedRowIndexes([]);
     setTaskProgress({ total: products.length, completed: 0, percent: 0 });
+    setDummyProgressPercent(1);
 
     try {
       const response = await fetch(`/api/products/create-from-fabric/${processId}/enrich`, {
@@ -5163,6 +5606,7 @@ export default function CreatorPage() {
     setProcessState("IN_PROGRESS");
     setCurrentStep("otto_create_queued");
     setTaskProgress({ total: submitTotal, completed: 0, percent: 0 });
+    setDummyProgressPercent(1);
     setTableStatusPhase("processing");
     setLastSubmitTotal(submitTotal);
     try {
@@ -5187,6 +5631,7 @@ export default function CreatorPage() {
         setProcessState(parsed?.process_state ?? "IN_PROGRESS");
         setCurrentStep("otto_create_queued");
         setTaskProgress({ total: submitTotal, completed: 0, percent: 0 });
+        setDummyProgressPercent(1);
         setRealtimeMode("websocket");
         setUiMessage("Загрузка в OTTO запущена. Дожидаюсь live-результата...");
         return;
@@ -5291,13 +5736,9 @@ export default function CreatorPage() {
   }
 
   async function handleClear() {
-    const staleProcessId = processId;
+    serverDraftRestoreAttemptedRef.current = true;
+    await clearAllBackendProcesses();
     resetCreatorWorkspace("Состояние очищено.");
-    await clearBackendProcess(staleProcessId);
-  }
-
-  if (isLoading || !hydratedDraft || isRestoringProcess) {
-    return <PageLoadingShell contentMode="form" />;
   }
 
   const normalizedFabricQuery = normalizeFieldToken(fabricQuery);
@@ -5314,6 +5755,177 @@ export default function CreatorPage() {
     : filteredFabrics;
   const selectedFabric = fabrics.find((item) => item.id === selectedFabricId);
   const fabricPickerDisabled = isLoadingFabrics || state === "loading" || fabrics.length === 0;
+
+  const updateFabricMenuPosition = () => {
+    const trigger = fabricTriggerRef.current;
+    if (!trigger) return;
+
+    const rect = trigger.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const margin = 12;
+    const gap = 6;
+    const preferredHeight = 340;
+    const availableBelow = viewportHeight - rect.bottom - margin - gap;
+    const availableAbove = rect.top - margin - gap;
+    const openUp = availableBelow < 220 && availableAbove > availableBelow;
+    const availableHeight = Math.max(180, openUp ? availableAbove : availableBelow);
+    const maxHeight = Math.min(preferredHeight, availableHeight);
+    const width = Math.max(rect.width, 240);
+    const left = Math.min(
+      Math.max(margin, rect.left),
+      Math.max(margin, viewportWidth - width - margin),
+    );
+
+    setFabricMenuStyle({
+      left,
+      width,
+      maxHeight,
+      ...(openUp
+        ? { bottom: viewportHeight - rect.top + gap, top: "auto" }
+        : { top: rect.bottom + gap, bottom: "auto" }),
+    });
+  };
+
+  useLayoutEffect(() => {
+    if (!fabricDropdownOpen) return;
+
+    updateFabricMenuPosition();
+    const update = () => updateFabricMenuPosition();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [fabricDropdownOpen, visibleFabrics.length]);
+
+  useEffect(() => {
+    if (!fabricDropdownOpen) return;
+
+    setHighlightedFabricId(selectedFabricId || visibleFabrics[0]?.id || "");
+    window.setTimeout(() => fabricSearchRef.current?.focus(), 0);
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (fabricTriggerRef.current?.contains(target)) return;
+      if (fabricMenuRef.current?.contains(target)) return;
+      setFabricDropdownOpen(false);
+      fabricTriggerRef.current?.focus();
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setFabricDropdownOpen(false);
+        fabricTriggerRef.current?.focus();
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [fabricDropdownOpen]);
+
+  useEffect(() => {
+    if (!fabricDropdownOpen) return;
+    if (visibleFabrics.length === 0) {
+      setHighlightedFabricId("");
+      return;
+    }
+    if (!visibleFabrics.some((item) => item.id === highlightedFabricId)) {
+      setHighlightedFabricId(selectedFabricId || visibleFabrics[0].id);
+    }
+  }, [fabricDropdownOpen, highlightedFabricId, selectedFabricId, visibleFabrics]);
+
+  const selectFabric = (fabricId: string) => {
+    setSelectedFabricId(fabricId);
+    setFabricDropdownOpen(false);
+    window.setTimeout(() => fabricTriggerRef.current?.focus(), 0);
+  };
+
+  const moveFabricHighlight = (direction: 1 | -1) => {
+    if (visibleFabrics.length === 0) return;
+    const currentIndex = visibleFabrics.findIndex((item) => item.id === highlightedFabricId);
+    const nextIndex = currentIndex < 0
+      ? 0
+      : (currentIndex + direction + visibleFabrics.length) % visibleFabrics.length;
+    const nextId = visibleFabrics[nextIndex].id;
+    setHighlightedFabricId(nextId);
+    fabricOptionRefs.current[nextId]?.scrollIntoView({ block: "nearest" });
+  };
+
+  const fabricMenu = fabricDropdownOpen && typeof document !== "undefined"
+    ? createPortal(
+        <div
+          className="fabric-picker-menu"
+          ref={fabricMenuRef}
+          style={{
+            ...fabricMenuStyle,
+            visibility: fabricMenuStyle.left === undefined ? "hidden" : undefined,
+          }}
+        >
+          <div className="creator-search-wrap fabric-search">
+            <Search size={16} className="creator-search-icon" />
+            <input
+              ref={fabricSearchRef}
+              className="creator-search-input"
+              type="search"
+              value={fabricQuery}
+              onChange={(event) => setFabricQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  moveFabricHighlight(1);
+                } else if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  moveFabricHighlight(-1);
+                } else if (event.key === "Enter" && highlightedFabricId) {
+                  event.preventDefault();
+                  selectFabric(highlightedFabricId);
+                }
+              }}
+              placeholder="Поиск fabric..."
+            />
+          </div>
+          <div className="fabric-picker-options" role="listbox">
+            {visibleFabrics.length === 0 ? (
+              <span className="fabric-picker-empty">Ничего не найдено</span>
+            ) : visibleFabrics.map((item) => (
+              <button
+                type="button"
+                role="option"
+                aria-selected={item.id === selectedFabricId}
+                className={`${item.id === selectedFabricId ? "is-selected" : ""} ${item.id === highlightedFabricId ? "is-highlighted" : ""}`.trim()}
+                key={item.id}
+                ref={(node) => {
+                  fabricOptionRefs.current[item.id] = node;
+                }}
+                onMouseEnter={() => setHighlightedFabricId(item.id)}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  selectFabric(item.id);
+                }}
+              >
+                <span>{item.name ?? item.id}</span>
+                <small>{`${item.items_count ?? 0} товаров`}</small>
+              </button>
+            ))}
+          </div>
+        </div>,
+        document.body,
+      )
+    : null;
+
+  if (isLoading || !hydratedDraft || isRestoringProcess) {
+    return <PageLoadingShell contentMode="form" />;
+  }
 
   return (
     <AppWorkspaceShell
@@ -5334,15 +5946,19 @@ export default function CreatorPage() {
               <p>{isOttoSubmitLoading ? "Идёт создание товаров и отправка availability. Дождитесь результата обработки." : "Загружаем описания, атрибуты и изображения. Работа с товарами станет доступна после завершения подготовки."}</p>
             </div>
             <div className="product-enrichment-loading-progress" aria-hidden="true">
-              <span style={{ width: `${Math.max(0, Math.min(100, Math.round(taskProgress.percent || 0)))}%` }} />
+              <span style={{ width: `${displayProgressPercent}%` }} />
             </div>
-            <strong>{`${Math.max(0, Math.round(taskProgress.percent || 0))}%`}</strong>
+            <strong>{`${displayProgressPercent}%`}</strong>
           </section>
         ) : (
         <section className={`creator-ref-top-grid ${isCategoryStage ? "is-category-stage" : "is-preparation-stage"}`}>
-          <article className="creator-ref-card creator-ref-card-action">
-            <h2>Загрузка товаров</h2>
-            <p className="creator-ref-card-subtitle">Выберите источник и подготовьте товары к проверке.</p>
+          <article className={`creator-ref-card creator-ref-card-action${!isCategoryStage ? " creator-ref-upload-panel" : ""}`}>
+            {isCategoryStage ? (
+              <>
+                <h2>Загрузка товаров</h2>
+                <p className="creator-ref-card-subtitle">Выберите источник и подготовьте товары к проверке.</p>
+              </>
+            ) : null}
             <div className="creator-mode-switch">
               <label>Controller
                 <select value={controller} onChange={(event) => setController(event.target.value as ControllerOption)} disabled={state === "loading"}>
@@ -5350,15 +5966,9 @@ export default function CreatorPage() {
                 </select>
               </label>
               <label>Fabric
-                <div
-                  className="fabric-picker"
-                  onBlur={(event) => {
-                    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                      setFabricDropdownOpen(false);
-                    }
-                  }}
-                >
+                <div className="fabric-picker">
                   <button
+                    ref={fabricTriggerRef}
                     type="button"
                     className="fabric-picker-trigger"
                     disabled={fabricPickerDisabled}
@@ -5372,42 +5982,6 @@ export default function CreatorPage() {
                     <span>{isLoadingFabrics ? "Загрузка fabrics..." : selectedFabric ? `${selectedFabric.name ?? selectedFabric.id} (${selectedFabric.items_count ?? 0})` : "Выберите fabric"}</span>
                     <ChevronDown size={16} aria-hidden="true" />
                   </button>
-                  {fabricDropdownOpen ? (
-                    <div className="fabric-picker-menu">
-                      <div className="creator-search-wrap fabric-search">
-                        <Search size={16} className="creator-search-icon" />
-                        <input
-                          autoFocus
-                          className="creator-search-input"
-                          type="search"
-                          value={fabricQuery}
-                          onChange={(event) => setFabricQuery(event.target.value)}
-                          placeholder="Поиск fabric..."
-                        />
-                      </div>
-                      <div className="fabric-picker-options" role="listbox">
-                        {visibleFabrics.length === 0 ? (
-                          <span className="fabric-picker-empty">Ничего не найдено</span>
-                        ) : visibleFabrics.map((item) => (
-                          <button
-                            type="button"
-                            role="option"
-                            aria-selected={item.id === selectedFabricId}
-                            className={item.id === selectedFabricId ? "is-selected" : ""}
-                            key={item.id}
-                            onMouseDown={(event) => {
-                              event.preventDefault();
-                              setSelectedFabricId(item.id);
-                              setFabricDropdownOpen(false);
-                            }}
-                          >
-                            <span>{item.name ?? item.id}</span>
-                            <small>{`${item.items_count ?? 0} товаров`}</small>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
                 </div>
               </label>
               <button
@@ -5415,13 +5989,11 @@ export default function CreatorPage() {
                 className="creator-ref-refresh-btn"
                 onClick={() => void refreshFabrics()}
                 disabled={state === "loading" || isLoadingFabrics || isRefreshingFabrics}
-                title="Обновить список фабрик"
-                aria-label="Обновить список фабрик"
+                title="Обновить список"
+                aria-label="Обновить список товаров"
               >
-                <RefreshCw size={18} className={isRefreshingFabrics ? "spin" : ""} />
+                <RefreshCw size={16} className={isRefreshingFabrics ? "spin" : ""} />
               </button>
-            </div>
-            <div className="creator-ref-launch-actions">
               <Button className="creator-ref-launch-btn" size="lg" type="button" onClick={handleCreate} disabled={state === "loading" || !selectedFabricId}>
                 {state === "loading" ? "Подготовка..." : "Подготовить товары"}
               </Button>
@@ -5429,22 +6001,55 @@ export default function CreatorPage() {
                 Сбросить
               </Button>
             </div>
+            {fabricMenu}
             <div className={`creator-ref-inline-alert ${state === "error" ? "is-error" : state === "success" ? "is-success" : "is-info"}`}>
               <span className="creator-ref-inline-alert-icon" aria-hidden="true">
                 {state === "error" ? <AlertCircle size={16} /> : state === "success" ? <Check size={16} /> : "i"}
               </span>
               <p>{state === "success" && products.length > 0 ? `${products.length} товаров готовы к проверке` : message}</p>
             </div>
+            {!isCategoryStage ? (
+              <div className="creator-ref-compact-stats">
+                <Badge
+                  className={`creator-ref-status-badge creator-ref-status-badge-animated ${
+                    processState === "DONE"
+                      ? "done"
+                      : processState === "FAILED"
+                        ? "failed"
+                        : processState === "IDLE"
+                          ? "pending"
+                          : "progress"
+                  }`}
+                >
+                  {processState}
+                </Badge>
+                <div className="creator-ref-compact-stat"><span>Всего</span><strong>{kpiTotal}</strong></div>
+                <div className="creator-ref-compact-stat"><span>Успешно</span><strong>{kpiSucceeded}</strong></div>
+                <div className="creator-ref-compact-stat"><span>Ошибки</span><strong>{kpiFailed}</strong></div>
+              </div>
+            ) : null}
+            {!isCategoryStage && processState === "IN_PROGRESS" ? (
+              <div className="creator-ref-progress creator-ref-progress-compact">
+                <div className="creator-ref-progress-head">
+                  <strong>{progressTitle(currentStep)}</strong>
+                  <span>{`${displayProgressPercent}%`}</span>
+                </div>
+                <div className="creator-ref-progress-track" aria-hidden="true">
+                  <span style={{ width: `${displayProgressPercent}%` }} />
+                </div>
+                <p>{realtimeMode === "websocket" ? "Live updates через WebSocket" : "Live updates через polling fallback"}</p>
+              </div>
+            ) : null}
           </article>
 
-          <article className="creator-ref-card creator-ref-card-main">
+          {isCategoryStage ? <article className="creator-ref-card creator-ref-card-main">
             {isCategoryStage ? (
               <>
                 <CategoryCheckSummary categoryKpis={categoryKpis} processState={processState} />
                 <CategoryCheckProgress
                   currentStep={currentStep}
                   processState={processState}
-                  progressPercent={taskProgress.percent}
+                  progressPercent={displayProgressPercent}
                   progressLabel={progressTitle(currentStep)}
                   preparationCounts={preparationCounts}
                   realtimeMode={realtimeMode}
@@ -5509,10 +6114,10 @@ export default function CreatorPage() {
                       <div className="creator-ref-progress">
                         <div className="creator-ref-progress-head">
                           <strong>{progressTitle(currentStep)}</strong>
-                          <span>{`${Math.max(0, Math.round(taskProgress.percent))}%`}</span>
+                          <span>{`${displayProgressPercent}%`}</span>
                         </div>
                         <div className="creator-ref-progress-track" aria-hidden="true">
-                          <span style={{ width: `${Math.max(0, Math.min(100, Math.round(taskProgress.percent || 0)))}%` }} />
+                          <span style={{ width: `${displayProgressPercent}%` }} />
                         </div>
                         <p>{realtimeMode === "websocket" ? "Live updates через WebSocket" : "Live updates через polling fallback"}</p>
                       </div>
@@ -5521,7 +6126,7 @@ export default function CreatorPage() {
                 )}
               </>
             )}
-          </article>
+          </article> : null}
         </section>
         )}
 
@@ -5657,16 +6262,22 @@ export default function CreatorPage() {
             />
             <div className="product-review-layout">
               <ProductList
+                allRows={allReviewRows}
                 rows={reviewRows}
                 selectedIndex={selectedIndex}
                 selectedReviewIndexes={selectedReviewRowIndexes}
                 onSelect={setSelectedIndex}
                 onToggleSelect={toggleReviewSelection}
+                onClearSelection={() => setSelectedReviewRowIndexes([])}
                 searchRef={reviewSearchRef}
                 query={reviewSearchQuery}
                 setQuery={setReviewSearchQuery}
                 filter={reviewQueueFilter}
                 setFilter={setReviewQueueFilter}
+                categoryFilter={reviewCategoryFilter}
+                setCategoryFilter={setReviewCategoryFilter}
+                sort={reviewQueueSort}
+                setSort={setReviewQueueSort}
               />
               <main className="product-review-workspace">
                 {products.length === 0 ? (
@@ -5686,6 +6297,7 @@ export default function CreatorPage() {
                       </button>
                     ) : null}
                     <ReviewTabs value={editorTab} setValue={setEditorTab} />
+                    <div className={`product-review-content is-${editorTab}`}>
                     {editorTab === "general" ? (
                       <div className="product-overview-grid">
                         <section className="product-overview-card product-overview-identifiers">
@@ -5715,76 +6327,84 @@ export default function CreatorPage() {
                           </div>
                         </section>
 
-                        <section className="product-overview-card">
-                          <div className="product-overview-card-head"><h3>Product Info</h3></div>
-                          <div className="product-overview-field attribute-field-card">
-                            <div className="product-overview-field-head attribute-field-card-head">
-                              <span>Title</span>
-                              {editingOverviewField !== "title" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("title")} onCopy={() => void copyText(selectedReviewRowForRender?.title ?? "", "overview-title")} canCopy={Boolean(selectedReviewRowForRender?.title)} copied={copiedRuntimeField === "overview-title"} /> : null}
+                        <section className="product-overview-card product-overview-information">
+                          <div className="product-overview-card-head"><h3>Product Information</h3></div>
+                          <div className="product-overview-info-columns">
+                            <div className="product-overview-info-main">
+                              <div className="product-overview-field product-overview-title-field attribute-field-card">
+                                <div className="product-overview-field-head attribute-field-card-head">
+                                  <span>Title</span>
+                                  {editingOverviewField !== "title" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("title")} onCopy={() => void copyText(selectedReviewRowForRender?.title ?? "", "overview-title")} canCopy={Boolean(selectedReviewRowForRender?.title)} copied={copiedRuntimeField === "overview-title"} /> : null}
+                                </div>
+                                {editingOverviewField === "title" ? (
+                                  <div className="attribute-field-editor"><input autoFocus value={selectedReviewRowForRender?.title ?? ""} onChange={(event) => updateSelectedTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} /><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
+                                ) : (
+                                  <button type="button" className={`attribute-field-value${selectedReviewRowForRender?.title?.trim() ? "" : " is-empty"}`} onClick={() => setEditingOverviewField("title")}>{selectedReviewRowForRender?.title?.trim() || "Not provided"}</button>
+                                )}
+                              </div>
+                              <div className="product-overview-field attribute-field-card">
+                                <div className="product-overview-field-head attribute-field-card-head">
+                                  <span>Product Line</span>
+                                  {editingOverviewField !== "product-line" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("product-line")} /> : null}
+                                </div>
+                                {editingOverviewField === "product-line" ? (
+                                  <div className="attribute-field-editor"><input autoFocus value={String(selectedDescription.productLine ?? "")} onChange={(event) => updateSelectedTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} /><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
+                                ) : (
+                                  <button type="button" className={`attribute-field-value${String(selectedDescription.productLine ?? "").trim() ? "" : " is-empty"}`} onClick={() => setEditingOverviewField("product-line")}>{String(selectedDescription.productLine ?? "").trim() || "Not provided"}</button>
+                                )}
+                              </div>
                             </div>
-                            {editingOverviewField === "title" ? (
-                              <div className="attribute-field-editor"><input autoFocus value={selectedReviewRowForRender?.title ?? ""} onChange={(event) => updateSelectedTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} /><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
-                            ) : (
-                              <button type="button" className={`attribute-field-value${selectedReviewRowForRender?.title?.trim() ? "" : " is-empty"}`} onClick={() => setEditingOverviewField("title")}>{selectedReviewRowForRender?.title?.trim() || "Not provided"}</button>
-                            )}
-                          </div>
-                          <div className="product-overview-field attribute-field-card">
-                            <div className="product-overview-field-head attribute-field-card-head">
-                              <span>Product Line</span>
-                              {editingOverviewField !== "product-line" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("product-line")} /> : null}
+                            <div className="product-overview-info-side">
+                              <div className="product-overview-field attribute-field-card">
+                                <div className="product-overview-field-head attribute-field-card-head">
+                                  <span>Price</span>
+                                  {editingOverviewField !== "price" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("price")} /> : null}
+                                </div>
+                                {editingOverviewField === "price" ? (
+                                  <div className="attribute-field-editor"><div className="product-overview-price-input">
+                                    <input autoFocus inputMode="decimal" value={String(selectedStandardPrice.amount ?? "")} onChange={(event) => {
+                                      const amount = Number(event.target.value.trim() || 0);
+                                      if (Number.isNaN(amount)) return;
+                                      setProducts((prev) => {
+                                        const next = [...prev];
+                                        next[selectedIndex] = updateProductField(asRecord(next[selectedIndex]), ["pricing", "standardPrice", "amount"], amount);
+                                        return next;
+                                      });
+                                    }} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} />
+                                    {selectedCurrencyLabel ? <span>{selectedCurrencyLabel}</span> : null}
+                                  </div><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
+                                ) : (
+                                  <button type="button" className={`attribute-field-value${selectedStandardPrice.amount === undefined || selectedStandardPrice.amount === null || selectedStandardPrice.amount === "" ? " is-empty" : ""}`} onClick={() => setEditingOverviewField("price")}>{selectedStandardPrice.amount === undefined || selectedStandardPrice.amount === null || selectedStandardPrice.amount === "" ? "Not provided" : `${String(selectedStandardPrice.amount)}${selectedCurrencyLabel ? ` ${selectedCurrencyLabel}` : ""}`}</button>
+                                )}
+                              </div>
+                              <div className="product-overview-field attribute-field-card">
+                                <div className="product-overview-field-head attribute-field-card-head">
+                                  <span>Delivery days</span>
+                                </div>
+                                <select
+                                  value={selectedShippingProfileId}
+                                  onChange={(event) => updateRowShippingProfile(selectedIndex, event.target.value)}
+                                  disabled={shippingProfiles.length === 0}
+                                >
+                                  {selectedShippingProfileId && !shippingProfiles.some((item) => item.id === selectedShippingProfileId) ? (
+                                    <option value={selectedShippingProfileId}>{selectedReviewRowForRender?.shippingProfileName || selectedShippingProfileId}</option>
+                                  ) : null}
+                                  {shippingProfiles.length === 0 ? (
+                                    <option value="">{selectedShippingProfileId || "No delivery profiles"}</option>
+                                  ) : (
+                                    shippingProfiles.map((item) => (
+                                      <option key={item.id} value={item.id}>{item.name}</option>
+                                    ))
+                                  )}
+                                </select>
+                              </div>
+                              <div className="product-overview-field attribute-field-card">
+                                <div className="product-overview-field-head attribute-field-card-head">
+                                  <span>Category</span>
+                                </div>
+                                <span className="attribute-field-value">{`${categoryGroupDisplayByValue[selectedAttributeCategoryGroup] || selectedAttributeCategoryGroup || "-"} / ${categoryDisplayByValue[selectedAttributeCategory] || selectedAttributeCategory || "-"}`}</span>
+                              </div>
                             </div>
-                            {editingOverviewField === "product-line" ? (
-                              <div className="attribute-field-editor"><input autoFocus value={String(selectedDescription.productLine ?? "")} onChange={(event) => updateSelectedTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} /><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
-                            ) : (
-                              <button type="button" className={`attribute-field-value${String(selectedDescription.productLine ?? "").trim() ? "" : " is-empty"}`} onClick={() => setEditingOverviewField("product-line")}>{String(selectedDescription.productLine ?? "").trim() || "Not provided"}</button>
-                            )}
-                          </div>
-                          <div className="product-overview-field attribute-field-card">
-                            <div className="product-overview-field-head attribute-field-card-head">
-                              <span>Delivery days</span>
-                            </div>
-                            <select
-                              value={selectedShippingProfileId}
-                              onChange={(event) => updateRowShippingProfile(selectedIndex, event.target.value)}
-                              disabled={shippingProfiles.length === 0}
-                            >
-                              {selectedShippingProfileId && !shippingProfiles.some((item) => item.id === selectedShippingProfileId) ? (
-                                <option value={selectedShippingProfileId}>{selectedReviewRowForRender?.shippingProfileName || selectedShippingProfileId}</option>
-                              ) : null}
-                              {shippingProfiles.length === 0 ? (
-                                <option value="">{selectedShippingProfileId || "No delivery profiles"}</option>
-                              ) : (
-                                shippingProfiles.map((item) => (
-                                  <option key={item.id} value={item.id}>{item.name}</option>
-                                ))
-                              )}
-                            </select>
-                          </div>
-                        </section>
-
-                        <section className="product-overview-card product-overview-pricing">
-                          <div className="product-overview-card-head"><h3>Pricing</h3></div>
-                          <div className="product-overview-field attribute-field-card">
-                            <div className="product-overview-field-head attribute-field-card-head">
-                              <span>Price</span>
-                              {editingOverviewField !== "price" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("price")} /> : null}
-                            </div>
-                            {editingOverviewField === "price" ? (
-                              <div className="attribute-field-editor"><div className="product-overview-price-input">
-                                <input autoFocus inputMode="decimal" value={String(selectedStandardPrice.amount ?? "")} onChange={(event) => {
-                                  const amount = Number(event.target.value.trim() || 0);
-                                  if (Number.isNaN(amount)) return;
-                                  setProducts((prev) => {
-                                    const next = [...prev];
-                                    next[selectedIndex] = updateProductField(asRecord(next[selectedIndex]), ["pricing", "standardPrice", "amount"], amount);
-                                    return next;
-                                  });
-                                }} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} />
-                                {selectedCurrencyLabel ? <span>{selectedCurrencyLabel}</span> : null}
-                              </div><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
-                            ) : (
-                              <button type="button" className={`attribute-field-value${selectedStandardPrice.amount === undefined || selectedStandardPrice.amount === null || selectedStandardPrice.amount === "" ? " is-empty" : ""}`} onClick={() => setEditingOverviewField("price")}>{selectedStandardPrice.amount === undefined || selectedStandardPrice.amount === null || selectedStandardPrice.amount === "" ? "Not provided" : `${String(selectedStandardPrice.amount)}${selectedCurrencyLabel ? ` ${selectedCurrencyLabel}` : ""}`}</button>
-                            )}
                           </div>
                         </section>
 
@@ -5834,11 +6454,15 @@ export default function CreatorPage() {
                           cancelAttributeEdit={cancelAttributeEdit}
                           deleteAttribute={deleteAttribute}
                           invalidAttributeNames={invalidAttributeNames}
+                          onMaterialPriceChange={(materialValue, price) => {
+                            readProductVariants(selectedProduct)
+                              .filter((variant) => variant.active && materialValueForVariant(variant) === materialValue)
+                              .forEach((variant) => patchSelectedVariant(variant.combinationKey, { price }));
+                          }}
                         />
                         <VariantManager
                           product={selectedProduct}
                           categoryAttributes={categoryAttributes}
-                          onGenerate={generateVariantsForSelectedProduct}
                           onPatchVariant={patchSelectedVariant}
                           onDeleteVariant={deleteSelectedVariant}
                           onRegenerateVariant={regenerateSelectedVariant}
@@ -5852,22 +6476,23 @@ export default function CreatorPage() {
                       </section>
                     ) : null}
                     {editorTab === "diff" ? <DiffViewer aftercool={selectedAftercoolData} /> : null}
+                    </div>
+                    <StickyActionBar
+                      onReject={() => rejectReviewProduct(selectedIndex)}
+                      onSave={saveReviewDraft}
+                      onRegenerate={regenerateAiProducts}
+                      onApprove={() => approveReviewProduct(selectedIndex)}
+                      onSubmit={submitEditedProducts}
+                      approved={approvedComparisonIndexSet.has(selectedIndex)}
+                      approvedCount={comparisonApprovedCount}
+                      totalCount={rows.length}
+                      allApproved={allComparisonsApproved}
+                      disabled={products.length === 0 || state === "loading"}
+                    />
                   </>
                 )}
               </main>
             </div>
-            <StickyActionBar
-              onReject={() => rejectReviewProduct(selectedIndex)}
-              onSave={saveReviewDraft}
-              onRegenerate={regenerateAiProducts}
-              onApprove={() => approveReviewProduct(selectedIndex)}
-              onSubmit={submitEditedProducts}
-              approved={approvedComparisonIndexSet.has(selectedIndex)}
-              approvedCount={comparisonApprovedCount}
-              totalCount={rows.length}
-              allApproved={allComparisonsApproved}
-              disabled={products.length === 0 || state === "loading"}
-            />
             <ErrorDrawer open={isErrorDrawerOpen} errors={selectedProductErrors} onClose={() => setIsErrorDrawerOpen(false)} />
             <BulkAttributeEditDrawer
               count={selectedReviewRowIndexes.length}

@@ -52,3 +52,15 @@ export async function POST(request: Request) {
     );
   }
 }
+
+export async function DELETE() {
+  const response = await fetch(
+    withBackendPath("/v1/products/tasks/create-from-factory"),
+    {
+      method: "DELETE",
+      headers: await getAuthorizedHeaders(),
+      cache: "no-store",
+    },
+  );
+  return toClientResponse(response);
+}

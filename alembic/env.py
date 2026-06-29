@@ -9,6 +9,7 @@ import app.models.attribute_allowed_values
 import app.models.attributes
 import app.models.categories
 import app.models.category_group
+import app.models.ean_pool
 import app.models.factories
 import app.models.factory_task_states
 import app.models.jv_lister
