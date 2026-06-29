@@ -203,6 +203,66 @@ class AfterbuyService:
             len(price_by_stammartikel),
         )
 
+    async def map_products_to_account_eans(
+        self,
+        *,
+        target_controller: Controller,
+        products: list[dict[str, Any]],
+        concurrency: int = 5,
+    ) -> dict[str, str]:
+        """Map current payload EANs to the matching EANs from another Afterbuy account."""
+        candidates_by_ean: dict[str, list[str]] = {}
+        for product in products:
+            if not isinstance(product, dict):
+                continue
+            current_ean = str(product.get("ean") or "").strip()
+            if not current_ean:
+                continue
+            candidates = [
+                str(product.get("sku") or "").strip(),
+                str(product.get("productReference") or "").strip(),
+                current_ean,
+            ]
+            seen: set[str] = set()
+            unique_candidates: list[str] = []
+            for value in candidates:
+                if not value or value in seen:
+                    continue
+                seen.add(value)
+                unique_candidates.append(value)
+            candidates_by_ean[current_ean] = unique_candidates
+
+        if not candidates_by_ean:
+            return {}
+
+        session = await self.client.login(
+            username=self.auth.username,
+            password=self.auth.password,
+        )
+        semaphore = asyncio.Semaphore(concurrency)
+        mapped: dict[str, str] = {}
+
+        async def _map_one(source_ean: str, candidates: list[str]) -> None:
+            async with semaphore:
+                for candidate in candidates:
+                    row = await self.client.get_lister_row_by_query(
+                        session=session,
+                        account=target_controller.value,
+                        query=candidate,
+                    )
+                    target_ean = _extract_afterbuy_row_ean(row or {})
+                    if target_ean:
+                        mapped[source_ean] = target_ean
+                        return
+
+        await asyncio.gather(
+            *[
+                _map_one(source_ean, candidates)
+                for source_ean, candidates in candidates_by_ean.items()
+            ]
+        )
+        return mapped
+
 
 def _first_positive_price(*values: Any) -> str | None:
     for value in values:
@@ -226,6 +286,26 @@ def _first_positive_price(*values: Any) -> str | None:
                 return text
         except ValueError:
             continue
+    return None
+
+
+def _extract_afterbuy_row_ean(row: dict[str, Any]) -> str | None:
+    for key in ("EAN", "ean", "Barcode", "GTIN"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+
+    specifics = str(row.get("CustomItemSpecifics") or "")
+    if not specifics.strip():
+        return None
+
+    match = re.search(
+        r"<name>\s*EAN\s*</name>\s*<value>\s*([^<]+)\s*</value>",
+        specifics,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip()
     return None
 
 

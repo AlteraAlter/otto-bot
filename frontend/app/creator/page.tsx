@@ -14,6 +14,7 @@ import { Card } from "@/components/ui/card";
 
 type UploadState = "idle" | "loading" | "success" | "error";
 type ControllerOption = "jv" | "xl";
+const FACTORY_SOURCE_CONTROLLER: ControllerOption = "jv";
 const CREATOR_DRAFT_KEY = "creator_process_draft_v1";
 const AVAILABILITY_CONCURRENCY = 10;
 const AVAILABILITY_AFTER_CREATE_DELAY_MS = 8000;
@@ -53,6 +54,7 @@ type PrepareStatusResponse = {
   stuck_message?: string | null;
   frontend_draft?: Record<string, unknown>;
   products_count?: number;
+  submitted_products?: Record<string, unknown>[];
   otto_process_id?: string | null;
   otto_create_state?: string;
   otto_update_result?: Record<string, unknown>;
@@ -264,6 +266,17 @@ function productIdentityKey(product: Record<string, unknown>, index: number): st
   const reference = String(product.productReference ?? "").trim();
   if (reference) return `reference:${reference}`;
   return `index:${index}`;
+}
+
+function readTaskProductRows(parsed: PrepareStatusResponse | null | undefined): Record<string, unknown>[] {
+  const payload = asRecord(parsed);
+  for (const key of ["products", "submitted_products", "submittedProducts"] as const) {
+    const value = payload[key];
+    if (Array.isArray(value) && value.length > 0) {
+      return value.map((item) => asRecord(item)).filter((item) => Object.keys(item).length > 0);
+    }
+  }
+  return [];
 }
 
 function mergeLiveProductRows(
@@ -852,9 +865,8 @@ function collectVariantExportIssues(products: Record<string, unknown>[]): OttoEr
     else if (seenSku.has(row.sku)) errors.push({ variation: row.label, code: "duplicate_sku", title: `SKU duplicates ${seenSku.get(row.sku)}.`, jsonPath: "sku" });
     else seenSku.set(row.sku, row.label);
 
-    if (!row.ean) errors.push({ variation: row.label, code: "missing_ean", title: "EAN is required for every active variant.", jsonPath: "ean" });
-    else if (seenEan.has(row.ean)) errors.push({ variation: row.label, code: "duplicate_ean", title: `EAN duplicates ${seenEan.get(row.ean)}.`, jsonPath: "ean" });
-    else seenEan.set(row.ean, row.label);
+    if (row.ean && seenEan.has(row.ean)) errors.push({ variation: row.label, code: "duplicate_ean", title: `EAN duplicates ${seenEan.get(row.ean)}.`, jsonPath: "ean" });
+    else if (row.ean) seenEan.set(row.ean, row.label);
   }
   return errors;
 }
@@ -2308,6 +2320,7 @@ function ProductList({
   selectedReviewIndexes,
   onSelect,
   onToggleSelect,
+  onToggleAllVisible,
   onClearSelection,
   searchRef,
   query,
@@ -2325,6 +2338,7 @@ function ProductList({
   selectedReviewIndexes: number[];
   onSelect: (index: number) => void;
   onToggleSelect: (index: number) => void;
+  onToggleAllVisible: (indexes: number[], selected: boolean) => void;
   onClearSelection: () => void;
   searchRef: Ref<HTMLInputElement>;
   query: string;
@@ -2337,6 +2351,7 @@ function ProductList({
   setSort: (value: ReviewQueueSort) => void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
+  const selectAllRef = useRef<HTMLInputElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(520);
   const selectedSet = useMemo(() => new Set(selectedReviewIndexes), [selectedReviewIndexes]);
@@ -2355,6 +2370,13 @@ function ProductList({
   const visibleCount = Math.ceil(viewportHeight / PRODUCT_REVIEW_ROW_HEIGHT) + PRODUCT_REVIEW_OVERSCAN * 2;
   const endIndex = Math.min(rows.length, startIndex + visibleCount);
   const visibleRows = rows.slice(startIndex, endIndex);
+  const visibleRowIndexes = useMemo(() => rows.map((row) => row.index), [rows]);
+  const selectedVisibleCount = useMemo(
+    () => visibleRowIndexes.filter((index) => selectedSet.has(index)).length,
+    [selectedSet, visibleRowIndexes],
+  );
+  const allVisibleSelected = visibleRowIndexes.length > 0 && selectedVisibleCount === visibleRowIndexes.length;
+  const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
   const offsetY = startIndex * PRODUCT_REVIEW_ROW_HEIGHT;
   const quickFilters = [
     { value: "all", label: "Все", count: statusCounts.all },
@@ -2391,6 +2413,12 @@ function ProductList({
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = someVisibleSelected;
+    }
+  }, [someVisibleSelected]);
+
   const resetFilters = () => {
     setQuery("");
     setFilter("all");
@@ -2407,6 +2435,16 @@ function ProductList({
     <aside className="product-review-list">
       <div className="product-review-list-tools">
         <div className="product-review-list-head">
+          <label className="product-review-list-select-all">
+            <input
+              ref={selectAllRef}
+              type="checkbox"
+              checked={allVisibleSelected}
+              disabled={visibleRowIndexes.length === 0}
+              onChange={() => onToggleAllVisible(visibleRowIndexes, allVisibleSelected)}
+              aria-label="Выбрать все видимые товары"
+            />
+          </label>
           <div>
             <h3>Товары</h3>
             <p>{`Проверено ${reviewedCount} · Осталось ${Math.max(0, allRows.length - reviewedCount)}`}</p>
@@ -3609,7 +3647,7 @@ function BulkAttributeEditDrawer({ count, options, isLoading, state, onClose, on
 
 export default function CreatorPage() {
   const { currentUser, isLoading, error } = useCurrentUser();
-  const [controller, setController] = useState<ControllerOption>("jv");
+  const controller: ControllerOption = FACTORY_SOURCE_CONTROLLER;
   const [fabrics, setFabrics] = useState<FabricOption[]>([]);
   const [shippingProfiles, setShippingProfiles] = useState<ShippingProfileOption[]>([]);
   const [categoryOptionsByGroup, setCategoryOptionsByGroup] = useState<Record<string, string[]>>({});
@@ -3751,7 +3789,6 @@ export default function CreatorPage() {
       const raw = window.localStorage.getItem(CREATOR_DRAFT_KEY);
       if (!raw) return false;
       const draft = JSON.parse(raw) as Record<string, unknown>;
-      setController((draft.controller as ControllerOption) ?? "jv");
       setSelectedFabricId(String(draft.selectedFabricId ?? ""));
       setState((draft.state as UploadState) ?? "idle");
       setUiMessage(String(draft.message ?? "Выберите fabric и нажмите «Выставить»."));
@@ -3864,7 +3901,7 @@ export default function CreatorPage() {
       payload: Number(parsed?.payload_items ?? (Array.isArray(parsed?.products) ? parsed.products.length : 0)),
     });
 
-    const liveRows = Array.isArray(parsed?.products) ? parsed.products : [];
+    const liveRows = readTaskProductRows(parsed);
     if (liveRows.length > 0 && nextState === "IN_PROGRESS") {
       if (currentStepName === "building_category_preview" && liveRows.length < liveCategoryRowsCountRef.current) return;
       if (currentStepName === "building_category_preview") liveCategoryRowsCountRef.current = liveRows.length;
@@ -3882,6 +3919,12 @@ export default function CreatorPage() {
       );
     }
     if ((nextState === "DONE" || nextState === "FAILED") && (currentStepName === "otto_create_done" || currentStepName === "availability_done" || currentStepName === "otto_create_failed" || currentStepName === "final_validation_failed")) {
+      if (liveRows.length > 0) {
+        const restoredRows = liveRows.map((product) => asRecord(product));
+        setProducts(restoredRows);
+        applyFrontendDraft(parsed);
+        setWorkflowStep("details");
+      }
       const update = asRecord(parsed?.otto_update_result);
       const failed = asRecord(parsed?.otto_failed_result);
       const failedCount = Number(update.failed ?? 0);
@@ -3916,7 +3959,7 @@ export default function CreatorPage() {
     }
 
     if (nextState === "DONE") {
-      const rawRows = Array.isArray(parsed?.products) ? parsed.products : [];
+      const rawRows = liveRows;
       const rows = currentStepName === "ai_enrichment_done"
         ? mergeLiveProductRows(rawRows, products)
         : rawRows.map((product) => asRecord(product));
@@ -3961,6 +4004,11 @@ export default function CreatorPage() {
       setUiMessage(`${parsed?.payload_items ?? rows.length} товаров готовы к проверке.`);
     }
     if (nextState === "FAILED") {
+      if (liveRows.length > 0) {
+        setProducts(liveRows);
+        applyFrontendDraft(parsed);
+        setWorkflowStep("details");
+      }
       setState("error");
       const failedStep = String(parsed?.current_step ?? "");
       if (parsed?.stuck && (failedStep === "prepare_queued" || failedStep === "ai_enrichment_queued" || failedStep === "otto_create_queued")) {
@@ -4004,7 +4052,6 @@ export default function CreatorPage() {
         }
 
         setProcessId(String(parsed.process_id));
-        setController(String((parsed as Record<string, unknown>).controller ?? "jv") as ControllerOption);
         setSelectedFabricId(String((parsed as Record<string, unknown>).factory_id ?? ""));
         applyProcessUpdate(parsed);
         window.localStorage.removeItem(CREATOR_DRAFT_KEY);
@@ -4144,7 +4191,7 @@ export default function CreatorPage() {
     const silent = Boolean(options?.silent);
     if (!silent) setIsLoadingFabrics(true);
     try {
-      const response = await fetch(`/api/products/fabrics?controller=${encodeURIComponent(controller)}`, { method: "GET", cache: "no-store" });
+      const response = await fetch(`/api/products/fabrics?controller=${encodeURIComponent(FACTORY_SOURCE_CONTROLLER)}`, { method: "GET", cache: "no-store" });
       const parsed = await readJsonResponse<FabricListResponse>(response);
       if (!response.ok) {
         setFabrics([]);
@@ -4172,7 +4219,7 @@ export default function CreatorPage() {
   useEffect(() => {
     void loadFabrics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [controller]);
+  }, []);
 
   async function refreshFabrics() {
     setIsRefreshingFabrics(true);
@@ -4979,6 +5026,35 @@ export default function CreatorPage() {
     return true;
   }
 
+  async function saveFrontendDraftNow() {
+    if (!hydratedDraft || !processId || products.length === 0) return false;
+    const response = await fetch(`/api/products/create-from-fabric/${encodeURIComponent(processId)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        frontend_draft: {
+          aiCategoryByIndex,
+          selectedIndex,
+          workflowStep,
+          confirmedCategoryRowIndexes,
+          skippedCategoryRowIndexes,
+          categoryChangeHistoryByIndex,
+          categoryCommentsByIndex,
+          approvedComparisonRowIndexes,
+          rejectedReviewRowIndexes,
+          bulkModifiedRowIndexes,
+          ottoProcessId,
+          ottoSummary,
+          ottoErrors,
+          lastSubmitTotal,
+          tableStatusPhase,
+        },
+      }),
+      cache: "no-store",
+    });
+    return response.ok;
+  }
+
   function updateSelected(path: string[], value: string) {
     setProducts((prev) => {
       const next = [...prev];
@@ -5136,14 +5212,32 @@ export default function CreatorPage() {
     setUiMessage("Товар помечен как rejected.");
   }
 
-  function saveReviewDraft() {
-    setUiMessage("Draft сохранен в workspace и доступен с других устройств.");
+  async function saveReviewDraft() {
+    const productsSaved = await saveProductsDraftNow(products);
+    const frontendDraftSaved = await saveFrontendDraftNow();
+    if (productsSaved && frontendDraftSaved) {
+      setUiMessage("Draft сохранен в workspace и доступен с других устройств.");
+      return;
+    }
+    setState("error");
+    setUiMessage("Не удалось сохранить draft в workspace.");
   }
 
   function toggleReviewSelection(rowIndex: number) {
     setSelectedReviewRowIndexes((prev) =>
       prev.includes(rowIndex) ? prev.filter((item) => item !== rowIndex) : [...prev, rowIndex].sort((a, b) => a - b),
     );
+  }
+
+  function toggleAllVisibleReviewRows(indexes: number[], selected: boolean) {
+    if (indexes.length === 0) return;
+    setSelectedReviewRowIndexes((prev) => {
+      if (selected) {
+        const visible = new Set(indexes);
+        return prev.filter((index) => !visible.has(index));
+      }
+      return Array.from(new Set([...prev, ...indexes])).sort((a, b) => a - b);
+    });
   }
 
   function approveSelectedReviewProducts() {
@@ -5960,40 +6054,37 @@ export default function CreatorPage() {
               </>
             ) : null}
             <div className="creator-mode-switch">
-              <label>Controller
-                <select value={controller} onChange={(event) => setController(event.target.value as ControllerOption)} disabled={state === "loading"}>
-                  <option value="jv">JV</option><option value="xl">XL</option>
-                </select>
-              </label>
               <label>Fabric
-                <div className="fabric-picker">
+                <div className="fabric-control-row">
+                  <div className="fabric-picker">
+                    <button
+                      ref={fabricTriggerRef}
+                      type="button"
+                      className="fabric-picker-trigger"
+                      disabled={fabricPickerDisabled}
+                      aria-haspopup="listbox"
+                      aria-expanded={fabricDropdownOpen}
+                      onClick={() => {
+                        if (fabricPickerDisabled) return;
+                        setFabricDropdownOpen((open) => !open);
+                      }}
+                    >
+                      <span>{isLoadingFabrics ? "Загрузка fabrics..." : selectedFabric ? `${selectedFabric.name ?? selectedFabric.id} (${selectedFabric.items_count ?? 0})` : "Выберите fabric"}</span>
+                      <ChevronDown size={16} aria-hidden="true" />
+                    </button>
+                  </div>
                   <button
-                    ref={fabricTriggerRef}
                     type="button"
-                    className="fabric-picker-trigger"
-                    disabled={fabricPickerDisabled}
-                    aria-haspopup="listbox"
-                    aria-expanded={fabricDropdownOpen}
-                    onClick={() => {
-                      if (fabricPickerDisabled) return;
-                      setFabricDropdownOpen((open) => !open);
-                    }}
+                    className="creator-ref-refresh-btn"
+                    onClick={() => void refreshFabrics()}
+                    disabled={state === "loading" || isLoadingFabrics || isRefreshingFabrics}
+                    title="Обновить список"
+                    aria-label="Обновить список товаров"
                   >
-                    <span>{isLoadingFabrics ? "Загрузка fabrics..." : selectedFabric ? `${selectedFabric.name ?? selectedFabric.id} (${selectedFabric.items_count ?? 0})` : "Выберите fabric"}</span>
-                    <ChevronDown size={16} aria-hidden="true" />
+                    <RefreshCw size={16} className={isRefreshingFabrics ? "spin" : ""} />
                   </button>
                 </div>
               </label>
-              <button
-                type="button"
-                className="creator-ref-refresh-btn"
-                onClick={() => void refreshFabrics()}
-                disabled={state === "loading" || isLoadingFabrics || isRefreshingFabrics}
-                title="Обновить список"
-                aria-label="Обновить список товаров"
-              >
-                <RefreshCw size={16} className={isRefreshingFabrics ? "spin" : ""} />
-              </button>
               <Button className="creator-ref-launch-btn" size="lg" type="button" onClick={handleCreate} disabled={state === "loading" || !selectedFabricId}>
                 {state === "loading" ? "Подготовка..." : "Подготовить товары"}
               </Button>
@@ -6070,7 +6161,7 @@ export default function CreatorPage() {
                     <span className="creator-preparation-empty-icon"><Box size={22} /></span>
                     <div>
                       <h2>Подготовка товаров</h2>
-                      <p>Выберите Controller и Fabric, затем запустите подготовку. Здесь появится текущий статус обработки.</p>
+                      <p>Выберите Fabric, затем запустите подготовку. Здесь появится текущий статус обработки.</p>
                     </div>
                     <Badge className="creator-ref-status-badge pending">Ожидание запуска</Badge>
                   </div>
@@ -6268,6 +6359,7 @@ export default function CreatorPage() {
                 selectedReviewIndexes={selectedReviewRowIndexes}
                 onSelect={setSelectedIndex}
                 onToggleSelect={toggleReviewSelection}
+                onToggleAllVisible={toggleAllVisibleReviewRows}
                 onClearSelection={() => setSelectedReviewRowIndexes([])}
                 searchRef={reviewSearchRef}
                 query={reviewSearchQuery}

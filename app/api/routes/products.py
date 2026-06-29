@@ -1,6 +1,7 @@
 """Product endpoints for catalog, creation, deletion, and XLSX import."""
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -41,16 +42,27 @@ from app.dependencies import (
     get_product_service,
     require_role,
 )
-from app.mapper.normalizer import build_normalized_product
+from app.mapper.normalizer import brand_id_for_controller, build_normalized_product
 from app.models.attributes import Attribute
 from app.models.categories import Category
 from app.models.category_group import CategoryGroup
+from app.models.factories import Factories
 from app.models.factory_task_states import FactoryTaskState
 from app.models.product_import_tasks import ProductImportTask
 from app.models.products import Product
 from app.models.variation_theme import VariationTheme
 from app.repository.user_repository import UserRepository
 from app.schemas.enums import Controller, RoleEnum, SortOrderEnum
+from app.schemas.ean_pool import (
+    EanPoolImportRequest,
+    EanPoolImportResponse,
+    EanPoolItemResponse,
+    EanPoolListResponse,
+    EanPoolMarkUsedRequest,
+    EanPoolReserveRequest,
+    EanPoolStatsResponse,
+    EanPoolStatus,
+)
 from app.schemas.product import (
     Availability,
     CreateProductRequest,
@@ -74,6 +86,7 @@ from app.schemas.product_tasks import (
     ProductFactoryCreateResponseDTO,
 )
 from app.services.afterbuy_service import AfterbuyService
+from app.services.ean_pool_service import EanPoolService, ean_pool_item_to_dict
 from app.services.factory_task_state_service import FactoryTaskStateService
 from app.services.product_service import ProductService
 from app.services.product_variant_service import (
@@ -117,6 +130,16 @@ XLSX_COLUMN_MAP = {
 }
 REQUIRED_XLSX_COLUMNS = list(XLSX_COLUMN_MAP.keys())
 MAX_TASK_ERROR_LENGTH = 280
+MAX_OTTO_PRODUCT_LINE_LENGTH = 70
+CREATE_PRODUCT_EXCLUDED_FIELDS = {
+    "aiCategory",
+    "aiCategoryGroup",
+    "shippingProfileID",
+    "shippingProfileId",
+    "shipping_profile_id",
+    "quantity",
+    "processingTime",
+}
 ATTRIBUTES_LIST_PATH = Path(__file__).resolve().parents[3] / "attributes_list.txt"
 MAPPER_LOG_PATH = (
     Path(__file__).resolve().parents[3] / "logs" / "product_mapper_flow.log"
@@ -501,6 +524,21 @@ def _shape_media_assets_for_schema(assets: Any) -> list[dict[str, Any]]:
 def _shape_product_media_assets_for_otto(product: dict[str, Any]) -> dict[str, Any]:
     shaped = dict(product)
     shaped["mediaAssets"] = _shape_media_assets_for_schema(shaped.get("mediaAssets"))
+    description = shaped.get("productDescription")
+    if isinstance(description, dict):
+        shaped_description = dict(description)
+        product_line = str(shaped_description.get("productLine") or "").strip()
+        if len(product_line) > MAX_OTTO_PRODUCT_LINE_LENGTH:
+            shaped_description["productLine"] = product_line[
+                :MAX_OTTO_PRODUCT_LINE_LENGTH
+            ].rstrip()
+            MAPPER_LOGGER.info(
+                "step=trim_product_line_for_otto sku=%s original_length=%s max_length=%s",
+                shaped.get("sku") or "-",
+                len(product_line),
+                MAX_OTTO_PRODUCT_LINE_LENGTH,
+            )
+        shaped["productDescription"] = shaped_description
     return shaped
 
 
@@ -563,6 +601,20 @@ def _ensure_product_identity(
     normalized["productReference"] = source_ean
 
 
+def _source_item_ean(source_item: Any) -> str:
+    if not isinstance(source_item, dict):
+        return ""
+    return str(
+        _pick_text(
+            source_item.get("EAN"),
+            source_item.get("ean"),
+            _extract_specifics_text(source_item.get("CustomItemSpecifics"), "EAN"),
+            _extract_specifics_text(source_item.get("CustomItemSpecifics"), "ean"),
+        )
+        or ""
+    ).strip()
+
+
 def _save_prepared_payloads_snapshot(
     *,
     payloads: list[ProductPayload],
@@ -597,6 +649,26 @@ def _save_final_edited_payloads_snapshot(
     file_path = (
         temp_dir
         / f"processed_products_final_{controller.value.lower()}_{factory_id}_{process_id}_{stamp}.json"
+    )
+    file_path.write_text(
+        json.dumps(payloads, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return file_path
+
+
+def _save_final_availability_snapshot(
+    *,
+    payloads: list[dict[str, Any]],
+    factory_id: str,
+    process_id: str,
+) -> Path:
+    temp_dir = Path(__file__).resolve().parents[3] / "temp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    file_path = (
+        temp_dir
+        / f"processed_availability_final_{factory_id}_{process_id}_{stamp}.json"
     )
     file_path.write_text(
         json.dumps(payloads, ensure_ascii=False, indent=2),
@@ -2482,6 +2554,126 @@ async def get_product_import_task(
     return _task_to_dto(task)
 
 
+@router.post(
+    "/ean-pool/import",
+    response_model=EanPoolImportResponse,
+    summary="Import EANs into the free pool",
+)
+async def import_ean_pool_items(
+    payload: EanPoolImportRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_role([RoleEnum.SEO])),
+):
+    result = await EanPoolService(db).import_eans(
+        payload.eans,
+        source=payload.source,
+        note=payload.note,
+        created_by_user_id=current_user.id,
+        metadata=payload.metadata,
+    )
+    return EanPoolImportResponse(**result)
+
+
+@router.get(
+    "/ean-pool/stats",
+    response_model=EanPoolStatsResponse,
+    summary="Get EAN pool counters",
+)
+async def get_ean_pool_stats(
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_role([RoleEnum.SEO])),
+):
+    _ = current_user
+    stats = await EanPoolService(db).stats()
+    return EanPoolStatsResponse(**stats)
+
+
+@router.get(
+    "/ean-pool",
+    response_model=EanPoolListResponse,
+    summary="List EAN pool items",
+)
+async def list_ean_pool_items(
+    status_filter: EanPoolStatus | None = Query(default=None, alias="status"),
+    limit: int = Query(default=100, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_role([RoleEnum.SEO])),
+):
+    _ = current_user
+    items = await EanPoolService(db).list_items(
+        status=status_filter.value if status_filter else None,
+        limit=limit,
+    )
+    return EanPoolListResponse(items=items)
+
+
+@router.post(
+    "/ean-pool/reserve",
+    response_model=EanPoolItemResponse,
+    summary="Reserve the next available EAN",
+)
+async def reserve_ean_pool_item(
+    payload: EanPoolReserveRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_role([RoleEnum.SEO])),
+):
+    _ = current_user
+    try:
+        item = await EanPoolService(db).reserve_next(
+            reserved_for=payload.reserved_for,
+            metadata=payload.metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    return EanPoolItemResponse(item=ean_pool_item_to_dict(item))
+
+
+@router.post(
+    "/ean-pool/{ean}/used",
+    response_model=EanPoolItemResponse,
+    summary="Mark an EAN as used",
+)
+async def mark_ean_pool_item_used(
+    ean: str,
+    payload: EanPoolMarkUsedRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_role([RoleEnum.SEO])),
+):
+    _ = current_user
+    try:
+        item = await EanPoolService(db).mark_used(ean, used_for=payload.used_for)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return EanPoolItemResponse(item=ean_pool_item_to_dict(item))
+
+
+@router.post(
+    "/ean-pool/{ean}/release",
+    response_model=EanPoolItemResponse,
+    summary="Release a reserved EAN",
+)
+async def release_ean_pool_item(
+    ean: str,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_role([RoleEnum.SEO])),
+):
+    _ = current_user
+    try:
+        item = await EanPoolService(db).release(ean)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    return EanPoolItemResponse(item=ean_pool_item_to_dict(item))
+
+
 @router.get("/db/{sku}")
 async def get_db_product(
     sku: str,
@@ -2562,29 +2754,17 @@ async def get_latest_factory_prepare_task(
 ):
     stmt = (
         select(FactoryTaskState)
-        .where(
-            FactoryTaskState.created_by_user_id == current_user.id,
-            or_(
-                FactoryTaskState.current_step.is_(None),
-                FactoryTaskState.current_step.notin_(FACTORY_FINAL_STEPS),
-            )
-        )
+        .where(FactoryTaskState.created_by_user_id == current_user.id)
         .order_by(FactoryTaskState.updated_at.desc())
-        .limit(10)
+        .limit(20)
     )
     records = list((await db.execute(stmt)).scalars().all())
     if not records:
         legacy_stmt = (
             select(FactoryTaskState)
-            .where(
-                FactoryTaskState.created_by_user_id.is_(None),
-                or_(
-                    FactoryTaskState.current_step.is_(None),
-                    FactoryTaskState.current_step.notin_(FACTORY_FINAL_STEPS),
-                ),
-            )
+            .where(FactoryTaskState.created_by_user_id.is_(None))
             .order_by(FactoryTaskState.updated_at.desc())
-            .limit(10)
+            .limit(20)
         )
         records = list((await db.execute(legacy_stmt)).scalars().all())
 
@@ -2600,6 +2780,16 @@ async def get_latest_factory_prepare_task(
             is_stuck,
         ) = await _mark_factory_task_stale_if_needed(process_id, task)
         if _is_empty_stale_factory_failure(task):
+            continue
+        current_step = str(task.get("current_step") or "")
+        task_has_products = _has_factory_task_products(task)
+        if task.get("status") == "DONE" and current_step in FACTORY_FINAL_STEPS:
+            continue
+        if (
+            task.get("status") == "FAILED"
+            and current_step in FACTORY_FINAL_STEPS
+            and not task_has_products
+        ):
             continue
         return {
             "success": True,
@@ -3513,11 +3703,673 @@ async def _translate_otto_error_payload_for_ui(value: Any) -> Any:
         return await translate_value(value)
 
 
+def _variant_reserved_for(
+    process_id: str,
+    product: dict[str, Any],
+    variant: dict[str, Any],
+    index: int,
+) -> str:
+    product_reference = str(
+        product.get("productReference") or product.get("sku") or index
+    ).strip()
+    combination_key = str(
+        variant.get("combinationKey")
+        or variant.get("combination_key")
+        or variant.get("sku")
+        or index
+    ).strip()
+    return f"factory-submit:{process_id}:{product_reference}:{combination_key}"
+
+
+def _set_variant_ean(variant: dict[str, Any], ean: str) -> None:
+    variant["ean"] = ean
+    product_payload = variant.get("productPayload")
+    if isinstance(product_payload, dict):
+        product_payload["ean"] = ean
+
+
+async def _fill_missing_variant_eans_from_pool(
+    *,
+    process_id: str,
+    products: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    assignments: list[dict[str, str]] = []
+
+    async with SessionLocal() as session:
+        service = EanPoolService(session)
+        for product_index, product in enumerate(products):
+            variants = product.get("variants")
+            if not isinstance(variants, list):
+                continue
+            for variant_index, variant in enumerate(variants):
+                if not isinstance(variant, dict):
+                    continue
+                if variant.get("active") is False:
+                    continue
+                current_ean = str(variant.get("ean") or "").strip()
+                if current_ean:
+                    continue
+
+                reserved_for = _variant_reserved_for(
+                    process_id,
+                    product,
+                    variant,
+                    variant_index,
+                )
+                item = await service.reserve_next(
+                    reserved_for=reserved_for,
+                    metadata={
+                        "processId": process_id,
+                        "productIndex": product_index,
+                        "variantIndex": variant_index,
+                    },
+                )
+                _set_variant_ean(variant, item.ean)
+                assignments.append(
+                    {
+                        "ean": item.ean,
+                        "reservedFor": reserved_for,
+                        "productIndex": str(product_index),
+                        "variantIndex": str(variant_index),
+                    }
+                )
+
+    return assignments
+
+
+async def _mark_ean_pool_assignments_used(assignments: list[dict[str, str]]) -> None:
+    if not assignments:
+        return
+    async with SessionLocal() as session:
+        service = EanPoolService(session)
+        for assignment in assignments:
+            ean = assignment.get("ean")
+            used_for = assignment.get("reservedFor") or "factory-submit"
+            if not ean:
+                continue
+            try:
+                await service.mark_used(ean, used_for=used_for)
+            except Exception as exc:
+                MAPPER_LOGGER.warning(
+                    "step=ean_pool_mark_used_failed ean=%s error=%s",
+                    ean,
+                    exc,
+                )
+
+
+async def _release_ean_pool_assignments(assignments: list[dict[str, str]]) -> None:
+    if not assignments:
+        return
+    async with SessionLocal() as session:
+        service = EanPoolService(session)
+        for assignment in assignments:
+            ean = assignment.get("ean")
+            if not ean:
+                continue
+            try:
+                await service.release(ean)
+            except Exception as exc:
+                MAPPER_LOGGER.warning(
+                    "step=ean_pool_release_failed ean=%s error=%s",
+                    ean,
+                    exc,
+                )
+
+
+def _controller_compliance_payload(controller: Controller) -> dict[str, Any] | None:
+    compliance = settings.compliance.get(controller)
+    if compliance is None:
+        return None
+    return compliance.model_dump(mode="json", exclude_none=True)
+
+
+def _apply_account_fields_to_product(
+    product: dict[str, Any],
+    *,
+    controller: Controller,
+    identity_value: str | None = None,
+) -> dict[str, Any]:
+    updated = dict(product)
+    normalized_identity = str(identity_value or "").strip()
+    if normalized_identity:
+        updated["ean"] = normalized_identity
+        updated["sku"] = normalized_identity
+        updated["productReference"] = normalized_identity
+
+    description = dict(updated.get("productDescription") or {})
+    description["brandId"] = brand_id_for_controller(controller)
+    updated["productDescription"] = description
+
+    compliance = _controller_compliance_payload(controller)
+    if compliance is not None:
+        updated["compliance"] = compliance
+
+    return updated
+
+
+def _create_product_body(product: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in product.items()
+        if key not in CREATE_PRODUCT_EXCLUDED_FIELDS
+    }
+
+
+def _availability_payload_item(
+    *,
+    controller: Controller,
+    product: dict[str, Any],
+) -> dict[str, str]:
+    return {
+        "controller": controller.value,
+        "sku": str(product.get("sku") or "").strip(),
+        "shippingProfileID": str(product.get("shippingProfileID") or "").strip(),
+        "quantity": str(product.get("quantity") or "20").strip() or "20",
+        "processingTime": str(product.get("processingTime") or "DEFAULT").strip()
+        or "DEFAULT",
+    }
+
+
+def _clone_products_with_account_map(
+    products: list[dict[str, Any]],
+    ean_map: dict[str, str],
+    *,
+    controller: Controller,
+) -> list[dict[str, Any]]:
+    cloned: list[dict[str, Any]] = []
+    for product in copy.deepcopy(products):
+        current_ean = str(product.get("ean") or "").strip()
+        mapped_ean = ean_map.get(current_ean)
+        cloned.append(
+            _apply_account_fields_to_product(
+                product,
+                controller=controller,
+                identity_value=mapped_ean or current_ean,
+            )
+        )
+    return cloned
+
+
+async def _find_counterpart_factory_id(
+    *,
+    source_factory_id: str,
+    target_controller: Controller,
+) -> str | None:
+    normalized_source_id = str(source_factory_id or "").strip()
+    if not normalized_source_id:
+        return None
+
+    async with SessionLocal() as session:
+        source_result = await session.execute(
+            select(Factories).where(Factories.factory_id == normalized_source_id)
+        )
+        source_factory = source_result.scalar_one_or_none()
+        if source_factory is None:
+            MAPPER_LOGGER.warning(
+                "step=xl_factory_lookup_missing_source factory_id=%s",
+                normalized_source_id,
+            )
+            return None
+
+        source_name = str(source_factory.name or "").strip()
+        if not source_name:
+            return None
+
+        target_result = await session.execute(
+            select(Factories)
+            .where(
+                func.lower(func.trim(Factories.name)) == source_name.lower(),
+                func.upper(Factories.account) == target_controller.value.upper(),
+            )
+            .order_by(Factories.items_count.desc(), Factories.factory_id.asc())
+        )
+        target_factory = target_result.scalars().first()
+        if target_factory is None:
+            MAPPER_LOGGER.warning(
+                "step=xl_factory_lookup_not_found source_factory_id=%s source_name=%s target_account=%s",
+                normalized_source_id,
+                source_name,
+                target_controller.value,
+            )
+            return None
+
+        return str(target_factory.factory_id)
+
+
+async def _map_eans_from_counterpart_factory_by_index(
+    *,
+    afterbuy: AfterbuyService,
+    source_factory_id: str,
+    target_controller: Controller,
+    source_items: list[Any],
+    products: list[dict[str, Any]],
+) -> tuple[dict[str, str], dict[str, Any]]:
+    target_factory_id = await _find_counterpart_factory_id(
+        source_factory_id=source_factory_id,
+        target_controller=target_controller,
+    )
+    if target_factory_id is None:
+        return {}, {"reason": "target_factory_not_found"}
+
+    target_source = await afterbuy.get_products_by_factory_id(
+        target_controller,
+        int(target_factory_id),
+    )
+    target_items = [
+        item.model_dump(mode="json", exclude_none=True)
+        for item in target_source.products
+    ]
+
+    mapped: dict[str, str] = {}
+    limit = min(len(products), len(target_items))
+    for index in range(limit):
+        product_ean = str(products[index].get("ean") or "").strip()
+        source_ean = (
+            _source_item_ean(source_items[index])
+            if index < len(source_items)
+            else ""
+        )
+        target_ean = _source_item_ean(target_items[index])
+        current_ean = product_ean or source_ean
+        if current_ean and target_ean:
+            mapped[current_ean] = target_ean
+
+    meta = {
+        "source_factory_id": str(source_factory_id),
+        "target_factory_id": target_factory_id,
+        "target_account": target_controller.value,
+        "source_items": len(source_items),
+        "target_items": len(target_items),
+        "products": len(products),
+        "mapped": len(mapped),
+    }
+    MAPPER_LOGGER.info(
+        "step=xl_ean_mapping_by_factory_index source_factory_id=%s target_factory_id=%s products=%s source_items=%s target_items=%s mapped=%s",
+        source_factory_id,
+        target_factory_id,
+        len(products),
+        len(source_items),
+        len(target_items),
+        len(mapped),
+    )
+    return mapped, meta
+
+
+async def _build_factory_submit_preview_snapshots(
+    *,
+    process_id: str,
+    payload: dict[str, Any],
+    task: dict[str, Any] | None,
+    afterbuy: AfterbuyService | None,
+) -> dict[str, Any]:
+    raw_products = payload.get("products")
+    media_base_url = str(payload.get("media_base_url") or "").strip() or None
+    if not isinstance(raw_products, list) or not raw_products:
+        raise ValueError("products must be a non-empty array")
+
+    products = [copy.deepcopy(item) for item in raw_products if isinstance(item, dict)]
+    if not products:
+        raise ValueError("products must contain valid product objects")
+
+    controller_value = str(
+        (task or {}).get("controller") or payload.get("controller") or "jv"
+    ).lower()
+    controller = Controller(controller_value)
+    factory_id = str(
+        (task or {}).get("factory_id") or payload.get("factory_id") or "unknown"
+    )
+    source_items_raw = (task or {}).get("source_items_raw")
+    source_items = source_items_raw if isinstance(source_items_raw, list) else []
+    products_with_variants = [item for item in products if active_variant_items(item)]
+    ean_pool_assignments: list[dict[str, str]] = []
+
+    try:
+        ean_pool_assignments = await _fill_missing_variant_eans_from_pool(
+            process_id=process_id,
+            products=products_with_variants,
+        )
+
+        variant_validation_errors = validate_variant_export_identifiers(
+            products_with_variants
+        )
+        if variant_validation_errors:
+            return {
+                "success": False,
+                "variant_validation_errors": variant_validation_errors,
+                "ean_pool_assignments": ean_pool_assignments,
+            }
+
+        expanded_products = expand_products_with_variants(
+            products,
+            media_base_url=media_base_url,
+        )
+        products_for_otto = [
+            _shape_product_media_assets_for_otto(item)
+            for item in await _translate_user_attribute_values_for_otto(
+                expanded_products
+            )
+            if isinstance(item, dict)
+        ]
+
+        validated: list[dict[str, Any]] = []
+        validated_models: list[ProductPayload] = []
+        for item in products_for_otto:
+            model = ProductPayload.model_validate(item)
+            validated_models.append(model)
+            validated_item = model.model_dump(mode="json", exclude_none=True)
+            shipping_profile_id = str(
+                item.get("shippingProfileID")
+                or item.get("shippingProfileId")
+                or item.get("shipping_profile_id")
+                or ""
+            ).strip()
+            if shipping_profile_id:
+                validated_item["shippingProfileID"] = shipping_profile_id
+            validated.append(validated_item)
+
+        xl_ean_map: dict[str, str] = {}
+        xl_ean_map_meta: dict[str, Any] = {}
+        xl_validated: list[dict[str, Any]] = []
+        xl_validated_models: list[ProductPayload] = []
+        if controller == Controller.JV and afterbuy is not None:
+            xl_ean_map, xl_ean_map_meta = await _map_eans_from_counterpart_factory_by_index(
+                afterbuy=afterbuy,
+                source_factory_id=factory_id,
+                target_controller=Controller.XL,
+                source_items=source_items,
+                products=validated,
+            )
+            xl_validated = _clone_products_with_account_map(
+                validated,
+                xl_ean_map,
+                controller=Controller.XL,
+            )
+            xl_validated_models = [
+                ProductPayload.model_validate(item) for item in xl_validated
+            ]
+
+        jv_snapshot_payloads = [
+            _create_product_body(
+                _apply_account_fields_to_product(item, controller=controller)
+            )
+            for item in validated
+        ]
+        jv_snapshot_path = _save_final_edited_payloads_snapshot(
+            payloads=jv_snapshot_payloads,
+            controller=controller,
+            factory_id=factory_id,
+            process_id=f"{process_id}_preview",
+        )
+        xl_snapshot_path = None
+        if xl_validated:
+            xl_snapshot_path = _save_final_edited_payloads_snapshot(
+                payloads=[_create_product_body(item) for item in xl_validated],
+                controller=Controller.XL,
+                factory_id=factory_id,
+                process_id=f"{process_id}_preview",
+            )
+        availability_payloads = [
+            _availability_payload_item(controller=controller, product=item)
+            for item in validated
+        ] + [
+            _availability_payload_item(controller=Controller.XL, product=item)
+            for item in xl_validated
+        ]
+        availability_snapshot_path = _save_final_availability_snapshot(
+            payloads=availability_payloads,
+            factory_id=factory_id,
+            process_id=f"{process_id}_preview",
+        )
+
+        return {
+            "success": True,
+            "process_id": process_id,
+            "controller": controller.value,
+            "factory_id": factory_id,
+            "jv_snapshot_path": jv_snapshot_path.as_posix(),
+            "xl_snapshot_path": xl_snapshot_path.as_posix()
+            if xl_snapshot_path is not None
+            else None,
+            "availability_snapshot_path": availability_snapshot_path.as_posix(),
+            "products_count": len(validated_models),
+            "xl_products_count": len(xl_validated_models),
+            "ean_pool_assignments": ean_pool_assignments,
+            "ean_pool_preview_released": True,
+            "xl_ean_map": xl_ean_map,
+            "xl_ean_map_meta": xl_ean_map_meta,
+            "sample": {
+                "jv": [
+                    {
+                        "sku": item.get("sku"),
+                        "ean": item.get("ean"),
+                        "productReference": item.get("productReference"),
+                    }
+                    for item in validated[:5]
+                ],
+                "xl": [
+                    {
+                        "sku": item.get("sku"),
+                        "ean": item.get("ean"),
+                        "productReference": item.get("productReference"),
+                    }
+                    for item in xl_validated[:5]
+                ],
+            },
+        }
+    finally:
+        await _release_ean_pool_assignments(ean_pool_assignments)
+
+
+async def _run_factory_availability_task(
+    *,
+    process_id: str,
+    availability_items: list[dict[str, Any]],
+    product_service: ProductService,
+) -> None:
+    task = await _get_factory_task_state(process_id) or {
+        "process_id": process_id,
+        "status": "DONE",
+    }
+    MAPPER_LOGGER.info(
+        "step=availability_background_delay_start process_id=%s delay_sec=%s products=%s",
+        process_id,
+        FACTORY_AVAILABILITY_AFTER_CREATE_DELAY_SEC,
+        len(availability_items),
+    )
+    await asyncio.sleep(FACTORY_AVAILABILITY_AFTER_CREATE_DELAY_SEC)
+
+    task["availability_state"] = "IN_PROGRESS"
+    task["availability_started_at"] = datetime.now(UTC).isoformat()
+    task["availability_progress_total"] = len(availability_items)
+    task["availability_progress_completed"] = 0
+    task["availability_progress_percent"] = 0
+    task["updated_at"] = datetime.now(UTC).isoformat()
+    task["heartbeat_at"] = task["updated_at"]
+    await _save_factory_task_state(process_id, task)
+
+    availability_errors: list[dict[str, str]] = []
+    availability_queue: asyncio.Queue[tuple[int, dict[str, Any]] | None] = asyncio.Queue()
+    availability_lock = asyncio.Lock()
+
+    async def _submit_availability(index: int, item: dict[str, Any]) -> None:
+        item_controller = Controller(str(item.get("controller") or "jv").lower())
+        sku = str(item.get("sku") or "").strip()
+        shipping_profile_id = str(item.get("shippingProfileID") or "").strip()
+        quantity = str(item.get("quantity") or "20").strip() or "20"
+        processing_time = str(item.get("processingTime") or "DEFAULT").strip() or "DEFAULT"
+        MAPPER_LOGGER.info(
+            "step=availability_background_item_start process_id=%s index=%s controller=%s sku=%s shipping_profile_id=%s quantity=%s",
+            process_id,
+            index,
+            item_controller.value,
+            sku or "-",
+            shipping_profile_id or "-",
+            quantity,
+        )
+        if not sku:
+            raise ValueError("missing sku")
+        if not shipping_profile_id:
+            raise ValueError("missing shipping profile")
+
+        availability_result = await product_service.create_availability(
+            Availability(
+                sku=sku,
+                quantity=quantity,
+                shippingProfileID=shipping_profile_id,
+                processingTime=processing_time,
+                controller=item_controller,
+            )
+        )
+        quantity_ok = bool(
+            availability_result.update_quantity
+            and availability_result.update_quantity.success
+        )
+        delivery_ok = bool(
+            availability_result.update_delivery
+            and availability_result.update_delivery.success
+        )
+        if not quantity_ok or not delivery_ok:
+            quantity_error = (
+                availability_result.update_quantity.errors
+                if availability_result.update_quantity
+                else ""
+            )
+            delivery_error = (
+                availability_result.update_delivery.errors
+                if availability_result.update_delivery
+                else ""
+            )
+            availability_errors.append(
+                {
+                    "variation": sku,
+                    "code": "availability_failed",
+                    "title": f"quantity={quantity_error or 'ok'}, delivery={delivery_error or 'ok'}",
+                    "jsonPath": "availability",
+                }
+            )
+            MAPPER_LOGGER.warning(
+                "step=availability_background_item_result_failed process_id=%s index=%s controller=%s sku=%s quantity_ok=%s delivery_ok=%s quantity_error=%s delivery_error=%s",
+                process_id,
+                index,
+                item_controller.value,
+                sku,
+                quantity_ok,
+                delivery_ok,
+                quantity_error or "",
+                delivery_error or "",
+            )
+
+        async with availability_lock:
+            current = await _get_factory_task_state(process_id) or task
+            current["availability_progress_completed"] = (
+                int(current.get("availability_progress_completed", 0)) + 1
+            )
+            current["availability_progress_percent"] = int(
+                round(
+                    (
+                        current["availability_progress_completed"]
+                        / max(1, len(availability_items))
+                    )
+                    * 100
+                )
+            )
+            current["updated_at"] = datetime.now(UTC).isoformat()
+            current["heartbeat_at"] = current["updated_at"]
+            await _save_factory_task_state(process_id, current)
+
+    async def _availability_worker(worker_id: int) -> None:
+        while True:
+            queued = await availability_queue.get()
+            try:
+                if queued is None:
+                    return
+                index, item = queued
+                try:
+                    await _submit_availability(index, item)
+                except Exception as exc:
+                    sku = str(item.get("sku") or "unknown").strip() or "unknown"
+                    availability_errors.append(
+                        {
+                            "variation": sku,
+                            "code": "availability_failed",
+                            "title": str(exc),
+                            "jsonPath": "availability",
+                        }
+                    )
+                    MAPPER_LOGGER.exception(
+                        "step=availability_background_item_failed process_id=%s worker=%s index=%s sku=%s error=%s",
+                        process_id,
+                        worker_id,
+                        index,
+                        sku,
+                        exc,
+                    )
+                    async with availability_lock:
+                        current = await _get_factory_task_state(process_id) or task
+                        current["availability_progress_completed"] = (
+                            int(current.get("availability_progress_completed", 0)) + 1
+                        )
+                        current["availability_progress_percent"] = int(
+                            round(
+                                (
+                                    current["availability_progress_completed"]
+                                    / max(1, len(availability_items))
+                                )
+                                * 100
+                            )
+                        )
+                        current["updated_at"] = datetime.now(UTC).isoformat()
+                        current["heartbeat_at"] = current["updated_at"]
+                        await _save_factory_task_state(process_id, current)
+            finally:
+                availability_queue.task_done()
+
+    for index, item in enumerate(availability_items):
+        await availability_queue.put((index, item))
+
+    availability_worker_count = min(
+        FACTORY_PRODUCT_CONCURRENCY,
+        len(availability_items),
+    )
+    availability_workers = [
+        asyncio.create_task(_availability_worker(worker_id))
+        for worker_id in range(availability_worker_count)
+    ]
+    for _ in availability_workers:
+        await availability_queue.put(None)
+    await availability_queue.join()
+    await asyncio.gather(*availability_workers)
+
+    current = await _get_factory_task_state(process_id) or task
+    current["availability_errors_original"] = availability_errors
+    current["availability_errors"] = (
+        await _translate_otto_error_payload_for_ui(availability_errors)
+        if availability_errors
+        else availability_errors
+    )
+    current["availability_failed"] = len(availability_errors)
+    current["availability_state"] = "FAILED" if availability_errors else "DONE"
+    current["availability_finished_at"] = datetime.now(UTC).isoformat()
+    current["availability_progress_completed"] = len(availability_items)
+    current["availability_progress_total"] = len(availability_items)
+    current["availability_progress_percent"] = 100
+    current["updated_at"] = datetime.now(UTC).isoformat()
+    current["heartbeat_at"] = current["updated_at"]
+    await _save_factory_task_state(process_id, current)
+    MAPPER_LOGGER.info(
+        "step=availability_background_done process_id=%s products=%s failed=%s",
+        process_id,
+        len(availability_items),
+        len(availability_errors),
+    )
+
+
 async def _run_factory_submit_task(
     *,
     process_id: str,
     payload: dict[str, Any],
     product_service: ProductService,
+    afterbuy: AfterbuyService | None = None,
 ) -> None:
     task = await _get_factory_task_state(process_id)
     MAPPER_LOGGER.info(
@@ -3533,12 +4385,29 @@ async def _run_factory_submit_task(
             process_id,
         )
         return
+    products = [copy.deepcopy(item) for item in products if isinstance(item, dict)]
+    if not products:
+        MAPPER_LOGGER.error(
+            "step=submit_final_products_failed process_id=%s error=no_valid_products",
+            process_id,
+        )
+        return
 
     validated: list[dict[str, Any]] = []
     validated_models: list[ProductPayload] = []
+    xl_validated: list[dict[str, Any]] = []
+    xl_validated_models: list[ProductPayload] = []
+    xl_ean_map: dict[str, str] = {}
+    xl_ean_map_meta: dict[str, Any] = {}
+    ean_pool_assignments: list[dict[str, str]] = []
     controller_value = str(
         (task or {}).get("controller") or payload.get("controller") or "jv"
     ).lower()
+    factory_id = str(
+        (task or {}).get("factory_id") or payload.get("factory_id") or "unknown"
+    )
+    source_items_raw = (task or {}).get("source_items_raw")
+    source_items = source_items_raw if isinstance(source_items_raw, list) else []
 
     try:
         controller = Controller(controller_value)
@@ -3549,11 +4418,15 @@ async def _run_factory_submit_task(
             task["heartbeat_at"] = task["updated_at"]
             await _save_factory_task_state(process_id, task)
 
-        products_with_variants = [
-            item
-            for item in products
-            if isinstance(item, dict) and active_variant_items(item)
-        ]
+        products_with_variants = [item for item in products if active_variant_items(item)]
+        ean_pool_assignments = await _fill_missing_variant_eans_from_pool(
+            process_id=process_id,
+            products=products_with_variants,
+        )
+        if ean_pool_assignments:
+            task["ean_pool_assignments"] = ean_pool_assignments
+            await _save_factory_task_state(process_id, task)
+
         variant_validation_errors = validate_variant_export_identifiers(
             products_with_variants
         )
@@ -3588,6 +4461,7 @@ async def _run_factory_submit_task(
                     variant_validation_errors = []
 
         if variant_validation_errors:
+            await _release_ean_pool_assignments(ean_pool_assignments)
             if task is None:
                 task = {
                     "process_id": process_id,
@@ -3665,12 +4539,69 @@ async def _run_factory_submit_task(
                 )
             validated.append(validated_item)
 
-        factory_id = str(
-            (task or {}).get("factory_id") or payload.get("factory_id") or "unknown"
-        )
+        if controller == Controller.JV and afterbuy is not None:
+            try:
+                xl_ean_map, xl_ean_map_meta = await _map_eans_from_counterpart_factory_by_index(
+                    afterbuy=afterbuy,
+                    source_factory_id=factory_id,
+                    target_controller=Controller.XL,
+                    source_items=source_items,
+                    products=validated,
+                )
+            except Exception as exc:
+                MAPPER_LOGGER.warning(
+                    "step=xl_ean_mapping_failed process_id=%s error=%s",
+                    process_id,
+                    exc,
+                )
+                xl_ean_map = {}
+                xl_ean_map_meta = {"error": str(exc)}
+            xl_validated = _clone_products_with_account_map(
+                validated,
+                xl_ean_map,
+                controller=Controller.XL,
+            )
+            for index, item in enumerate(xl_validated):
+                model = ProductPayload.model_validate(item)
+                xl_validated_models.append(model)
+                MAPPER_LOGGER.info(
+                    "step=submit_final_products_xl_item_validated process_id=%s index=%s sku=%s source_ean=%s xl_ean=%s",
+                    process_id,
+                    index,
+                    model.sku,
+                    validated[index].get("ean") if index < len(validated) else "",
+                    item.get("ean"),
+                )
+
+        jv_snapshot_payloads = [
+            _create_product_body(
+                _apply_account_fields_to_product(item, controller=controller)
+            )
+            for item in validated
+        ]
         file_path = _save_final_edited_payloads_snapshot(
-            payloads=validated,
+            payloads=jv_snapshot_payloads,
             controller=controller,
+            factory_id=factory_id,
+            process_id=process_id,
+        )
+        xl_file_path = None
+        if xl_validated:
+            xl_file_path = _save_final_edited_payloads_snapshot(
+                payloads=[_create_product_body(item) for item in xl_validated],
+                controller=Controller.XL,
+                factory_id=factory_id,
+                process_id=process_id,
+            )
+        availability_payloads = [
+            _availability_payload_item(controller=controller, product=item)
+            for item in validated
+        ] + [
+            _availability_payload_item(controller=Controller.XL, product=item)
+            for item in xl_validated
+        ]
+        availability_file_path = _save_final_availability_snapshot(
+            payloads=availability_payloads,
             factory_id=factory_id,
             process_id=process_id,
         )
@@ -3683,6 +4614,12 @@ async def _run_factory_submit_task(
                 "created_at": datetime.now(UTC).isoformat(),
             }
         task["final_snapshot_path"] = file_path.as_posix()
+        if xl_file_path is not None:
+            task["final_snapshot_path_xl"] = xl_file_path.as_posix()
+        task["availability_snapshot_path"] = availability_file_path.as_posix()
+        task["xl_ean_map"] = xl_ean_map
+        task["xl_ean_map_meta"] = xl_ean_map_meta
+        task["xl_products_count"] = len(xl_validated_models)
         task["final_products_count"] = len(validated)
         task["current_step"] = "otto_create_in_progress"
         task["updated_at"] = datetime.now(UTC).isoformat()
@@ -3704,6 +4641,21 @@ async def _run_factory_submit_task(
             controller=controller,
             products=validated_models,
         )
+        xl_otto_process_id = None
+        xl_otto_state = None
+        xl_update_result = None
+        xl_failed_result = None
+        if xl_validated_models:
+            (
+                xl_otto_process_id,
+                xl_otto_state,
+                xl_update_result,
+                xl_failed_result,
+            ) = await _submit_products_to_otto_in_batches(
+                product_service=product_service,
+                controller=Controller.XL,
+                products=xl_validated_models,
+            )
 
         task["otto_process_id"] = otto_process_id
         task["otto_create_state"] = otto_state
@@ -3719,227 +4671,84 @@ async def _run_factory_submit_task(
         )
         if failed_issues:
             task["issues"] = failed_issues[:100]
+        if xl_validated_models:
+            task["otto_xl_process_id"] = xl_otto_process_id
+            task["otto_xl_create_state"] = xl_otto_state
+            task["otto_xl_update_result"] = xl_update_result
+            task["otto_xl_failed_result_original"] = xl_failed_result
+            task["otto_xl_failed_result"] = (
+                await _translate_otto_error_payload_for_ui(xl_failed_result)
+                if xl_failed_result
+                else xl_failed_result
+            )
+            xl_failed_issues = _extract_otto_error_issues(
+                task["otto_xl_failed_result"] or xl_failed_result
+            )
+            if xl_failed_issues:
+                task["issues"] = (task.get("issues") or []) + xl_failed_issues[:100]
         task["updated_at"] = datetime.now(UTC).isoformat()
         task["heartbeat_at"] = task["updated_at"]
+        create_failed_count = int((update_result or {}).get("failed") or 0)
+        xl_create_failed_count = int((xl_update_result or {}).get("failed") or 0)
         task["status"] = (
-            "DONE" if int((update_result or {}).get("failed") or 0) == 0 else "FAILED"
+            "DONE"
+            if create_failed_count == 0 and xl_create_failed_count == 0
+            else "FAILED"
         )
         task["current_step"] = "otto_create_done"
-        task["products_count"] = len(validated_models)
+        task["products_count"] = len(validated_models) + len(xl_validated_models)
+        jv_create_done = (
+            create_failed_count == 0
+            and int((update_result or {}).get("succeeded") or 0) >= len(validated_models)
+        )
+        if jv_create_done:
+            await _mark_ean_pool_assignments_used(ean_pool_assignments)
+        else:
+            await _release_ean_pool_assignments(ean_pool_assignments)
         await _save_factory_task_state(process_id, task)
 
         succeeded_count = int((update_result or {}).get("succeeded") or 0)
-        if task["status"] != "DONE" or succeeded_count < len(validated_models):
+        xl_succeeded_count = int((xl_update_result or {}).get("succeeded") or 0)
+        xl_create_done = not xl_validated_models or xl_succeeded_count >= len(
+            xl_validated_models
+        )
+        if (
+            task["status"] != "DONE"
+            or succeeded_count < len(validated_models)
+            or not xl_create_done
+        ):
             MAPPER_LOGGER.warning(
-                "step=submit_availability_skipped process_id=%s status=%s succeeded=%s expected=%s update_result=%s",
+                "step=submit_availability_skipped process_id=%s status=%s succeeded=%s expected=%s xl_succeeded=%s xl_expected=%s update_result=%s xl_update_result=%s",
                 process_id,
                 task["status"],
                 succeeded_count,
                 len(validated_models),
+                xl_succeeded_count,
+                len(xl_validated_models),
                 update_result,
+                xl_update_result,
             )
-        if task["status"] == "DONE" and succeeded_count >= len(validated_models):
+        elif (
+            succeeded_count >= len(validated_models)
+            and xl_create_done
+        ):
+            task["availability_state"] = "QUEUED"
+            task["availability_progress_total"] = len(availability_payloads)
+            task["availability_progress_completed"] = 0
+            task["availability_progress_percent"] = 0
+            task["availability_queued_at"] = datetime.now(UTC).isoformat()
+            await _save_factory_task_state(process_id, task)
             MAPPER_LOGGER.info(
-                "step=submit_availability_delay_start process_id=%s delay_sec=%s products=%s",
+                "step=availability_background_enqueue process_id=%s delay_sec=%s products=%s",
                 process_id,
                 FACTORY_AVAILABILITY_AFTER_CREATE_DELAY_SEC,
-                len(validated),
+                len(availability_payloads),
             )
-            await asyncio.sleep(FACTORY_AVAILABILITY_AFTER_CREATE_DELAY_SEC)
-            task["current_step"] = "availability_in_progress"
-            task["progress_total"] = len(validated)
-            task["progress_completed"] = 0
-            task["progress_percent"] = 0
-            task["updated_at"] = datetime.now(UTC).isoformat()
-            task["heartbeat_at"] = task["updated_at"]
-            await _save_factory_task_state(process_id, task)
-
-            availability_errors: list[dict[str, str]] = []
-            availability_queue: asyncio.Queue[tuple[int, dict[str, Any]] | None] = (
-                asyncio.Queue()
+            await enqueue_job(
+                "submit_factory_availability_task",
+                process_id=process_id,
+                availability_items=availability_payloads,
             )
-            availability_lock = asyncio.Lock()
-
-            MAPPER_LOGGER.info(
-                "step=submit_availability_start process_id=%s products=%s concurrency=%s controller=%s",
-                process_id,
-                len(validated),
-                min(FACTORY_PRODUCT_CONCURRENCY, len(validated)),
-                controller.value,
-            )
-
-            async def _submit_availability(index: int, item: dict[str, Any]) -> None:
-                sku = str(item.get("sku") or "").strip()
-                shipping_profile_id = str(item.get("shippingProfileID") or "").strip()
-                MAPPER_LOGGER.info(
-                    "step=submit_availability_item_start process_id=%s index=%s sku=%s shipping_profile_id=%s quantity=%s",
-                    process_id,
-                    index,
-                    sku or "-",
-                    shipping_profile_id or "-",
-                    "20",
-                )
-                if not sku:
-                    raise ValueError("missing sku")
-                if not shipping_profile_id:
-                    raise ValueError("missing shipping profile")
-                availability_result = await product_service.create_availability(
-                    Availability(
-                        sku=sku,
-                        quantity="20",
-                        shippingProfileID=shipping_profile_id,
-                        controller=controller,
-                    )
-                )
-                quantity_ok = bool(
-                    availability_result.update_quantity
-                    and availability_result.update_quantity.success
-                )
-                delivery_ok = bool(
-                    availability_result.update_delivery
-                    and availability_result.update_delivery.success
-                )
-                if not quantity_ok or not delivery_ok:
-                    quantity_error = (
-                        availability_result.update_quantity.errors
-                        if availability_result.update_quantity
-                        else ""
-                    )
-                    delivery_error = (
-                        availability_result.update_delivery.errors
-                        if availability_result.update_delivery
-                        else ""
-                    )
-                    availability_errors.append(
-                        {
-                            "variation": sku,
-                            "code": "availability_failed",
-                            "title": f"quantity={quantity_error or 'ok'}, delivery={delivery_error or 'ok'}",
-                            "jsonPath": "availability",
-                        }
-                    )
-                    MAPPER_LOGGER.warning(
-                        "step=submit_availability_item_result_failed process_id=%s index=%s sku=%s quantity_ok=%s delivery_ok=%s quantity_error=%s delivery_error=%s",
-                        process_id,
-                        index,
-                        sku,
-                        quantity_ok,
-                        delivery_ok,
-                        quantity_error or "",
-                        delivery_error or "",
-                    )
-                async with availability_lock:
-                    task["progress_completed"] = (
-                        int(task.get("progress_completed", 0)) + 1
-                    )
-                    task["progress_percent"] = int(
-                        round(
-                            (task["progress_completed"] / max(1, len(validated))) * 100
-                        )
-                    )
-                    task["updated_at"] = datetime.now(UTC).isoformat()
-                    task["heartbeat_at"] = task["updated_at"]
-                    await _save_factory_task_state(process_id, task)
-                MAPPER_LOGGER.info(
-                    "step=submit_availability_item_done process_id=%s index=%s sku=%s quantity_ok=%s delivery_ok=%s",
-                    process_id,
-                    index,
-                    sku,
-                    quantity_ok,
-                    delivery_ok,
-                )
-
-            async def _availability_worker(worker_id: int) -> None:
-                while True:
-                    queued = await availability_queue.get()
-                    try:
-                        if queued is None:
-                            return
-                        index, item = queued
-                        try:
-                            await _submit_availability(index, item)
-                        except Exception as exc:
-                            sku = str(item.get("sku") or "unknown").strip() or "unknown"
-                            availability_errors.append(
-                                {
-                                    "variation": sku,
-                                    "code": "availability_failed",
-                                    "title": str(exc),
-                                    "jsonPath": "availability",
-                                }
-                            )
-                            MAPPER_LOGGER.exception(
-                                "step=submit_availability_item_failed process_id=%s worker=%s index=%s sku=%s error=%s",
-                                process_id,
-                                worker_id,
-                                index,
-                                sku,
-                                exc,
-                            )
-                            async with availability_lock:
-                                task["progress_completed"] = (
-                                    int(task.get("progress_completed", 0)) + 1
-                                )
-                                task["progress_percent"] = int(
-                                    round(
-                                        (
-                                            task["progress_completed"]
-                                            / max(1, len(validated))
-                                        )
-                                        * 100
-                                    )
-                                )
-                                task["updated_at"] = datetime.now(UTC).isoformat()
-                                task["heartbeat_at"] = task["updated_at"]
-                                await _save_factory_task_state(process_id, task)
-                    finally:
-                        availability_queue.task_done()
-
-            for index, item in enumerate(validated):
-                MAPPER_LOGGER.debug(
-                    "step=submit_availability_queue_item process_id=%s index=%s sku=%s shipping_profile_id=%s",
-                    process_id,
-                    index,
-                    item.get("sku"),
-                    item.get("shippingProfileID"),
-                )
-                await availability_queue.put((index, item))
-
-            availability_worker_count = min(FACTORY_PRODUCT_CONCURRENCY, len(validated))
-            availability_workers = [
-                asyncio.create_task(_availability_worker(worker_id))
-                for worker_id in range(availability_worker_count)
-            ]
-            for _ in availability_workers:
-                await availability_queue.put(None)
-            await availability_queue.join()
-            await asyncio.gather(*availability_workers)
-            MAPPER_LOGGER.info(
-                "step=submit_availability_done process_id=%s products=%s failed=%s",
-                process_id,
-                len(validated),
-                len(availability_errors),
-            )
-            task["availability_errors_original"] = availability_errors
-            task["availability_errors"] = (
-                await _translate_otto_error_payload_for_ui(availability_errors)
-                if availability_errors
-                else availability_errors
-            )
-            task["availability_failed"] = len(availability_errors)
-            task["status"] = "FAILED" if availability_errors else "DONE"
-            task["current_step"] = "availability_done"
-            task["updated_at"] = datetime.now(UTC).isoformat()
-            task["heartbeat_at"] = task["updated_at"]
-            task["progress_completed"] = len(validated)
-            task["progress_total"] = len(validated)
-            task["progress_percent"] = 100
-            if availability_errors:
-                task["issues"] = [
-                    f"{item['variation']}: {item['code']}"
-                    for item in availability_errors[:100]
-                ]
-            await _save_factory_task_state(process_id, task)
 
         MAPPER_LOGGER.info(
             "step=submit_final_products_done process_id=%s status=%s products=%s",
@@ -3948,6 +4757,7 @@ async def _run_factory_submit_task(
             len(validated_models),
         )
     except Exception as exc:
+        await _release_ean_pool_assignments(ean_pool_assignments)
         current = task or {
             "process_id": process_id,
             "status": "FAILED",
@@ -3963,6 +4773,81 @@ async def _run_factory_submit_task(
             process_id,
             exc,
         )
+
+
+@router.post("/tasks/create-from-factory/{process_id}/submit-preview")
+async def preview_factory_submit_payloads(
+    process_id: str,
+    request: Request,
+    payload: dict[str, Any] = Body(default_factory=dict),
+    afterbuy: AfterbuyService = Depends(get_afterbuy_login),
+    current_user=Depends(require_role([RoleEnum.SEO])),
+):
+    if not settings.factory_submit_preview_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Submit preview endpoint is disabled.",
+        )
+
+    task = await _get_owned_factory_task_state(process_id, current_user.id)
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found.",
+        )
+
+    preview_payload = dict(payload or {})
+    if not isinstance(preview_payload.get("products"), list):
+        preview_payload["products"] = task.get("products") or task.get("submitted_products")
+    preview_payload["controller"] = (
+        preview_payload.get("controller") or task.get("controller") or "jv"
+    )
+    preview_payload["factory_id"] = (
+        preview_payload.get("factory_id") or task.get("factory_id") or "unknown"
+    )
+    preview_payload["media_base_url"] = (
+        str(preview_payload.get("media_base_url") or "").strip()
+        or str(request.base_url).rstrip("/")
+    )
+
+    try:
+        result = await _build_factory_submit_preview_snapshots(
+            process_id=process_id,
+            payload=preview_payload,
+            task=task,
+            afterbuy=afterbuy,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        MAPPER_LOGGER.exception(
+            "step=submit_preview_failed process_id=%s error=%s",
+            process_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+    now = datetime.now(UTC).isoformat()
+    task["submit_preview"] = {
+        "created_at": now,
+        "jv_snapshot_path": result.get("jv_snapshot_path"),
+        "xl_snapshot_path": result.get("xl_snapshot_path"),
+        "products_count": result.get("products_count"),
+        "xl_products_count": result.get("xl_products_count"),
+        "xl_ean_map": result.get("xl_ean_map") or {},
+        "xl_ean_map_meta": result.get("xl_ean_map_meta") or {},
+        "ean_pool_assignments": result.get("ean_pool_assignments") or [],
+        "ean_pool_preview_released": result.get("ean_pool_preview_released"),
+    }
+    task["updated_at"] = now
+    await _save_factory_task_state(process_id, task)
+    return result
 
 
 @router.post("/tasks/create-from-factory/{process_id}/submit")

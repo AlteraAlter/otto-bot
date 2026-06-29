@@ -78,6 +78,24 @@ async def submit_factory_products_task(
         process_id=process_id,
         payload=payload,
         product_service=get_product_service(),
+        afterbuy=get_afterbuy_login(),
+    )
+
+
+async def submit_factory_availability_task(
+    ctx: dict[str, Any],
+    *,
+    process_id: str,
+    availability_items: list[dict[str, Any]],
+) -> None:
+    """Send stock and delivery profile after OTTO product creation succeeds."""
+    del ctx
+    from app.api.routes.products import _run_factory_availability_task
+
+    await _run_factory_availability_task(
+        process_id=process_id,
+        availability_items=availability_items,
+        product_service=get_product_service(),
     )
 
 
@@ -101,6 +119,7 @@ class WorkerSettings:
         prepare_factory_products_task,
         enrich_factory_products_task,
         submit_factory_products_task,
+        submit_factory_availability_task,
         regenerate_product_variant_image_task,
     ]
     redis_settings = redis_settings

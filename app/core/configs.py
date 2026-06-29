@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     db_name: str
     db_user: str
     db_pass: str
+    sqlalchemy_echo: bool = False
 
     # JWT settings
     jwt_secret_key: str
@@ -73,6 +74,7 @@ class Settings(BaseSettings):
     arq_job_timeout_seconds: int = 7200
     factory_product_concurrency: int = 10
     factory_ai_enrich_item_timeout_seconds: int = 300
+    factory_submit_preview_enabled: bool = True
 
     gpt_key: str
     deepl_api_key_test: str | None = None

@@ -64,6 +64,7 @@ services:
       - ./storage/uploads:/app/uploads
       - ./storage/generated:/app/storage/generated
       - ./logs:/app/logs
+      - ./temp:/app/temp
     depends_on:
       postgres:
         condition: service_healthy
@@ -103,6 +104,7 @@ services:
     volumes:
       - ./storage/generated:/app/storage/generated
       - ./logs:/app/logs
+      - ./temp:/app/temp
     restart: unless-stopped
 
   frontend:

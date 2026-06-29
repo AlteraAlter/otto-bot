@@ -66,6 +66,7 @@ services:
       - uploads-data:/app/uploads
       - generated-media-data:/app/storage/generated
       - backend-logs:/app/logs
+      - ./temp:/app/temp
     depends_on:
       postgres:
         condition: service_healthy

@@ -6,7 +6,7 @@ from email.utils import parsedate_to_datetime
 
 import httpx
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.configs import settings
@@ -236,16 +236,20 @@ class TranslationService:
         target_lang: str,
         context: str | None,
     ) -> str | None:
-        result = await self.db.execute(
-            select(TranslationCache.translated_text).where(
-                TranslationCache.original_text == original_text,
-                TranslationCache.source_lang == source_lang,
-                TranslationCache.target_lang == target_lang,
-                TranslationCache.provider == self.provider,
-                TranslationCache.context == context,
+        try:
+            result = await self.db.execute(
+                select(TranslationCache.translated_text).where(
+                    TranslationCache.original_text == original_text,
+                    TranslationCache.source_lang == source_lang,
+                    TranslationCache.target_lang == target_lang,
+                    TranslationCache.provider == self.provider,
+                    TranslationCache.context == context,
+                )
             )
-        )
-        return result.scalar_one_or_none()
+            return result.scalar_one_or_none()
+        except (DBAPIError, ProgrammingError):
+            await self.db.rollback()
+            return None
 
     async def _store_cached(
         self,
@@ -268,5 +272,5 @@ class TranslationService:
         )
         try:
             await self.db.commit()
-        except IntegrityError:
+        except (DBAPIError, IntegrityError, ProgrammingError):
             await self.db.rollback()
