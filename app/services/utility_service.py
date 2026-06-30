@@ -2,13 +2,16 @@ import httpx
 from playwright.async_api import async_playwright
 from playwright_stealth.stealth import Stealth
 
+from app.core.logger import logging
 from app.schemas.product_response import UrlProcessResult
 from app.utils.delete_script_by_url import parse_sku
+
+logger = logging.getLogger(__name__)
 
 
 class UtilityService:
     async def _fetch_page_html(self, url: str):
-        print("Fetching with playwright")
+        logger.info("Загрузка страницы через Playwright: url=%s", url)
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 channel="chrome",
@@ -47,7 +50,9 @@ class UtilityService:
 
             await page.wait_for_timeout(10000)
 
-            print(await page.title())
+            logger.info(
+                "Страница загружена через Playwright: title=%s", await page.title()
+            )
 
             await page.screenshot(path="/app/debug.png", full_page=True)
 

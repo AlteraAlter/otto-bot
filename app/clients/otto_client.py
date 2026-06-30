@@ -144,7 +144,7 @@ class OttoClient:
     async def get_product(self, sku: str) -> ProductResponse:
         """GET a single product by SKU."""
         response = await self._request("GET", f"/v5/products/{sku}")
-        print(response)
+        LOGGER.debug("Получен продукт OTTO: sku=%s response=%s", sku, response)
         return ProductResponse.model_validate(response)
 
     async def get_shipping_profiles(self, controller: Controller | str = Controller.JV):

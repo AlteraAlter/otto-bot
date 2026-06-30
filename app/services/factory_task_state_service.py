@@ -52,7 +52,10 @@ class FactoryTaskStateService:
             await self._mongo_collection.create_index("status")
             await self._mongo_collection.create_index("current_step")
         except Exception:
-            self._logger.debug("mongo_init_failed")
+            self._logger.debug(
+                "MongoDB для состояний фабричных задач недоступна при инициализации",
+                exc_info=True,
+            )
             self._mongo_collection = None
         return self._mongo_collection
 
@@ -91,7 +94,11 @@ class FactoryTaskStateService:
                             document.get("created_by_user_id"),
                         )
             except Exception:
-                self._logger.debug("mongo_get_failed process_id=%s", process_id)
+                self._logger.debug(
+                    "Не удалось получить состояние фабричной задачи из MongoDB: process_id=%s",
+                    process_id,
+                    exc_info=True,
+                )
 
         redis_client = await self._get_redis()
         if redis_client is not None:
@@ -102,7 +109,11 @@ class FactoryTaskStateService:
                     if isinstance(payload, dict):
                         return self._normalize_task(process_id, payload)
             except Exception:
-                self._logger.debug("redis_get_failed process_id=%s", process_id)
+                self._logger.debug(
+                    "Не удалось получить состояние фабричной задачи из Redis: process_id=%s",
+                    process_id,
+                    exc_info=True,
+                )
 
         async with SessionLocal() as session:
             record = await session.get(FactoryTaskState, process_id)
@@ -207,7 +218,11 @@ class FactoryTaskStateService:
                     upsert=True,
                 )
             except Exception:
-                self._logger.debug("mongo_save_failed process_id=%s", process_id)
+                self._logger.debug(
+                    "Не удалось сохранить состояние фабричной задачи в MongoDB: process_id=%s",
+                    process_id,
+                    exc_info=True,
+                )
 
         await self.cache_task(process_id, normalized)
         return normalized
@@ -218,14 +233,22 @@ class FactoryTaskStateService:
             try:
                 await mongo_collection.delete_one({"process_id": process_id})
             except Exception:
-                self._logger.debug("mongo_delete_failed process_id=%s", process_id)
+                self._logger.debug(
+                    "Не удалось удалить состояние фабричной задачи из MongoDB: process_id=%s",
+                    process_id,
+                    exc_info=True,
+                )
 
         redis_client = await self._get_redis()
         if redis_client is not None:
             try:
                 await redis_client.delete(self._cache_key(process_id))
             except Exception:
-                self._logger.debug("redis_delete_failed process_id=%s", process_id)
+                self._logger.debug(
+                    "Не удалось удалить состояние фабричной задачи из Redis: process_id=%s",
+                    process_id,
+                    exc_info=True,
+                )
 
         async with SessionLocal() as session:
             record = await session.get(FactoryTaskState, process_id)
@@ -252,4 +275,8 @@ class FactoryTaskStateService:
                 ex=ttl_seconds,
             )
         except Exception:
-            self._logger.debug("redis_set_failed process_id=%s", process_id)
+            self._logger.debug(
+                "Не удалось сохранить состояние фабричной задачи в Redis: process_id=%s",
+                process_id,
+                exc_info=True,
+            )

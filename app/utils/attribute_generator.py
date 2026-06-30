@@ -3611,9 +3611,10 @@ if __name__ == "__main__":
     import json
 
     from ..core.configs import settings
+    from ..core.logger import logging
     from ..mapper.product_mapper import ProductMapper
     from .gpt_helper import GPTHelper
 
     res = asyncio.run(main())
 
-    print(res)
+    logging.getLogger(__name__).info("Атрибуты сгенерированы: result=%s", res)

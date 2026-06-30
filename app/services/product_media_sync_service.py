@@ -8,9 +8,12 @@ from typing import Any
 from sqlalchemy import delete, func, insert, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logger import logging
 from app.models.product_attributes import ProductAttributes
 from app.models.products import Product
 from app.services.product_service import ProductService
+
+logger = logging.getLogger(__name__)
 
 DESCRIPTION_ATTRIBUTE_NAME = "description"
 BULLET_POINT_ATTRIBUTE_NAME = "bullet_point"
@@ -244,11 +247,17 @@ async def sync_product_media_assets(
                 product.sku
             )
             if print_status_codes:
-                print(
-                    f"[sync_product_media_assets] sku={product.sku} status={status_code}",
-                    flush=True,
+                logger.info(
+                    "Синхронизация медиа товара: sku=%s status_code=%s",
+                    product.sku,
+                    status_code,
                 )
             if status_code < 200 or status_code >= 300:
+                logger.warning(
+                    "Синхронизация медиа товара пропущена: sku=%s status_code=%s",
+                    product.sku,
+                    status_code,
+                )
                 skipped_products += 1
                 continue
 
@@ -273,12 +282,19 @@ async def sync_product_media_assets(
 
             await db.commit()
             updated_products += 1
+            logger.info(
+                "Медиа и описание товара синхронизированы: sku=%s media_changed=%s description_changed=%s",
+                product.sku,
+                media_changed,
+                description_changed,
+            )
         except Exception as exc:
             await db.rollback()
             if print_status_codes:
-                print(
-                    f"[sync_product_media_assets] sku={product.sku} error={exc}",
-                    flush=True,
+                logger.exception(
+                    "Ошибка синхронизации медиа товара: sku=%s error=%s",
+                    product.sku,
+                    exc,
                 )
             skipped_products += 1
             continue

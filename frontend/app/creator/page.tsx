@@ -942,7 +942,7 @@ function arrayTextField(record: Record<string, unknown>, keys: string[]): string
 }
 
 function immediateAttributeOption(attr: Record<string, unknown>, name: string, rawValues: string[]): CategoryAttributeOption {
-  const nameRu = firstTextField(attr, ["nameRu", "attributeNameRu", "name_ru", "attribute_name_ru", "ruName"]);
+  const nameRu = attr["name_ru"];
   const displayName = firstTextField(attr, ["displayName", "display_name"]) || labelWithRu(name, nameRu);
   const attributeId = attr.attribute_id ?? attr.attributeId;
   const normalizedAttributeId = typeof attributeId === "number" || typeof attributeId === "string" ? attributeId : null;
@@ -1005,13 +1005,13 @@ function mergeAttributeOption(preferred: CategoryAttributeOption, fallback: Cate
   const preferredDisplay = preferred.allowedValuesDisplay ?? [];
   const mergedDisplay = preferredDisplay.length
     ? preferredDisplay.map((item) => {
-        const fallbackItem = fallbackDisplayByValue.get(normalizeFieldToken(String(item.value ?? "")));
-        return {
-          ...item,
-          valueRu: item.valueRu || fallbackItem?.valueRu || null,
-          displayValue: item.displayValue || fallbackItem?.displayValue || item.value || "",
-        };
-      })
+      const fallbackItem = fallbackDisplayByValue.get(normalizeFieldToken(String(item.value ?? "")));
+      return {
+        ...item,
+        valueRu: item.valueRu || fallbackItem?.valueRu || null,
+        displayValue: item.displayValue || fallbackItem?.displayValue || item.value || "",
+      };
+    })
     : fallback.allowedValuesDisplay;
   return {
     ...preferred,
@@ -3002,7 +3002,7 @@ function MissingAttributesPanel({ availableAttributes, isLoading, error, selecte
 
 function AttributesToolbar({ query, setQuery, group, setGroup, groups, onlyEmpty, setOnlyEmpty, onAdd }: { query: string; setQuery: (value: string) => void; group: string; setGroup: (value: string) => void; groups: string[]; onlyEmpty: boolean; setOnlyEmpty: (value: boolean) => void; onAdd: () => void }) {
   return <div className="attributes-toolbar">
-    <label className="attributes-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search attributes..." aria-label="Search attributes" /></label>
+    <label className="attributes-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск аттрибутов..." aria-label="Search attributes" /></label>
     <select value={group} onChange={(event) => setGroup(event.target.value)} aria-label="Filter by group"><option value="all">All groups</option>{groups.map((item) => <option key={item}>{item}</option>)}</select>
     <label className="attributes-empty-toggle"><input type="checkbox" checked={onlyEmpty} onChange={(event) => setOnlyEmpty(event.target.checked)} /> Only empty</label>
     <button type="button" className="attributes-add-button" onClick={onAdd}><Plus size={16} /> Add attribute</button>
@@ -3061,6 +3061,7 @@ function AttributeEditor({
     "Package Information": [],
     "Additional Information": [],
   };
+
   for (const attr of attributes) {
     const token = normalizeFieldToken(attr.name);
     if (["category", "subcategory", "product type", "produktart", "room", "wohnraum", "zimmer"].some((key) => token.includes(key))) groups["Basic Information"].push(attr);
@@ -3086,9 +3087,10 @@ function AttributeEditor({
     if (groupFilter !== "all" && item.groupTitle !== groupFilter) return false;
     return !normalizedQuery || `${item.name} ${item.displayName} ${item.values} ${item.displayValues}`.toLowerCase().includes(normalizedQuery);
   }).sort((left, right) => left.sortRank - right.sortRank || left.index - right.index);
+  console.log(filteredAttributes);
   return (
     <div className="product-review-attributes">
-      <div className="attributes-title"><div><h3>Attributes</h3><p>{`${attributes.filter((item) => item.values.trim()).length} of ${attributes.length} filled`}</p></div></div>
+      <div className="attributes-title"><div><h3>Атрибуты</h3><p>{`${attributes.filter((item) => item.values.trim()).length} из ${attributes.length} заполнено`}</p></div></div>
       <AttributesToolbar query={query} setQuery={setQuery} group={groupFilter} setGroup={setGroupFilter} groups={Object.keys(groups).filter((title) => groups[title].length > 0)} onlyEmpty={onlyEmpty} setOnlyEmpty={setOnlyEmpty} onAdd={() => setMissingOpen(true)} />
       <MissingAttributesPanel availableAttributes={availableAttributes} isLoading={isLoadingCategoryAttributes} error={categoryAttributesError} selectedOption={selectedOption} valueOptions={valueOptions} newAttributeName={newAttributeName} setNewAttributeName={setNewAttributeName} newAttributeValue={newAttributeValue} setNewAttributeValue={setNewAttributeValue} addAttribute={addAttribute} open={missingOpen} setOpen={setMissingOpen} query={query} />
       {filteredAttributes.length ? (
@@ -3552,16 +3554,16 @@ function BulkAttributeRow({ row, options, onChange, onRemove }: { row: BulkAttri
     <div className="bulk-attribute-picker">
       <div className="bulk-attribute-picker-input">
         <input value={row.name} onFocus={() => setAttributeMenuOpen(true)} onBlur={() => window.setTimeout(() => setAttributeMenuOpen(false), 120)} onChange={(event) => {
-        const name = event.target.value;
-        const option = options.find((item) => normalizeFieldToken(item.name) === normalizeFieldToken(name));
-        onChange({
-          name,
-          attributeId: option ? String(option.attributeId ?? option.id ?? "") || undefined : undefined,
-          attributeKey: option?.attributeKey || undefined,
-          unit: option?.unit || undefined,
-        });
-        setAttributeMenuOpen(true);
-      }} placeholder="Search attribute..." aria-label="Attribute" aria-expanded={attributeMenuOpen} aria-autocomplete="list" />
+          const name = event.target.value;
+          const option = options.find((item) => normalizeFieldToken(item.name) === normalizeFieldToken(name));
+          onChange({
+            name,
+            attributeId: option ? String(option.attributeId ?? option.id ?? "") || undefined : undefined,
+            attributeKey: option?.attributeKey || undefined,
+            unit: option?.unit || undefined,
+          });
+          setAttributeMenuOpen(true);
+        }} placeholder="Search attribute..." aria-label="Attribute" aria-expanded={attributeMenuOpen} aria-autocomplete="list" />
         <ChevronDown size={16} aria-hidden="true" />
       </div>
       {attributeMenuOpen ? <div className="bulk-attribute-options" role="listbox">
@@ -3657,7 +3659,7 @@ export default function CreatorPage() {
   const [state, setState] = useState<UploadState>("idle");
   const [isLoadingFabrics, setIsLoadingFabrics] = useState(false);
   const [isRefreshingFabrics, setIsRefreshingFabrics] = useState(false);
-  const [message, setMessage] = useState("Выберите fabric и нажмите «Выставить».");
+  const [message, setMessage] = useState("Выберите папку и нажмите «Выставить».");
   const [issues, setIssues] = useState<string[]>([]);
   const [processId, setProcessId] = useState<string>("");
   const [processState, setProcessState] = useState<string>("IDLE");
@@ -4654,10 +4656,10 @@ export default function CreatorPage() {
       const reviewStatus: ProductReviewStatus = rejectedReviewIndexSet.has(row.index)
         ? "rejected"
         : approvedComparisonIndexSet.has(row.index)
-            ? "approved"
-            : bulkModifiedIndexSet.has(row.index) || (categoryChangeHistoryByIndex[row.index]?.length ?? 0) > 0
-                ? "modified"
-                : "pending";
+          ? "approved"
+          : bulkModifiedIndexSet.has(row.index) || (categoryChangeHistoryByIndex[row.index]?.length ?? 0) > 0
+            ? "modified"
+            : "pending";
       return { ...row, reviewStatus };
     });
   }, [rows, rejectedReviewIndexSet, approvedComparisonIndexSet, bulkModifiedIndexSet, categoryChangeHistoryByIndex]);
@@ -4690,10 +4692,10 @@ export default function CreatorPage() {
   const selectedReviewStatus: ProductReviewStatus = rejectedReviewIndexSet.has(selectedIndex)
     ? "rejected"
     : approvedComparisonIndexSet.has(selectedIndex)
-        ? "approved"
-        : bulkModifiedIndexSet.has(selectedIndex) || (categoryChangeHistoryByIndex[selectedIndex]?.length ?? 0) > 0
-            ? "modified"
-            : "pending";
+      ? "approved"
+      : bulkModifiedIndexSet.has(selectedIndex) || (categoryChangeHistoryByIndex[selectedIndex]?.length ?? 0) > 0
+        ? "modified"
+        : "pending";
   const selectedReviewRowForRender = useMemo<ProductReviewRow | null>(() => {
     const row = rowByIndex.get(selectedIndex);
     return row ? { ...row, reviewStatus: selectedReviewStatus } : null;
@@ -5838,14 +5840,14 @@ export default function CreatorPage() {
   const normalizedFabricQuery = normalizeFieldToken(fabricQuery);
   const filteredFabrics = normalizedFabricQuery
     ? fabrics.filter((item) =>
-        normalizeFieldToken(`${item.name ?? ""} ${item.id ?? ""}`).includes(normalizedFabricQuery),
-      )
+      normalizeFieldToken(`${item.name ?? ""} ${item.id ?? ""}`).includes(normalizedFabricQuery),
+    )
     : fabrics;
   const visibleFabrics = selectedFabricId && !filteredFabrics.some((item) => item.id === selectedFabricId)
     ? [
-        ...fabrics.filter((item) => item.id === selectedFabricId),
-        ...filteredFabrics,
-      ]
+      ...fabrics.filter((item) => item.id === selectedFabricId),
+      ...filteredFabrics,
+    ]
     : filteredFabrics;
   const selectedFabric = fabrics.find((item) => item.id === selectedFabricId);
   const fabricPickerDisabled = isLoadingFabrics || state === "loading" || fabrics.length === 0;
@@ -5957,64 +5959,64 @@ export default function CreatorPage() {
 
   const fabricMenu = fabricDropdownOpen && typeof document !== "undefined"
     ? createPortal(
-        <div
-          className="fabric-picker-menu"
-          ref={fabricMenuRef}
-          style={{
-            ...fabricMenuStyle,
-            visibility: fabricMenuStyle.left === undefined ? "hidden" : undefined,
-          }}
-        >
-          <div className="creator-search-wrap fabric-search">
-            <Search size={16} className="creator-search-icon" />
-            <input
-              ref={fabricSearchRef}
-              className="creator-search-input"
-              type="search"
-              value={fabricQuery}
-              onChange={(event) => setFabricQuery(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "ArrowDown") {
-                  event.preventDefault();
-                  moveFabricHighlight(1);
-                } else if (event.key === "ArrowUp") {
-                  event.preventDefault();
-                  moveFabricHighlight(-1);
-                } else if (event.key === "Enter" && highlightedFabricId) {
-                  event.preventDefault();
-                  selectFabric(highlightedFabricId);
-                }
+      <div
+        className="fabric-picker-menu"
+        ref={fabricMenuRef}
+        style={{
+          ...fabricMenuStyle,
+          visibility: fabricMenuStyle.left === undefined ? "hidden" : undefined,
+        }}
+      >
+        <div className="creator-search-wrap fabric-search">
+          <Search size={16} className="creator-search-icon" />
+          <input
+            ref={fabricSearchRef}
+            className="creator-search-input"
+            type="search"
+            value={fabricQuery}
+            onChange={(event) => setFabricQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown") {
+                event.preventDefault();
+                moveFabricHighlight(1);
+              } else if (event.key === "ArrowUp") {
+                event.preventDefault();
+                moveFabricHighlight(-1);
+              } else if (event.key === "Enter" && highlightedFabricId) {
+                event.preventDefault();
+                selectFabric(highlightedFabricId);
+              }
+            }}
+            placeholder="Поиск fabric..."
+          />
+        </div>
+        <div className="fabric-picker-options" role="listbox">
+          {visibleFabrics.length === 0 ? (
+            <span className="fabric-picker-empty">Ничего не найдено</span>
+          ) : visibleFabrics.map((item) => (
+            <button
+              type="button"
+              role="option"
+              aria-selected={item.id === selectedFabricId}
+              className={`${item.id === selectedFabricId ? "is-selected" : ""} ${item.id === highlightedFabricId ? "is-highlighted" : ""}`.trim()}
+              key={item.id}
+              ref={(node) => {
+                fabricOptionRefs.current[item.id] = node;
               }}
-              placeholder="Поиск fabric..."
-            />
-          </div>
-          <div className="fabric-picker-options" role="listbox">
-            {visibleFabrics.length === 0 ? (
-              <span className="fabric-picker-empty">Ничего не найдено</span>
-            ) : visibleFabrics.map((item) => (
-              <button
-                type="button"
-                role="option"
-                aria-selected={item.id === selectedFabricId}
-                className={`${item.id === selectedFabricId ? "is-selected" : ""} ${item.id === highlightedFabricId ? "is-highlighted" : ""}`.trim()}
-                key={item.id}
-                ref={(node) => {
-                  fabricOptionRefs.current[item.id] = node;
-                }}
-                onMouseEnter={() => setHighlightedFabricId(item.id)}
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  selectFabric(item.id);
-                }}
-              >
-                <span>{item.name ?? item.id}</span>
-                <small>{`${item.items_count ?? 0} товаров`}</small>
-              </button>
-            ))}
-          </div>
-        </div>,
-        document.body,
-      )
+              onMouseEnter={() => setHighlightedFabricId(item.id)}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                selectFabric(item.id);
+              }}
+            >
+              <span>{item.name ?? item.id}</span>
+              <small>{`${item.items_count ?? 0} товаров`}</small>
+            </button>
+          ))}
+        </div>
+      </div>,
+      document.body,
+    )
     : null;
 
   if (isLoading || !hydratedDraft || isRestoringProcess) {
@@ -6045,300 +6047,298 @@ export default function CreatorPage() {
             <strong>{`${displayProgressPercent}%`}</strong>
           </section>
         ) : (
-        <section className={`creator-ref-top-grid ${isCategoryStage ? "is-category-stage" : "is-preparation-stage"}`}>
-          <article className={`creator-ref-card creator-ref-card-action${!isCategoryStage ? " creator-ref-upload-panel" : ""}`}>
-            {isCategoryStage ? (
-              <>
-                <h2>Загрузка товаров</h2>
-                <p className="creator-ref-card-subtitle">Выберите источник и подготовьте товары к проверке.</p>
-              </>
-            ) : null}
-            <div className="creator-mode-switch">
-              <label>Fabric
-                <div className="fabric-control-row">
-                  <div className="fabric-picker">
+          <section className={`creator-ref-top-grid ${isCategoryStage ? "is-category-stage" : "is-preparation-stage"}`}>
+            <article className={`creator-ref-card creator-ref-card-action${!isCategoryStage ? " creator-ref-upload-panel" : ""}`}>
+              {isCategoryStage ? (
+                <>
+                  <h2>Загрузка товаров</h2>
+                  <p className="creator-ref-card-subtitle">Выберите источник и подготовьте товары к проверке.</p>
+                </>
+              ) : null}
+              <div className="creator-mode-switch">
+                <label>Fabric
+                  <div className="fabric-control-row">
+                    <div className="fabric-picker">
+                      <button
+                        ref={fabricTriggerRef}
+                        type="button"
+                        className="fabric-picker-trigger"
+                        disabled={fabricPickerDisabled}
+                        aria-haspopup="listbox"
+                        aria-expanded={fabricDropdownOpen}
+                        onClick={() => {
+                          if (fabricPickerDisabled) return;
+                          setFabricDropdownOpen((open) => !open);
+                        }}
+                      >
+                        <span>{isLoadingFabrics ? "Загрузка fabrics..." : selectedFabric ? `${selectedFabric.name ?? selectedFabric.id} (${selectedFabric.items_count ?? 0})` : "Выберите fabric"}</span>
+                        <ChevronDown size={16} aria-hidden="true" />
+                      </button>
+                    </div>
                     <button
-                      ref={fabricTriggerRef}
                       type="button"
-                      className="fabric-picker-trigger"
-                      disabled={fabricPickerDisabled}
-                      aria-haspopup="listbox"
-                      aria-expanded={fabricDropdownOpen}
-                      onClick={() => {
-                        if (fabricPickerDisabled) return;
-                        setFabricDropdownOpen((open) => !open);
-                      }}
+                      className="creator-ref-refresh-btn"
+                      onClick={() => void refreshFabrics()}
+                      disabled={state === "loading" || isLoadingFabrics || isRefreshingFabrics}
+                      title="Обновить список"
+                      aria-label="Обновить список товаров"
                     >
-                      <span>{isLoadingFabrics ? "Загрузка fabrics..." : selectedFabric ? `${selectedFabric.name ?? selectedFabric.id} (${selectedFabric.items_count ?? 0})` : "Выберите fabric"}</span>
-                      <ChevronDown size={16} aria-hidden="true" />
+                      <RefreshCw size={16} className={isRefreshingFabrics ? "spin" : ""} />
                     </button>
                   </div>
-                  <button
-                    type="button"
-                    className="creator-ref-refresh-btn"
-                    onClick={() => void refreshFabrics()}
-                    disabled={state === "loading" || isLoadingFabrics || isRefreshingFabrics}
-                    title="Обновить список"
-                    aria-label="Обновить список товаров"
-                  >
-                    <RefreshCw size={16} className={isRefreshingFabrics ? "spin" : ""} />
-                  </button>
-                </div>
-              </label>
-              <Button className="creator-ref-launch-btn" size="lg" type="button" onClick={handleCreate} disabled={state === "loading" || !selectedFabricId}>
-                {state === "loading" ? "Подготовка..." : "Подготовить товары"}
-              </Button>
-              <Button className="creator-ref-reset-btn" variant="secondary" size="lg" type="button" onClick={() => void handleClear()} disabled={!processId && state === "idle" && products.length === 0}>
-                Сбросить
-              </Button>
-            </div>
-            {fabricMenu}
-            <div className={`creator-ref-inline-alert ${state === "error" ? "is-error" : state === "success" ? "is-success" : "is-info"}`}>
-              <span className="creator-ref-inline-alert-icon" aria-hidden="true">
-                {state === "error" ? <AlertCircle size={16} /> : state === "success" ? <Check size={16} /> : "i"}
-              </span>
-              <p>{state === "success" && products.length > 0 ? `${products.length} товаров готовы к проверке` : message}</p>
-            </div>
-            {!isCategoryStage ? (
-              <div className="creator-ref-compact-stats">
-                <Badge
-                  className={`creator-ref-status-badge creator-ref-status-badge-animated ${
-                    processState === "DONE"
+                </label>
+                <Button className="creator-ref-launch-btn" size="lg" type="button" onClick={handleCreate} disabled={state === "loading" || !selectedFabricId}>
+                  {state === "loading" ? "Подготовка..." : "Подготовить товары"}
+                </Button>
+                <Button className="creator-ref-reset-btn" variant="secondary" size="lg" type="button" onClick={() => void handleClear()} disabled={!processId && state === "idle" && products.length === 0}>
+                  Сбросить
+                </Button>
+              </div>
+              {fabricMenu}
+              <div className={`creator-ref-inline-alert ${state === "error" ? "is-error" : state === "success" ? "is-success" : "is-info"}`}>
+                <span className="creator-ref-inline-alert-icon" aria-hidden="true">
+                  {state === "error" ? <AlertCircle size={16} /> : state === "success" ? <Check size={16} /> : "i"}
+                </span>
+                <p>{state === "success" && products.length > 0 ? `${products.length} товаров готовы к проверке` : message}</p>
+              </div>
+              {!isCategoryStage ? (
+                <div className="creator-ref-compact-stats">
+                  <Badge
+                    className={`creator-ref-status-badge creator-ref-status-badge-animated ${processState === "DONE"
                       ? "done"
                       : processState === "FAILED"
                         ? "failed"
                         : processState === "IDLE"
                           ? "pending"
                           : "progress"
-                  }`}
-                >
-                  {processState}
-                </Badge>
-                <div className="creator-ref-compact-stat"><span>Всего</span><strong>{kpiTotal}</strong></div>
-                <div className="creator-ref-compact-stat"><span>Успешно</span><strong>{kpiSucceeded}</strong></div>
-                <div className="creator-ref-compact-stat"><span>Ошибки</span><strong>{kpiFailed}</strong></div>
-              </div>
-            ) : null}
-            {!isCategoryStage && processState === "IN_PROGRESS" ? (
-              <div className="creator-ref-progress creator-ref-progress-compact">
-                <div className="creator-ref-progress-head">
-                  <strong>{progressTitle(currentStep)}</strong>
-                  <span>{`${displayProgressPercent}%`}</span>
+                      }`}
+                  >
+                    {processState}
+                  </Badge>
+                  <div className="creator-ref-compact-stat"><span>Всего</span><strong>{kpiTotal}</strong></div>
+                  <div className="creator-ref-compact-stat"><span>Успешно</span><strong>{kpiSucceeded}</strong></div>
+                  <div className="creator-ref-compact-stat"><span>Ошибки</span><strong>{kpiFailed}</strong></div>
                 </div>
-                <div className="creator-ref-progress-track" aria-hidden="true">
-                  <span style={{ width: `${displayProgressPercent}%` }} />
-                </div>
-                <p>{realtimeMode === "websocket" ? "Live updates через WebSocket" : "Live updates через polling fallback"}</p>
-              </div>
-            ) : null}
-          </article>
-
-          {isCategoryStage ? <article className="creator-ref-card creator-ref-card-main">
-            {isCategoryStage ? (
-              <>
-                <CategoryCheckSummary categoryKpis={categoryKpis} processState={processState} />
-                <CategoryCheckProgress
-                  currentStep={currentStep}
-                  processState={processState}
-                  progressPercent={displayProgressPercent}
-                  progressLabel={progressTitle(currentStep)}
-                  preparationCounts={preparationCounts}
-                  realtimeMode={realtimeMode}
-                  processId={processId}
-                  ottoProcessId={ottoProcessId}
-                  stepElapsed={stepElapsed}
-                  heartbeatLag={heartbeatLag}
-                  copiedRuntimeField={copiedRuntimeField}
-                  runtimeCopyErrorField={runtimeCopyErrorField}
-                  copyText={(value, field) => void copyText(value, field)}
-                />
-                {stuckMessage ? <p className="helper-banner error">{stuckMessage}</p> : null}
-              </>
-            ) : (
-              <>
-                {processState === "IDLE" && products.length === 0 ? (
-                  <div className="creator-preparation-empty">
-                    <span className="creator-preparation-empty-icon"><Box size={22} /></span>
-                    <div>
-                      <h2>Подготовка товаров</h2>
-                      <p>Выберите Fabric, затем запустите подготовку. Здесь появится текущий статус обработки.</p>
-                    </div>
-                    <Badge className="creator-ref-status-badge pending">Ожидание запуска</Badge>
+              ) : null}
+              {!isCategoryStage && processState === "IN_PROGRESS" ? (
+                <div className="creator-ref-progress creator-ref-progress-compact">
+                  <div className="creator-ref-progress-head">
+                    <strong>{progressTitle(currentStep)}</strong>
+                    <span>{`${displayProgressPercent}%`}</span>
                   </div>
-                ) : (
-                  <>
-                    <div className="creator-ref-main-head">
-                      <h2>Последняя загрузка</h2>
+                  <div className="creator-ref-progress-track" aria-hidden="true">
+                    <span style={{ width: `${displayProgressPercent}%` }} />
+                  </div>
+                  <p>{realtimeMode === "websocket" ? "Live updates через WebSocket" : "Live updates через polling fallback"}</p>
+                </div>
+              ) : null}
+            </article>
+
+            {isCategoryStage ? <article className="creator-ref-card creator-ref-card-main">
+              {isCategoryStage ? (
+                <>
+                  <CategoryCheckSummary categoryKpis={categoryKpis} processState={processState} />
+                  <CategoryCheckProgress
+                    currentStep={currentStep}
+                    processState={processState}
+                    progressPercent={displayProgressPercent}
+                    progressLabel={progressTitle(currentStep)}
+                    preparationCounts={preparationCounts}
+                    realtimeMode={realtimeMode}
+                    processId={processId}
+                    ottoProcessId={ottoProcessId}
+                    stepElapsed={stepElapsed}
+                    heartbeatLag={heartbeatLag}
+                    copiedRuntimeField={copiedRuntimeField}
+                    runtimeCopyErrorField={runtimeCopyErrorField}
+                    copyText={(value, field) => void copyText(value, field)}
+                  />
+                  {stuckMessage ? <p className="helper-banner error">{stuckMessage}</p> : null}
+                </>
+              ) : (
+                <>
+                  {processState === "IDLE" && products.length === 0 ? (
+                    <div className="creator-preparation-empty">
+                      <span className="creator-preparation-empty-icon"><Box size={22} /></span>
+                      <div>
+                        <h2>Подготовка товаров</h2>
+                        <p>Выберите Fabric, затем запустите подготовку. Здесь появится текущий статус обработки.</p>
+                      </div>
+                      <Badge className="creator-ref-status-badge pending">Ожидание запуска</Badge>
                     </div>
-                    <div className="creator-ref-status-line">
-                      <span className="creator-ref-status-label">Статус</span>
-                      <Badge
-                        className={`creator-ref-status-badge creator-ref-status-badge-animated ${
-                          processState === "DONE"
+                  ) : (
+                    <>
+                      <div className="creator-ref-main-head">
+                        <h2>Последняя загрузка</h2>
+                      </div>
+                      <div className="creator-ref-status-line">
+                        <span className="creator-ref-status-label">Статус</span>
+                        <Badge
+                          className={`creator-ref-status-badge creator-ref-status-badge-animated ${processState === "DONE"
                             ? "done"
                             : processState === "FAILED"
                               ? "failed"
                               : "progress"
-                        }`}
-                      >
-                        {processState}
-                      </Badge>
-                    </div>
-                    <div className="creator-ref-metrics">
-                    <Card className="metric neutral">
-                      <span className="metric-icon"><Box size={18} /></span>
-                      <small>Всего</small>
-                      <strong>{kpiTotal}</strong>
-                    </Card>
-                    <Card className="metric success">
-                      <span className="metric-icon"><Check size={18} /></span>
-                      <small>Успешно</small>
-                      <strong>{kpiSucceeded}</strong>
-                    </Card>
-                    <Card className="metric error">
-                      <span className="metric-icon"><X size={18} /></span>
-                      <small>Ошибки</small>
-                      <strong>{kpiFailed}</strong>
-                    </Card>
-                    </div>
-                    {processState === "IN_PROGRESS" ? (
-                      <div className="creator-ref-progress">
-                        <div className="creator-ref-progress-head">
-                          <strong>{progressTitle(currentStep)}</strong>
-                          <span>{`${displayProgressPercent}%`}</span>
-                        </div>
-                        <div className="creator-ref-progress-track" aria-hidden="true">
-                          <span style={{ width: `${displayProgressPercent}%` }} />
-                        </div>
-                        <p>{realtimeMode === "websocket" ? "Live updates через WebSocket" : "Live updates через polling fallback"}</p>
+                            }`}
+                        >
+                          {processState}
+                        </Badge>
                       </div>
-                    ) : null}
-                  </>
-                )}
-              </>
-            )}
-          </article> : null}
-        </section>
+                      <div className="creator-ref-metrics">
+                        <Card className="metric neutral">
+                          <span className="metric-icon"><Box size={18} /></span>
+                          <small>Всего</small>
+                          <strong>{kpiTotal}</strong>
+                        </Card>
+                        <Card className="metric success">
+                          <span className="metric-icon"><Check size={18} /></span>
+                          <small>Успешно</small>
+                          <strong>{kpiSucceeded}</strong>
+                        </Card>
+                        <Card className="metric error">
+                          <span className="metric-icon"><X size={18} /></span>
+                          <small>Ошибки</small>
+                          <strong>{kpiFailed}</strong>
+                        </Card>
+                      </div>
+                      {processState === "IN_PROGRESS" ? (
+                        <div className="creator-ref-progress">
+                          <div className="creator-ref-progress-head">
+                            <strong>{progressTitle(currentStep)}</strong>
+                            <span>{`${displayProgressPercent}%`}</span>
+                          </div>
+                          <div className="creator-ref-progress-track" aria-hidden="true">
+                            <span style={{ width: `${displayProgressPercent}%` }} />
+                          </div>
+                          <p>{realtimeMode === "websocket" ? "Live updates через WebSocket" : "Live updates через polling fallback"}</p>
+                        </div>
+                      ) : null}
+                    </>
+                  )}
+                </>
+              )}
+            </article> : null}
+          </section>
         )}
 
         {isCategoryStage ? (
-        <section className="category-check-page">
-          {state === "error" ? (
-            <div className="category-check-alert">
-              <AlertCircle size={16} />
-              <span>{message}</span>
-              <button type="button" onClick={handleCreate} disabled={!selectedFabricId}>Повторить</button>
-            </div>
-          ) : null}
-          <Card className="category-check-panel">
-            <div className="category-check-panel-head">
-              <div>
-                <h2>Категории товаров</h2>
-                <p>{processState === "IN_PROGRESS" ? "Live updates включены. Новые строки появляются по мере готовности." : "Проверьте, подтвердите или измените категории перед генерацией данных."}</p>
+          <section className="category-check-page">
+            {state === "error" ? (
+              <div className="category-check-alert">
+                <AlertCircle size={16} />
+                <span>{message}</span>
+                <button type="button" onClick={handleCreate} disabled={!selectedFabricId}>Повторить</button>
               </div>
-              <div className="category-check-panel-actions">
-                <button className="primary-btn creator-category-submit-btn" type="button" onClick={confirmCategories} disabled={state === "loading" || filteredRows.length === 0 || missingCategoryCount > 0 || categoryKpis.requiresReview > 0}>
-                  Создать товары
-                  <ChevronRight size={16} aria-hidden="true" />
-                </button>
+            ) : null}
+            <Card className="category-check-panel">
+              <div className="category-check-panel-head">
+                <div>
+                  <h2>Категории товаров</h2>
+                  <p>{processState === "IN_PROGRESS" ? "Live updates включены. Новые строки появляются по мере готовности." : "Проверьте, подтвердите или измените категории перед генерацией данных."}</p>
+                </div>
+                <div className="category-check-panel-actions">
+                  <button className="primary-btn creator-category-submit-btn" type="button" onClick={confirmCategories} disabled={state === "loading" || filteredRows.length === 0 || missingCategoryCount > 0 || categoryKpis.requiresReview > 0}>
+                    Создать товары
+                    <ChevronRight size={16} aria-hidden="true" />
+                  </button>
+                </div>
               </div>
-            </div>
-            <CategoryCheckToolbar
-              tableQuery={tableQuery}
-              setTableQuery={setTableQuery}
-              categoryFilter={categoryFilter}
-              setCategoryFilter={setCategoryFilter}
-              categoryFilterOptions={categoryFilterOptions}
+              <CategoryCheckToolbar
+                tableQuery={tableQuery}
+                setTableQuery={setTableQuery}
+                categoryFilter={categoryFilter}
+                setCategoryFilter={setCategoryFilter}
+                categoryFilterOptions={categoryFilterOptions}
+                categoryGroupDisplayByValue={categoryGroupDisplayByValue}
+                statusFilter={categoryStatusFilter}
+                setStatusFilter={setCategoryStatusFilter}
+                categorySort={categorySort}
+                setCategorySort={setCategorySort}
+                setPage={setPage}
+              />
+              <CategoryCheckBatchActions
+                selectedCount={selectedCategoryRowIndexes.length}
+                selectedConfirmableCount={selectedConfirmableCount}
+                editSelected={() => setIsBulkCategoryDrawerOpen(true)}
+                confirmSelected={() => confirmCategoryRows(selectedCategoryRowIndexes)}
+                skipSelected={() => skipCategoryRows(selectedCategoryRowIndexes)}
+                resetSelected={() => {
+                  setSelectedCategoryRowIndexes([]);
+                  setIsBulkCategoryDrawerOpen(false);
+                  setBulkCategoryValue("");
+                }}
+              />
+              <CategoryCheckTable
+                rows={pagedRows}
+                categoryRowStatuses={categoryRowStatuses}
+                categoryDisplayByValue={categoryDisplayByValue}
+                categoryGroupDisplayByValue={categoryGroupDisplayByValue}
+                selectedCategoryIndexSet={selectedCategoryIndexSet}
+                allFilteredRowsSelected={allFilteredRowsSelected}
+                toggleAllFilteredRows={toggleAllFilteredRows}
+                toggleCategorySelection={toggleCategorySelection}
+                confirmCategoryRows={confirmCategoryRows}
+                openDetails={setDetailsCategoryIndex}
+                selectedIndex={selectedIndex}
+                setSelectedIndex={setSelectedIndex}
+                pageSize={pageSize}
+                setPageSize={setPageSize}
+                safePage={safePage}
+                totalPages={totalPages}
+                paginationItems={paginationItems}
+                setPage={setPage}
+                filteredCount={filteredRows.length}
+                state={state}
+                processState={processState}
+                rowNumberStart={(safePage - 1) * pageSize}
+              />
+            </Card>
+            <CategoryEditDrawer
+              row={editingCategoryRow}
+              categoryOptionsByGroup={categoryOptionsByGroup}
               categoryGroupDisplayByValue={categoryGroupDisplayByValue}
-              statusFilter={categoryStatusFilter}
-              setStatusFilter={setCategoryStatusFilter}
-              categorySort={categorySort}
-              setCategorySort={setCategorySort}
-              setPage={setPage}
-            />
-            <CategoryCheckBatchActions
-              selectedCount={selectedCategoryRowIndexes.length}
-              selectedConfirmableCount={selectedConfirmableCount}
-              editSelected={() => setIsBulkCategoryDrawerOpen(true)}
-              confirmSelected={() => confirmCategoryRows(selectedCategoryRowIndexes)}
-              skipSelected={() => skipCategoryRows(selectedCategoryRowIndexes)}
-              resetSelected={() => {
-                setSelectedCategoryRowIndexes([]);
-                setIsBulkCategoryDrawerOpen(false);
-                setBulkCategoryValue("");
-              }}
-            />
-            <CategoryCheckTable
-              rows={pagedRows}
-              categoryRowStatuses={categoryRowStatuses}
               categoryDisplayByValue={categoryDisplayByValue}
-              categoryGroupDisplayByValue={categoryGroupDisplayByValue}
-              selectedCategoryIndexSet={selectedCategoryIndexSet}
-              allFilteredRowsSelected={allFilteredRowsSelected}
-              toggleAllFilteredRows={toggleAllFilteredRows}
-              toggleCategorySelection={toggleCategorySelection}
-              confirmCategoryRows={confirmCategoryRows}
-              openDetails={setDetailsCategoryIndex}
-              selectedIndex={selectedIndex}
-              setSelectedIndex={setSelectedIndex}
-              pageSize={pageSize}
-              setPageSize={setPageSize}
-              safePage={safePage}
-              totalPages={totalPages}
-              paginationItems={paginationItems}
-              setPage={setPage}
-              filteredCount={filteredRows.length}
-              state={state}
-              processState={processState}
-              rowNumberStart={(safePage - 1) * pageSize}
+              open={editingCategoryIndex !== null}
+              onSave={(category, comment) => {
+                if (editingCategoryIndex !== null) saveCategoryEdit(editingCategoryIndex, category, comment);
+              }}
+              onClose={() => setEditingCategoryIndex(null)}
             />
-          </Card>
-          <CategoryEditDrawer
-            row={editingCategoryRow}
-            categoryOptionsByGroup={categoryOptionsByGroup}
-            categoryGroupDisplayByValue={categoryGroupDisplayByValue}
-            categoryDisplayByValue={categoryDisplayByValue}
-            open={editingCategoryIndex !== null}
-            onSave={(category, comment) => {
-              if (editingCategoryIndex !== null) saveCategoryEdit(editingCategoryIndex, category, comment);
-            }}
-            onClose={() => setEditingCategoryIndex(null)}
-          />
-          <BulkCategoryEditDrawer
-            open={isBulkCategoryDrawerOpen}
-            count={selectedCategoryRowIndexes.length}
-            groups={selectedCategoryGroups}
-            categoryGroupDisplayByValue={categoryGroupDisplayByValue}
-            categoryDisplayByValue={categoryDisplayByValue}
-            options={bulkCategoryOptions}
-            value={bulkCategoryValue}
-            setValue={setBulkCategoryValue}
-            onClose={() => setIsBulkCategoryDrawerOpen(false)}
-            onApply={applyBulkCategory}
-          />
-          <CategoryReviewModal
-            row={detailsCategoryRow}
-            rows={filteredRows}
-            statuses={categoryRowStatuses}
-            status={detailsCategoryStatus}
-            categoryOptionsByGroup={categoryOptionsByGroup}
-            categoryGroupDisplayByValue={categoryGroupDisplayByValue}
-            categoryDisplayByValue={categoryDisplayByValue}
-            open={detailsCategoryIndex !== null}
-            onSave={(category, comment) => {
-              if (detailsCategoryIndex !== null) saveCategoryEdit(detailsCategoryIndex, category, comment);
-            }}
-            position={detailsCategoryPosition}
-            total={filteredRows.length}
-            onPrevious={() => navigateCategoryDetails(detailsCategoryPosition - 1)}
-            onNext={() => navigateCategoryDetails(detailsCategoryPosition + 1)}
-            onSelectProduct={(rowIndex) => {
-              const nextPosition = filteredRows.findIndex((item) => item.index === rowIndex);
-              if (nextPosition >= 0) navigateCategoryDetails(nextPosition);
-            }}
-            onClose={() => setDetailsCategoryIndex(null)}
-          />
-        </section>
+            <BulkCategoryEditDrawer
+              open={isBulkCategoryDrawerOpen}
+              count={selectedCategoryRowIndexes.length}
+              groups={selectedCategoryGroups}
+              categoryGroupDisplayByValue={categoryGroupDisplayByValue}
+              categoryDisplayByValue={categoryDisplayByValue}
+              options={bulkCategoryOptions}
+              value={bulkCategoryValue}
+              setValue={setBulkCategoryValue}
+              onClose={() => setIsBulkCategoryDrawerOpen(false)}
+              onApply={applyBulkCategory}
+            />
+            <CategoryReviewModal
+              row={detailsCategoryRow}
+              rows={filteredRows}
+              statuses={categoryRowStatuses}
+              status={detailsCategoryStatus}
+              categoryOptionsByGroup={categoryOptionsByGroup}
+              categoryGroupDisplayByValue={categoryGroupDisplayByValue}
+              categoryDisplayByValue={categoryDisplayByValue}
+              open={detailsCategoryIndex !== null}
+              onSave={(category, comment) => {
+                if (detailsCategoryIndex !== null) saveCategoryEdit(detailsCategoryIndex, category, comment);
+              }}
+              position={detailsCategoryPosition}
+              total={filteredRows.length}
+              onPrevious={() => navigateCategoryDetails(detailsCategoryPosition - 1)}
+              onNext={() => navigateCategoryDetails(detailsCategoryPosition + 1)}
+              onSelectProduct={(rowIndex) => {
+                const nextPosition = filteredRows.findIndex((item) => item.index === rowIndex);
+                if (nextPosition >= 0) navigateCategoryDetails(nextPosition);
+              }}
+              onClose={() => setDetailsCategoryIndex(null)}
+            />
+          </section>
         ) : null}
 
         {!isEnrichmentLoading && workflowStep !== "categories" ? (
@@ -6390,184 +6390,184 @@ export default function CreatorPage() {
                     ) : null}
                     <ReviewTabs value={editorTab} setValue={setEditorTab} />
                     <div className={`product-review-content is-${editorTab}`}>
-                    {editorTab === "general" ? (
-                      <div className="product-overview-grid">
-                        <section className="product-overview-card product-overview-identifiers">
-                          <div className="product-overview-card-head"><h3>Identifiers</h3></div>
-                          <div className="product-overview-fields">
-                            {[
-                              { key: "sku", label: "SKU", value: String(selectedProduct.sku ?? ""), path: ["sku"] },
-                              { key: "ean", label: "EAN", value: String(selectedProduct.ean ?? ""), path: ["ean"] },
-                              { key: "product-reference", label: "Product Reference", value: String(selectedProduct.productReference ?? ""), path: ["productReference"] },
-                            ].map((field) => {
-                              const copyKey = `overview-${field.key}`;
-                              const editing = editingOverviewField === field.key;
-                              return (
-                                <div className="product-overview-field attribute-field-card" key={field.key}>
-                                  <div className="product-overview-field-head attribute-field-card-head">
-                                    <span>{field.label}</span>
-                                    {!editing ? <OverviewActionsMenu onEdit={() => setEditingOverviewField(field.key)} onCopy={() => void copyText(field.value, copyKey)} canCopy={Boolean(field.value)} copied={copiedRuntimeField === copyKey} /> : null}
+                      {editorTab === "general" ? (
+                        <div className="product-overview-grid">
+                          <section className="product-overview-card product-overview-identifiers">
+                            <div className="product-overview-card-head"><h3>Identifiers</h3></div>
+                            <div className="product-overview-fields">
+                              {[
+                                { key: "sku", label: "SKU", value: String(selectedProduct.sku ?? ""), path: ["sku"] },
+                                { key: "ean", label: "EAN", value: String(selectedProduct.ean ?? ""), path: ["ean"] },
+                                { key: "product-reference", label: "Product Reference", value: String(selectedProduct.productReference ?? ""), path: ["productReference"] },
+                              ].map((field) => {
+                                const copyKey = `overview-${field.key}`;
+                                const editing = editingOverviewField === field.key;
+                                return (
+                                  <div className="product-overview-field attribute-field-card" key={field.key}>
+                                    <div className="product-overview-field-head attribute-field-card-head">
+                                      <span>{field.label}</span>
+                                      {!editing ? <OverviewActionsMenu onEdit={() => setEditingOverviewField(field.key)} onCopy={() => void copyText(field.value, copyKey)} canCopy={Boolean(field.value)} copied={copiedRuntimeField === copyKey} /> : null}
+                                    </div>
+                                    {editing ? (
+                                      <div className="attribute-field-editor"><input autoFocus value={field.value} onChange={(event) => updateSelected(field.path, event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} /><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
+                                    ) : (
+                                      <button type="button" className={`attribute-field-value${field.value ? "" : " is-empty"}`} onClick={() => setEditingOverviewField(field.key)}>{field.value || "Not provided"}</button>
+                                    )}
                                   </div>
-                                  {editing ? (
-                                    <div className="attribute-field-editor"><input autoFocus value={field.value} onChange={(event) => updateSelected(field.path, event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} /><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
+                                );
+                              })}
+                            </div>
+                          </section>
+
+                          <section className="product-overview-card product-overview-information">
+                            <div className="product-overview-card-head"><h3>Product Information</h3></div>
+                            <div className="product-overview-info-columns">
+                              <div className="product-overview-info-main">
+                                <div className="product-overview-field product-overview-title-field attribute-field-card">
+                                  <div className="product-overview-field-head attribute-field-card-head">
+                                    <span>Title</span>
+                                    {editingOverviewField !== "title" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("title")} onCopy={() => void copyText(selectedReviewRowForRender?.title ?? "", "overview-title")} canCopy={Boolean(selectedReviewRowForRender?.title)} copied={copiedRuntimeField === "overview-title"} /> : null}
+                                  </div>
+                                  {editingOverviewField === "title" ? (
+                                    <div className="attribute-field-editor"><input autoFocus value={selectedReviewRowForRender?.title ?? ""} onChange={(event) => updateSelectedTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} /><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
                                   ) : (
-                                    <button type="button" className={`attribute-field-value${field.value ? "" : " is-empty"}`} onClick={() => setEditingOverviewField(field.key)}>{field.value || "Not provided"}</button>
+                                    <button type="button" className={`attribute-field-value${selectedReviewRowForRender?.title?.trim() ? "" : " is-empty"}`} onClick={() => setEditingOverviewField("title")}>{selectedReviewRowForRender?.title?.trim() || "Not provided"}</button>
                                   )}
                                 </div>
-                              );
-                            })}
-                          </div>
-                        </section>
-
-                        <section className="product-overview-card product-overview-information">
-                          <div className="product-overview-card-head"><h3>Product Information</h3></div>
-                          <div className="product-overview-info-columns">
-                            <div className="product-overview-info-main">
-                              <div className="product-overview-field product-overview-title-field attribute-field-card">
-                                <div className="product-overview-field-head attribute-field-card-head">
-                                  <span>Title</span>
-                                  {editingOverviewField !== "title" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("title")} onCopy={() => void copyText(selectedReviewRowForRender?.title ?? "", "overview-title")} canCopy={Boolean(selectedReviewRowForRender?.title)} copied={copiedRuntimeField === "overview-title"} /> : null}
-                                </div>
-                                {editingOverviewField === "title" ? (
-                                  <div className="attribute-field-editor"><input autoFocus value={selectedReviewRowForRender?.title ?? ""} onChange={(event) => updateSelectedTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} /><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
-                                ) : (
-                                  <button type="button" className={`attribute-field-value${selectedReviewRowForRender?.title?.trim() ? "" : " is-empty"}`} onClick={() => setEditingOverviewField("title")}>{selectedReviewRowForRender?.title?.trim() || "Not provided"}</button>
-                                )}
-                              </div>
-                              <div className="product-overview-field attribute-field-card">
-                                <div className="product-overview-field-head attribute-field-card-head">
-                                  <span>Product Line</span>
-                                  {editingOverviewField !== "product-line" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("product-line")} /> : null}
-                                </div>
-                                {editingOverviewField === "product-line" ? (
-                                  <div className="attribute-field-editor"><input autoFocus value={String(selectedDescription.productLine ?? "")} onChange={(event) => updateSelectedTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} /><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
-                                ) : (
-                                  <button type="button" className={`attribute-field-value${String(selectedDescription.productLine ?? "").trim() ? "" : " is-empty"}`} onClick={() => setEditingOverviewField("product-line")}>{String(selectedDescription.productLine ?? "").trim() || "Not provided"}</button>
-                                )}
-                              </div>
-                            </div>
-                            <div className="product-overview-info-side">
-                              <div className="product-overview-field attribute-field-card">
-                                <div className="product-overview-field-head attribute-field-card-head">
-                                  <span>Price</span>
-                                  {editingOverviewField !== "price" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("price")} /> : null}
-                                </div>
-                                {editingOverviewField === "price" ? (
-                                  <div className="attribute-field-editor"><div className="product-overview-price-input">
-                                    <input autoFocus inputMode="decimal" value={String(selectedStandardPrice.amount ?? "")} onChange={(event) => {
-                                      const amount = Number(event.target.value.trim() || 0);
-                                      if (Number.isNaN(amount)) return;
-                                      setProducts((prev) => {
-                                        const next = [...prev];
-                                        next[selectedIndex] = updateProductField(asRecord(next[selectedIndex]), ["pricing", "standardPrice", "amount"], amount);
-                                        return next;
-                                      });
-                                    }} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} />
-                                    {selectedCurrencyLabel ? <span>{selectedCurrencyLabel}</span> : null}
-                                  </div><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
-                                ) : (
-                                  <button type="button" className={`attribute-field-value${selectedStandardPrice.amount === undefined || selectedStandardPrice.amount === null || selectedStandardPrice.amount === "" ? " is-empty" : ""}`} onClick={() => setEditingOverviewField("price")}>{selectedStandardPrice.amount === undefined || selectedStandardPrice.amount === null || selectedStandardPrice.amount === "" ? "Not provided" : `${String(selectedStandardPrice.amount)}${selectedCurrencyLabel ? ` ${selectedCurrencyLabel}` : ""}`}</button>
-                                )}
-                              </div>
-                              <div className="product-overview-field attribute-field-card">
-                                <div className="product-overview-field-head attribute-field-card-head">
-                                  <span>Delivery days</span>
-                                </div>
-                                <select
-                                  value={selectedShippingProfileId}
-                                  onChange={(event) => updateRowShippingProfile(selectedIndex, event.target.value)}
-                                  disabled={shippingProfiles.length === 0}
-                                >
-                                  {selectedShippingProfileId && !shippingProfiles.some((item) => item.id === selectedShippingProfileId) ? (
-                                    <option value={selectedShippingProfileId}>{selectedReviewRowForRender?.shippingProfileName || selectedShippingProfileId}</option>
-                                  ) : null}
-                                  {shippingProfiles.length === 0 ? (
-                                    <option value="">{selectedShippingProfileId || "No delivery profiles"}</option>
+                                <div className="product-overview-field attribute-field-card">
+                                  <div className="product-overview-field-head attribute-field-card-head">
+                                    <span>Product Line</span>
+                                    {editingOverviewField !== "product-line" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("product-line")} /> : null}
+                                  </div>
+                                  {editingOverviewField === "product-line" ? (
+                                    <div className="attribute-field-editor"><input autoFocus value={String(selectedDescription.productLine ?? "")} onChange={(event) => updateSelectedTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} /><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
                                   ) : (
-                                    shippingProfiles.map((item) => (
-                                      <option key={item.id} value={item.id}>{item.name}</option>
-                                    ))
+                                    <button type="button" className={`attribute-field-value${String(selectedDescription.productLine ?? "").trim() ? "" : " is-empty"}`} onClick={() => setEditingOverviewField("product-line")}>{String(selectedDescription.productLine ?? "").trim() || "Not provided"}</button>
                                   )}
-                                </select>
-                              </div>
-                              <div className="product-overview-field attribute-field-card">
-                                <div className="product-overview-field-head attribute-field-card-head">
-                                  <span>Category</span>
                                 </div>
-                                <span className="attribute-field-value">{`${categoryGroupDisplayByValue[selectedAttributeCategoryGroup] || selectedAttributeCategoryGroup || "-"} / ${categoryDisplayByValue[selectedAttributeCategory] || selectedAttributeCategory || "-"}`}</span>
+                              </div>
+                              <div className="product-overview-info-side">
+                                <div className="product-overview-field attribute-field-card">
+                                  <div className="product-overview-field-head attribute-field-card-head">
+                                    <span>Price</span>
+                                    {editingOverviewField !== "price" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("price")} /> : null}
+                                  </div>
+                                  {editingOverviewField === "price" ? (
+                                    <div className="attribute-field-editor"><div className="product-overview-price-input">
+                                      <input autoFocus inputMode="decimal" value={String(selectedStandardPrice.amount ?? "")} onChange={(event) => {
+                                        const amount = Number(event.target.value.trim() || 0);
+                                        if (Number.isNaN(amount)) return;
+                                        setProducts((prev) => {
+                                          const next = [...prev];
+                                          next[selectedIndex] = updateProductField(asRecord(next[selectedIndex]), ["pricing", "standardPrice", "amount"], amount);
+                                          return next;
+                                        });
+                                      }} onKeyDown={(event) => { if (event.key === "Enter") setEditingOverviewField(null); }} />
+                                      {selectedCurrencyLabel ? <span>{selectedCurrencyLabel}</span> : null}
+                                    </div><div><button type="button" onClick={() => setEditingOverviewField(null)}>Done</button></div></div>
+                                  ) : (
+                                    <button type="button" className={`attribute-field-value${selectedStandardPrice.amount === undefined || selectedStandardPrice.amount === null || selectedStandardPrice.amount === "" ? " is-empty" : ""}`} onClick={() => setEditingOverviewField("price")}>{selectedStandardPrice.amount === undefined || selectedStandardPrice.amount === null || selectedStandardPrice.amount === "" ? "Not provided" : `${String(selectedStandardPrice.amount)}${selectedCurrencyLabel ? ` ${selectedCurrencyLabel}` : ""}`}</button>
+                                  )}
+                                </div>
+                                <div className="product-overview-field attribute-field-card">
+                                  <div className="product-overview-field-head attribute-field-card-head">
+                                    <span>Delivery days</span>
+                                  </div>
+                                  <select
+                                    value={selectedShippingProfileId}
+                                    onChange={(event) => updateRowShippingProfile(selectedIndex, event.target.value)}
+                                    disabled={shippingProfiles.length === 0}
+                                  >
+                                    {selectedShippingProfileId && !shippingProfiles.some((item) => item.id === selectedShippingProfileId) ? (
+                                      <option value={selectedShippingProfileId}>{selectedReviewRowForRender?.shippingProfileName || selectedShippingProfileId}</option>
+                                    ) : null}
+                                    {shippingProfiles.length === 0 ? (
+                                      <option value="">{selectedShippingProfileId || "No delivery profiles"}</option>
+                                    ) : (
+                                      shippingProfiles.map((item) => (
+                                        <option key={item.id} value={item.id}>{item.name}</option>
+                                      ))
+                                    )}
+                                  </select>
+                                </div>
+                                <div className="product-overview-field attribute-field-card">
+                                  <div className="product-overview-field-head attribute-field-card-head">
+                                    <span>Category</span>
+                                  </div>
+                                  <span className="attribute-field-value">{`${categoryGroupDisplayByValue[selectedAttributeCategoryGroup] || selectedAttributeCategoryGroup || "-"} / ${categoryDisplayByValue[selectedAttributeCategory] || selectedAttributeCategory || "-"}`}</span>
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        </section>
+                          </section>
 
-                        <section className="product-overview-card product-overview-generated">
-                          <div className="product-overview-card-head">
-                            <h3>Generated Content</h3>
-                            {editingOverviewField !== "bullet-points" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("bullet-points")} /> : <button type="button" onClick={() => setEditingOverviewField(null)}>Done</button>}
-                          </div>
-                          <div className="product-overview-field product-overview-bullets">
-                            <span>Bullet Points</span>
-                            {editingOverviewField === "bullet-points" ? (
-                              <textarea autoFocus value={selectedBulletPoints.join("\n")} onChange={(event) => {
-                                const next = event.target.value.split("\n").map((line) => line.trim()).filter(Boolean);
-                                setProducts((prev) => {
-                                  const copy = [...prev];
-                                  copy[selectedIndex] = updateProductField(asRecord(copy[selectedIndex]), ["productDescription", "bulletPoints"], next);
-                                  return copy;
-                                });
-                              }} />
-                            ) : selectedBulletPoints.length > 0 ? (
-                              <ul>{selectedBulletPoints.map((bulletPoint, index) => <li key={`${index}-${bulletPoint}`}>{bulletPoint}</li>)}</ul>
-                            ) : (
-                              <div className="product-overview-empty"><strong>No generated content</strong><span>Bullet points have not been generated yet.</span></div>
-                            )}
-                          </div>
+                          <section className="product-overview-card product-overview-generated">
+                            <div className="product-overview-card-head">
+                              <h3>Generated Content</h3>
+                              {editingOverviewField !== "bullet-points" ? <OverviewActionsMenu onEdit={() => setEditingOverviewField("bullet-points")} /> : <button type="button" onClick={() => setEditingOverviewField(null)}>Done</button>}
+                            </div>
+                            <div className="product-overview-field product-overview-bullets">
+                              <span>Bullet Points</span>
+                              {editingOverviewField === "bullet-points" ? (
+                                <textarea autoFocus value={selectedBulletPoints.join("\n")} onChange={(event) => {
+                                  const next = event.target.value.split("\n").map((line) => line.trim()).filter(Boolean);
+                                  setProducts((prev) => {
+                                    const copy = [...prev];
+                                    copy[selectedIndex] = updateProductField(asRecord(copy[selectedIndex]), ["productDescription", "bulletPoints"], next);
+                                    return copy;
+                                  });
+                                }} />
+                              ) : selectedBulletPoints.length > 0 ? (
+                                <ul>{selectedBulletPoints.map((bulletPoint, index) => <li key={`${index}-${bulletPoint}`}>{bulletPoint}</li>)}</ul>
+                              ) : (
+                                <div className="product-overview-empty"><strong>No generated content</strong><span>Bullet points have not been generated yet.</span></div>
+                              )}
+                            </div>
+                          </section>
+                        </div>
+                      ) : null}
+                      {editorTab === "attributes" ? (
+                        <>
+                          <AttributeEditor
+                            attributes={attributeCards}
+                            basePrice={String(selectedStandardPrice.amount ?? "")}
+                            categoryAttributes={categoryAttributes}
+                            isLoadingCategoryAttributes={isLoadingCategoryAttributes}
+                            categoryAttributesError={categoryAttributesError}
+                            newAttributeName={newAttributeName}
+                            setNewAttributeName={setNewAttributeName}
+                            newAttributeValue={newAttributeValue}
+                            setNewAttributeValue={setNewAttributeValue}
+                            addAttribute={addAttribute}
+                            editingAttribute={editingAttribute}
+                            editingDraft={editingDraft}
+                            setEditingDraft={setEditingDraft}
+                            startAttributeEdit={startAttributeEdit}
+                            saveAttributeEdit={saveAttributeEdit}
+                            cancelAttributeEdit={cancelAttributeEdit}
+                            deleteAttribute={deleteAttribute}
+                            invalidAttributeNames={invalidAttributeNames}
+                            onMaterialPriceChange={(materialValue, price) => {
+                              readProductVariants(selectedProduct)
+                                .filter((variant) => variant.active && materialValueForVariant(variant) === materialValue)
+                                .forEach((variant) => patchSelectedVariant(variant.combinationKey, { price }));
+                            }}
+                          />
+                          <VariantManager
+                            product={selectedProduct}
+                            categoryAttributes={categoryAttributes}
+                            onPatchVariant={patchSelectedVariant}
+                            onDeleteVariant={deleteSelectedVariant}
+                            onRegenerateVariant={regenerateSelectedVariant}
+                          />
+                        </>
+                      ) : null}
+                      {editorTab === "json" ? (
+                        <section className="product-review-section">
+                          <div className="product-review-section-head"><h3>Raw Payload</h3></div>
+                          <textarea className="product-review-json" value={JSON.stringify(selectedProduct, null, 2)} readOnly rows={18} />
                         </section>
-                      </div>
-                    ) : null}
-                    {editorTab === "attributes" ? (
-                      <>
-                        <AttributeEditor
-                          attributes={attributeCards}
-                          basePrice={String(selectedStandardPrice.amount ?? "")}
-                          categoryAttributes={categoryAttributes}
-                          isLoadingCategoryAttributes={isLoadingCategoryAttributes}
-                          categoryAttributesError={categoryAttributesError}
-                          newAttributeName={newAttributeName}
-                          setNewAttributeName={setNewAttributeName}
-                          newAttributeValue={newAttributeValue}
-                          setNewAttributeValue={setNewAttributeValue}
-                          addAttribute={addAttribute}
-                          editingAttribute={editingAttribute}
-                          editingDraft={editingDraft}
-                          setEditingDraft={setEditingDraft}
-                          startAttributeEdit={startAttributeEdit}
-                          saveAttributeEdit={saveAttributeEdit}
-                          cancelAttributeEdit={cancelAttributeEdit}
-                          deleteAttribute={deleteAttribute}
-                          invalidAttributeNames={invalidAttributeNames}
-                          onMaterialPriceChange={(materialValue, price) => {
-                            readProductVariants(selectedProduct)
-                              .filter((variant) => variant.active && materialValueForVariant(variant) === materialValue)
-                              .forEach((variant) => patchSelectedVariant(variant.combinationKey, { price }));
-                          }}
-                        />
-                        <VariantManager
-                          product={selectedProduct}
-                          categoryAttributes={categoryAttributes}
-                          onPatchVariant={patchSelectedVariant}
-                          onDeleteVariant={deleteSelectedVariant}
-                          onRegenerateVariant={regenerateSelectedVariant}
-                        />
-                      </>
-                    ) : null}
-                    {editorTab === "json" ? (
-                      <section className="product-review-section">
-                        <div className="product-review-section-head"><h3>Raw Payload</h3></div>
-                        <textarea className="product-review-json" value={JSON.stringify(selectedProduct, null, 2)} readOnly rows={18} />
-                      </section>
-                    ) : null}
-                    {editorTab === "diff" ? <DiffViewer aftercool={selectedAftercoolData} /> : null}
+                      ) : null}
+                      {editorTab === "diff" ? <DiffViewer aftercool={selectedAftercoolData} /> : null}
                     </div>
                     <StickyActionBar
                       onReject={() => rejectReviewProduct(selectedIndex)}

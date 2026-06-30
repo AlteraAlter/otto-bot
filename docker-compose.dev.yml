@@ -79,14 +79,34 @@ services:
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
     container_name: otto-bot-frontend-dev
     environment:
+      NODE_ENV: development
       BACKEND_BASE_URL: http://backend:8000
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
-    ports:
-      - "3000:3000"
+      WATCHPACK_POLLING: "true"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
     depends_on:
+      - backend
+    stdin_open: "true"
+    tty: true
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: otto-bot-nginx
+    ports:
+      - "127.0.0.1:18080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./storage/uploads:/var/www/uploads:ro
+      - ./storage/generated:/var/www/generated-media:ro
+    depends_on:
+      - frontend
       - backend
     restart: unless-stopped
 

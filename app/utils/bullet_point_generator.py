@@ -172,7 +172,8 @@ if __name__ == "__main__":
     import asyncio
 
     from ..core.configs import settings
+    from ..core.logger import logging
     from .gpt_helper import GPTHelper
 
     res = asyncio.run(main())
-    print(res)
+    logging.getLogger(__name__).info("Сгенерированы bullet points: result=%s", res)

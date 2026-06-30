@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
 from pathlib import Path
 
 from app.database import SessionLocal
 from app.dependencies import get_product_service
 from app.services.product_media_sync_service import sync_product_media_assets
+
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -48,11 +51,11 @@ async def run() -> None:
             print_status_codes=True,
         )
 
-    print(
-        "Product media sync completed:",
-        f"scanned={result.scanned_products}",
-        f"updated={result.updated_products}",
-        f"skipped={result.skipped_products}",
+    logger.info(
+        "Синхронизация медиа товаров завершена: scanned=%s updated=%s skipped=%s",
+        result.scanned_products,
+        result.updated_products,
+        result.skipped_products,
     )
 
 

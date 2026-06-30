@@ -152,5 +152,7 @@ async def main():
 if __name__ == "__main__":
     import asyncio
 
+    from ..core.logger import logging
+
     res = asyncio.run(main())
-    print(res)
+    logging.getLogger(__name__).info("Сгенерировано описание: result=%s", res)

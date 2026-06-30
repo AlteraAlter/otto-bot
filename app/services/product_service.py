@@ -105,7 +105,14 @@ class ProductService:
             product = ProductClient(**product_data, compliance=compliance)
             products.append(product)
 
-            print(f"Product client body: {product}")
+            self.logger.debug(
+                "Подготовлен продукт для отправки в OTTO: sku=%s controller=%s payload=%s",
+                getattr(product, "sku", None),
+                payload.controller.value
+                if isinstance(payload.controller, Controller)
+                else payload.controller,
+                product.model_dump(mode="json", by_alias=True),
+            )
 
         otto_payload = ProductBase(products)
 
@@ -276,7 +283,16 @@ class ProductService:
         product_create_payload = CreateProductRequest(
             controller=controller, products=products
         )
-        print(products)
+        self.logger.info(
+            "Запуск удаления товаров через обнуление остатков: sku_count=%s controller=%s",
+            len(skus),
+            controller.value if isinstance(controller, Controller) else controller,
+        )
+        self.logger.debug(
+            "Подготовлен payload для удаления товаров: skus=%s products=%s",
+            skus,
+            [product.model_dump(mode="json", by_alias=True) for product in products],
+        )
         product_task = self.create_or_update_products(product_create_payload)
         quantity_task = self.client.update_quantity(
             payload=[item.model_dump(mode="json") for item in quantity_payload],
@@ -316,7 +332,7 @@ class ProductService:
     async def fetch_all_categories_to_db(self, session: AsyncSession):
         """Фетчит все категории из ОТТО и сохраняет в БД"""
 
-        self.logger.info("Started category synchronization")
+        self.logger.info("Синхронизация категорий OTTO запущена")
 
         MAX_FETCH_SIZE = 10
         page = 0
@@ -327,18 +343,20 @@ class ProductService:
         }
 
         self.logger.info(
-            "Loading existing category groups", extra={"count": len(existing_groups)}
+            "Загружены существующие группы категорий: count=%s", len(existing_groups)
         )
         while True:
             try:
-                self.logger.info(f"Fetching page {page}")
+                self.logger.info("Загрузка страницы категорий OTTO: page=%s", page)
 
                 otto_response = await self.client.get_categories(
                     {"page": page, "limit": MAX_FETCH_SIZE}
                 )
 
                 if not otto_response.categoryGroups:
-                    self.logger.info("Category groups not found")
+                    self.logger.info(
+                        "Новых групп категорий OTTO не найдено: page=%s", page
+                    )
                     break
 
                 for group_item in otto_response.categoryGroups:
@@ -349,12 +367,13 @@ class ProductService:
                         category_group = CategoryGroup(name=group_item.categoryGroup)
                         session.add(category_group)
                         self.logger.info(
-                            f"Created category group: {category_group.name}"
+                            "Создана группа категорий: name=%s", category_group.name
                         )
 
                     else:
                         self.logger.debug(
-                            f"Skipping existing category group: {category_group.name}"
+                            "Группа категорий уже существует, пропускаем: name=%s",
+                            category_group.name,
                         )
                         continue
 
@@ -362,20 +381,26 @@ class ProductService:
                     # Categories
                     # =====================
                     self.logger.info(
-                        f"Start saving the categories: {group_item.categories}"
+                        "Сохранение категорий группы: group=%s count=%s",
+                        category_group.name,
+                        len(group_item.categories),
                     )
                     for category_name in group_item.categories:
                         category = Category(group=category_group, name=category_name)
                         session.add(category)
                         self.logger.debug(
-                            f"INSERT category: {category.name} to group {category_group.name}"
+                            "Категория добавлена в сессию: group=%s category=%s",
+                            category_group.name,
+                            category.name,
                         )
 
                     # =====================
                     # Attributes
                     # =====================
                     self.logger.info(
-                        f"Start saving attributes: {group_item.attributes}"
+                        "Сохранение атрибутов группы: group=%s count=%s",
+                        category_group.name,
+                        len(group_item.attributes),
                     )
                     for attr_item in group_item.attributes:
                         attribute = Attribute(
@@ -391,14 +416,19 @@ class ProductService:
                         )
                         session.add(attribute)
                         self.logger.debug(
-                            f"INSERT attribute: {attribute.name} to group {category_group.name}"
+                            "Атрибут добавлен в сессию: group=%s attribute=%s",
+                            category_group.name,
+                            attribute.name,
                         )
 
                         # =====================
                         # Allowed values
                         # =====================
                         self.logger.info(
-                            f"Start saving allowed values for attribute: {attribute.name}"
+                            "Сохранение допустимых значений атрибута: group=%s attribute=%s count=%s",
+                            category_group.name,
+                            attribute.name,
+                            len(attr_item.allowedValues),
                         )
                         for item_allowed_value in attr_item.allowedValues:
                             allowed_val = AttributeAllowedValue(
@@ -406,14 +436,20 @@ class ProductService:
                             )
                             session.add(allowed_val)
                             self.logger.debug(
-                                f"INSERT {allowed_val.value} into {attribute.name} with group: {category_group.name}"
+                                "Допустимое значение добавлено в сессию: group=%s attribute=%s value=%s",
+                                category_group.name,
+                                attribute.name,
+                                allowed_val.value,
                             )
 
                         # =====================
                         # Variation Themes
                         # =====================
                         self.logger.info(
-                            f"Start saving Variation Themes: {group_item.variationThemes}"
+                            "Проверка variation themes: group=%s attribute=%s themes_count=%s",
+                            category_group.name,
+                            attr_item.name,
+                            len(group_item.variationThemes),
                         )
                         if attr_item.name in group_item.variationThemes:
                             variation_theme = VariationTheme(
@@ -421,22 +457,25 @@ class ProductService:
                             )
                             session.add(variation_theme)
                             self.logger.debug(
-                                f"INSERT {attr_item.name} into {attribute.name} with group: {category_group.name}"
+                                "Variation theme добавлена в сессию: group=%s attribute=%s",
+                                category_group.name,
+                                attr_item.name,
                             )
 
                     existing_groups[category_group.name] = category_group
                 await session.commit()
-                self.logger.info(f"Committed page{page}")
+                self.logger.info("Страница категорий сохранена: page=%s", page)
 
             except Exception:
                 self.logger.exception(
-                    "Failed category synchronization. Rolling back INSERTS"
+                    "Ошибка синхронизации категорий OTTO, выполняется rollback: page=%s",
+                    page,
                 )
                 await session.rollback()
 
             page += 1
 
-        self.logger.info("Completed the fetch saving of category groups from OTTO")
+        self.logger.info("Синхронизация категорий OTTO завершена")
 
 
 async def main(): ...

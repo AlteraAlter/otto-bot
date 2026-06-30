@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
+from app.core.logger import logging
 from app.repository.user_repository import UserRepository
 from app.schemas.enums import RoleEnum
 from app.schemas.tokenDTO import TokenDTO
@@ -18,6 +19,8 @@ from app.schemas.userDTO import (
     UserLoginDTO,
     UserRegisterDTO,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class UserAuth:
@@ -139,8 +142,11 @@ class UserAuth:
 
     async def login_for_access_token(self, credentials: UserLoginDTO) -> TokenDTO:
         user = await self.validate_user(credentials.email, credentials.password)
-        print(f"{credentials.email} not found")
         if not user:
+            logger.warning(
+                "Неуспешная попытка входа: email=%s причина=неверные_учетные_данные",
+                credentials.email,
+            )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect user credentials",
@@ -151,6 +157,12 @@ class UserAuth:
         access_token = self.create_access_token(
             data={"sub": str(user.id), "email": user.email},
             expires_delta=access_token_expires,
+        )
+        logger.info(
+            "Пользователь успешно вошел: user_id=%s email=%s token_ttl_seconds=%s",
+            user.id,
+            user.email,
+            int(access_token_expires.total_seconds()),
         )
         return TokenDTO(
             access_token=access_token,
@@ -171,13 +183,21 @@ class UserAuth:
         existing_user = await self.user_repository.select_user_by_email(
             normalized_email
         )
-        print(existing_user)
         if existing_user:
+            logger.warning(
+                "Создание пользователя отклонено: email=%s причина=пользователь_уже_существует",
+                normalized_email,
+            )
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="User with this email already exists",
             )
 
+        logger.info(
+            "Создание нового пользователя: email=%s role=%s",
+            normalized_email,
+            role,
+        )
         user = await self.user_repository.create_user(
             name=name,
             last_name=last_name,
@@ -186,6 +206,12 @@ class UserAuth:
         )
         assigned_role = await self.user_repository.assign_role(
             user_id=user.id, role=role
+        )
+        logger.info(
+            "Пользователь создан: user_id=%s email=%s role=%s",
+            user.id,
+            user.email,
+            assigned_role.role,
         )
 
         return UserDTO.model_validate(

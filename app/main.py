@@ -11,6 +11,9 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.products import otto_v5_router, router as products_router
 from app.api.routes.uploads import router as uploads_router
 from app.core.configs import settings
+from app.core.logger import logging
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="FastAPI Template")
 app.include_router(auth_router)
@@ -36,3 +39,12 @@ app.mount(
 async def health_check():
     """Simple liveness endpoint used by uptime checks and deployments."""
     return {"status": "ok"}
+
+
+@app.on_event("startup")
+async def log_startup() -> None:
+    logger.info(
+        "Приложение запущено: uploads_dir=%s generated_media_dir=%s",
+        uploads_dir,
+        generated_media_dir,
+    )

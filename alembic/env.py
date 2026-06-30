@@ -20,6 +20,7 @@ import app.models.products
 import app.models.user_roles
 import app.models.users
 import app.models.variation_theme
+import app.models.translation_cache
 from alembic import context
 from app.database import DATABASE_URL, Base
 
