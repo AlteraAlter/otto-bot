@@ -60,11 +60,13 @@ class Relevance(str, Enum):
 class AttributeSchema(BaseModel):
     name: str
     type: str
-    attributeGroup: Optional[str]
-    description: Optional[str]
+    attributeGroup: Optional[str] = None
+    description: Optional[str] = None
     relevance: Optional[Relevance] = None
+    featureRelevance: list[str] = []
     multiValue: bool = False
     unit: str = ""
+    unitDisplayName: Optional[str] = None
     allowedValues: list[Any] = []
 
 

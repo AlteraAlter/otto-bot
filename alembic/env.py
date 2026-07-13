@@ -6,6 +6,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 import app.models.attribute_allowed_values
+import app.models.attribute_fill
 import app.models.attributes
 import app.models.categories
 import app.models.category_group

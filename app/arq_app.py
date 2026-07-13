@@ -23,7 +23,7 @@ def redis_settings_from_url(url: str) -> RedisSettings:
         password=parsed.password,
         ssl=parsed.scheme == "rediss",
     )
-
+    
 
 redis_settings = redis_settings_from_url(settings.arq_redis_url or settings.redis_url)
 
@@ -37,7 +37,29 @@ async def enqueue_job(function: str, **kwargs):
         return await redis.enqueue_job(
             function,
             _queue_name=settings.arq_queue_name,
+            _expires=settings.arq_job_expires_seconds,
             **kwargs,
         )
+    finally:
+        await redis.aclose()
+
+
+async def enqueue_jobs(jobs: list[tuple[str, dict]]):
+    redis = await create_pool(
+        redis_settings,
+        default_queue_name=settings.arq_queue_name,
+    )
+    try:
+        queued = []
+        for function, kwargs in jobs:
+            queued.append(
+                await redis.enqueue_job(
+                    function,
+                    _queue_name=settings.arq_queue_name,
+                    _expires=settings.arq_job_expires_seconds,
+                    **kwargs,
+                )
+            )
+        return queued
     finally:
         await redis.aclose()

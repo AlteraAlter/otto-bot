@@ -72,11 +72,19 @@ class Settings(BaseSettings):
     arq_queue_name: str = "arq:otto-bot"
     arq_worker_concurrency: int = 2
     arq_job_timeout_seconds: int = 7200
+    arq_job_expires_seconds: int = 14 * 24 * 60 * 60
     factory_product_concurrency: int = 10
     factory_ai_enrich_item_timeout_seconds: int = 300
     factory_submit_preview_enabled: bool = True
 
+    # Sentry
+    sentry_dsn: str | None = None
+    sentry_environment: str = "development"
+    sentry_release: str | None = None
+    sentry_traces_sample_rate: float = 0.1
+
     gpt_key: str
+    openai_attribute_fill_api_keys: str | None = None
     deepl_api_key_test: str | None = None
     deepl_url: str = "https://api-free.deepl.com"
     deepl_timeout_seconds: float = 12.0

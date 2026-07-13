@@ -57,6 +57,7 @@ services:
       ARQ_REDIS_URL: redis://redis:6379/0
       ARQ_QUEUE_NAME: arq:otto-bot
       FRONTEND_APP_URL: https://okb.automatonsoft.de
+      OPENAI_ATTRIBUTE_FILL_API_KEYS: ${OPENAI_ATTRIBUTE_FILL_API_KEYS:-}
       UPLOADS_DIR: /app/uploads
       GENERATED_MEDIA_ROOT: /app/storage/generated
       GENERATED_MEDIA_URL_PREFIX: /generated-media
@@ -92,6 +93,7 @@ services:
       ARQ_QUEUE_NAME: arq:otto-bot
       ARQ_WORKER_CONCURRENCY: ${ARQ_WORKER_CONCURRENCY:-2}
       FRONTEND_APP_URL: https://okb.automatonsoft.de
+      OPENAI_ATTRIBUTE_FILL_API_KEYS: ${OPENAI_ATTRIBUTE_FILL_API_KEYS:-}
       GENERATED_MEDIA_ROOT: /app/storage/generated
       GENERATED_MEDIA_URL_PREFIX: /generated-media
     depends_on:
@@ -111,10 +113,21 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN}
+        NEXT_PUBLIC_SENTRY_ENVIRONMENT: ${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-production}
+        SENTRY_AUTH_TOKEN: ${SENTRY_AUTH_TOKEN}
+        SENTRY_ORG: ${SENTRY_ORG}
+        SENTRY_PROJECT: ${SENTRY_FRONTEND_PROJECT:-otto-bot-frontend}
     container_name: otto-bot-frontend
+    env_file:
+      - docker.env
     environment:
       BACKEND_BASE_URL: http://backend:8000
       COOKIE_SECURE: "true"
+      NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN}
+      NEXT_PUBLIC_SENTRY_ENVIRONMENT: ${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-production}
+      SENTRY_PROJECT: ${SENTRY_FRONTEND_PROJECT:-otto-bot-frontend}
       UPLOADS_DIR: /app/uploads 
     volumes:
       - ./storage/uploads:/app/uploads

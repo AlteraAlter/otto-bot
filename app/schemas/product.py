@@ -9,7 +9,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, HttpUrl, RootModel
 
-from app.schemas.enums import Controller, ShippingProfileEnum
+from app.schemas.enums import Controller
 
 
 class Attribute(BaseModel):
@@ -24,14 +24,14 @@ class ProductDescription(BaseModel):
     """Core merchandising details shown on product detail pages."""
 
     productLine: Optional[str] = None
-    brandId: str
+    brandId: Optional[str] = None
     bundle: bool = False
-    category: str
+    category: str = ""
     disposal: bool = False
     multiPack: bool = False
     fscCertified: bool = False
-    bulletPoints: List[str]
-    attributes: List[Attribute]
+    bulletPoints: List[str] = []
+    attributes: List[Attribute] = []
     description: Optional[str] = None
     productUrl: Optional[str] = None
 
@@ -133,12 +133,12 @@ class Compliance(BaseModel):
 class ProductGet(BaseModel):
     """Product get schema"""
 
-    productReference: str
-    sku: str
-    ean: str
+    productReference: str = ""
+    sku: str = ""
+    ean: str = ""
     productDescription: ProductDescription
-    mediaAssets: list[MediaAsset]
-    pricing: Pricing
+    mediaAssets: list[MediaAsset] = []
+    pricing: Optional[Pricing] = None
     order: Optional[Order] = None
     logistics: Optional[Logistics] = None
 
@@ -213,13 +213,13 @@ class UpdateQuantityRequest(BaseModel):
 class UpdateProductDelivery(BaseModel):
     sku: str
     processingTime: str = "DEFAULT"
-    shippingProfileId: ShippingProfileEnum
+    shippingProfileId: str
 
 
 class Availability(BaseModel):
     sku: str
     quantity: str
-    shippingProfileID: ShippingProfileEnum
+    shippingProfileID: str
     processingTime: str = "DEFAULT"
     controller: Controller = Controller.JV
 

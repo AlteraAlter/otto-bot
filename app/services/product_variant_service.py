@@ -20,6 +20,7 @@ from app.services.product_variation_logic import (
     VARIANT_STATUSES,
     VariationDimension,
     build_variant_combinations,
+    is_supported_variation_attribute,
     preview_variant_generation,
     source_combination_key,
     split_attribute_values,
@@ -116,6 +117,11 @@ class ProductVariantService:
             .order_by(Attribute.name.asc())
         )
         theme_attributes = (await self.session.scalars(theme_stmt)).all()
+        theme_attributes = [
+            attribute
+            for attribute in theme_attributes
+            if is_supported_variation_attribute(attribute.name)
+        ]
         if not theme_attributes:
             return [], ["No variation themes configured for this category group."]
 

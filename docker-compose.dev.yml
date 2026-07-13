@@ -76,20 +76,59 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: otto-bot-worker-dev
+    command: ["arq", "app.tasks.WorkerSettings"]
+    env_file:
+      - docker.env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+      MONGODB_URL: mongodb://mongodb:27017
+      MONGODB_DATABASE: otto_bot
+      ARQ_REDIS_URL: redis://redis:6379/0
+      ARQ_QUEUE_NAME: arq:otto-bot
+      ARQ_WORKER_CONCURRENCY: ${ARQ_WORKER_CONCURRENCY:-2}
+      FRONTEND_APP_URL: http://127.0.0.1:3000
+      GENERATED_MEDIA_ROOT: /app/storage/generated
+      GENERATED_MEDIA_URL_PREFIX: /generated-media
+    volumes:
+      - uploads-data:/app/uploads
+      - generated-media-data:/app/storage/generated
+      - backend-logs:/app/logs
+      - ./temp:/app/temp
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile.dev
+    env_file:
+      - docker.env
     container_name: otto-bot-frontend-dev
     environment:
       NODE_ENV: development
       BACKEND_BASE_URL: http://backend:8000
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN}
+      NEXT_PUBLIC_SENTRY_ENVIRONMENT: ${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-development}
+      SENTRY_PROJECT: ${SENTRY_FRONTEND_PROJECT:-otto-bot-frontend}
       WATCHPACK_POLLING: "true"
     volumes:
       - ./frontend:/app
       - /app/node_modules
-      - /app/.next
+      - /app/.next  
     depends_on:
       - backend
     stdin_open: "true"
@@ -112,7 +151,7 @@ services:
 
 volumes:
   postgres-data:
-  redis-data:
+  redis-data: 
   mongodb-data:
   uploads-data:
   generated-media-data:

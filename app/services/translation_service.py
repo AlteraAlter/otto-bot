@@ -65,14 +65,49 @@ class DeepLTranslationService:
         )
 
     async def translate(self, text: str, *, source_lang: str | None, target_lang: str) -> str:
-        normalized = normalize_translation_text(text)
-        if not normalized:
-            return ""
+        translations = await self.translate_many(
+            [text],
+            source_lang=source_lang,
+            target_lang=target_lang,
+        )
+        return translations[0] if translations else ""
+
+    async def translate_many(
+        self,
+        texts: list[str],
+        *,
+        source_lang: str | None,
+        target_lang: str,
+    ) -> list[str]:
+        """Translate independent strings in DeepL batches of at most 50."""
+
+        normalized_texts = [normalize_translation_text(text) for text in texts]
+        if not normalized_texts:
+            return []
         if not self.api_key:
             raise TranslationError("DeepL API key is not configured.")
 
+        results: list[str] = []
+        for start in range(0, len(normalized_texts), 50):
+            batch = normalized_texts[start : start + 50]
+            results.extend(
+                await self._translate_batch(
+                    batch,
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                )
+            )
+        return results
+
+    async def _translate_batch(
+        self,
+        texts: list[str],
+        *,
+        source_lang: str | None,
+        target_lang: str,
+    ) -> list[str]:
         payload: dict[str, object] = {
-            "text": [normalized],
+            "text": texts,
             "target_lang": target_lang.upper(),
         }
         if source_lang:
@@ -106,12 +141,15 @@ class DeepLTranslationService:
             raise TranslationError("DeepL translation failed without a response.")
 
         translations = response.json().get("translations")
-        if not isinstance(translations, list) or not translations:
+        if not isinstance(translations, list) or len(translations) != len(texts):
             raise TranslationError("DeepL response did not contain translations.")
-        translated = translations[0].get("text")
-        if not isinstance(translated, str):
-            raise TranslationError("DeepL response translation is invalid.")
-        return normalize_translation_text(translated)
+        results: list[str] = []
+        for item in translations:
+            translated = item.get("text") if isinstance(item, dict) else None
+            if not isinstance(translated, str):
+                raise TranslationError("DeepL response translation is invalid.")
+            results.append(normalize_translation_text(translated))
+        return results
 
     async def _wait_for_rate_limit_slot(self) -> None:
         interval = max(0.0, float(self.min_interval_seconds))
@@ -216,17 +254,60 @@ class TranslationService:
         target_lang: str,
         context: str | None = None,
     ) -> list[str]:
-        translated: list[str] = []
-        for value in values:
-            translated.append(
-                await self.translate(
-                    value,
-                    source_lang=source_lang,
-                    target_lang=target_lang,
-                    context=context,
+        originals = [normalize_translation_text(value) for value in values]
+        if not originals:
+            return []
+        source = source_lang.upper() if source_lang else None
+        target = target_lang.upper()
+        ctx = normalize_translation_text(context) if context else None
+        unique_originals = list(dict.fromkeys(value for value in originals if value))
+
+        cached_by_original: dict[str, str] = {}
+        try:
+            rows = (
+                await self.db.execute(
+                    select(
+                        TranslationCache.original_text,
+                        TranslationCache.translated_text,
+                    ).where(
+                        TranslationCache.original_text.in_(unique_originals),
+                        TranslationCache.source_lang == source,
+                        TranslationCache.target_lang == target,
+                        TranslationCache.provider == self.provider,
+                        TranslationCache.context == ctx,
+                    )
                 )
+            ).all()
+            cached_by_original.update(rows)
+        except (DBAPIError, ProgrammingError):
+            await self.db.rollback()
+
+        missing = [value for value in unique_originals if value not in cached_by_original]
+        for start in range(0, len(missing), 50):
+            batch = missing[start : start + 50]
+            translated_batch = await self.deepl.translate_many(
+                batch,
+                source_lang=source,
+                target_lang=target,
             )
-        return translated
+            for original, translated in zip(batch, translated_batch, strict=True):
+                cached_by_original[original] = translated
+                self.db.add(
+                    TranslationCache(
+                        original_text=original,
+                        translated_text=translated,
+                        source_lang=source,
+                        target_lang=target,
+                        provider=self.provider,
+                        context=ctx,
+                    )
+                )
+            try:
+                await self.db.commit()
+            except (DBAPIError, IntegrityError, ProgrammingError):
+                await self.db.rollback()
+
+        return [cached_by_original.get(original, "") for original in originals]
 
     async def _get_cached(
         self,

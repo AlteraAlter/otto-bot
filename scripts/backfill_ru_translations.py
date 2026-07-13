@@ -49,21 +49,91 @@ async def translate_items(
 ) -> dict[str, str]:
     selected = items[:limit] if limit is not None else items
     translations: dict[str, str] = {}
-    for index, item in enumerate(selected, start=1):
-        if dry_run:
+    if dry_run:
+        for index, item in enumerate(selected, start=1):
             logger.info("dry-run translate %s/%s context=%s text=%s", index, len(selected), item.context, item.text)
-            continue
+        return translations
+
+    for start in range(0, len(selected), 50):
+        batch = selected[start : start + 50]
         try:
-            translations[item.key] = await translator.translate(
-                item.text,
+            translated_batch = await translator.translate_many(
+                [item.text for item in batch],
                 source_lang="DE",
                 target_lang="RU",
-                context=item.context,
+                context=batch[0].context,
             )
-            logger.info("translated %s/%s context=%s text=%s", index, len(selected), item.context, item.text)
+            translations.update(
+                {
+                    item.key: translated
+                    for item, translated in zip(batch, translated_batch, strict=True)
+                    if translated
+                }
+            )
+            logger.info(
+                "translated %s/%s context=%s batch=%s",
+                min(start + len(batch), len(selected)),
+                len(selected),
+                batch[0].context,
+                len(batch),
+            )
         except Exception as exc:
-            logger.warning("translation failed context=%s text=%s error=%s", item.context, item.text, exc)
+            logger.warning(
+                "translation batch failed context=%s start=%s size=%s error=%s",
+                batch[0].context,
+                start,
+                len(batch),
+                exc,
+            )
     return translations
+
+
+async def backfill_attribute_names(
+    translator: TranslationService,
+    *,
+    limit: int | None,
+    dry_run: bool,
+) -> int:
+    async with SessionLocal() as session:
+        rows = (await session.scalars(select(Attribute).order_by(Attribute.name.asc()))).all()
+        ru_by_key = {
+            canonical_key(row.name): normalize_translation_text(row.name_ru or "")
+            for row in rows
+            if normalize_translation_text(row.name_ru or "")
+        }
+        text_by_key = {
+            canonical_key(row.name): normalize_translation_text(row.name)
+            for row in rows
+            if normalize_translation_text(row.name)
+        }
+        items = [
+            TranslationItem(key, text, "otto_attribute")
+            for key, text in text_by_key.items()
+            if key not in ru_by_key
+        ]
+        logger.info(
+            "attribute names: rows=%s unique=%s unique missing=%s",
+            len(rows),
+            len(text_by_key),
+            len(items),
+        )
+        new_translations = await translate_items(
+            translator,
+            items,
+            limit=limit,
+            dry_run=dry_run,
+        )
+        translations = {**ru_by_key, **new_translations}
+        if dry_run or not translations:
+            return 0
+        updated = 0
+        for row in rows:
+            translated = translations.get(canonical_key(row.name))
+            if translated and normalize_translation_text(row.name_ru or "") != translated:
+                row.name_ru = translated
+                updated += 1
+        await session.commit()
+        return updated
 
 
 async def backfill_category_groups(
@@ -260,7 +330,7 @@ async def backfill_allowed_values(
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill Russian translations via DeepL using unique OTTO dictionary values.")
-    parser.add_argument("--scope", choices=[*SCOPES, "all"], default="all")
+    parser.add_argument("--scope", choices=[*SCOPES, "attribute-names", "all"], default="all")
     parser.add_argument("--limit", type=int, default=None, help="Translate at most N unique items per scope run.")
     parser.add_argument("--dry-run", action="store_true", help="Log missing unique values without calling DeepL or writing DB.")
     args = parser.parse_args()
@@ -270,6 +340,7 @@ async def main() -> None:
         "groups": backfill_category_groups,
         "categories": backfill_categories,
         "attributes": backfill_attributes,
+        "attribute-names": backfill_attribute_names,
         "allowed-values": backfill_allowed_values,
     }
     for scope in selected_scopes:

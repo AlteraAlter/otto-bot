@@ -79,11 +79,16 @@ from app.schemas.product_creation import (
 from app.schemas.product_query import CategoryQuery
 from app.schemas.product_response import (
     AvailabilityResponse,
+    OttoCategoryResponse,
     ProductCreateResponse,
 )
 from app.schemas.product_tasks import (
     ProductFactoryCreateRequestDTO,
     ProductFactoryCreateResponseDTO,
+)
+from app.services.attribute_fill_service import (
+    AttributeFillOptions,
+    create_attribute_fill_task_state,
 )
 from app.services.afterbuy_service import AfterbuyService
 from app.services.ean_pool_service import EanPoolService, ean_pool_item_to_dict
@@ -96,6 +101,7 @@ from app.services.product_variant_service import (
 from app.services.product_variation_logic import (
     active_variant_items,
     expand_products_with_variants,
+    is_supported_variation_attribute,
     validate_variant_export_identifiers,
 )
 from app.services.translation_service import TranslationService, normalize_translation_text
@@ -136,6 +142,7 @@ CREATE_PRODUCT_EXCLUDED_FIELDS = {
     "aiCategoryGroup",
     "shippingProfileID",
     "shippingProfileId",
+    "shippingProfileName",
     "shipping_profile_id",
     "quantity",
     "processingTime",
@@ -154,7 +161,7 @@ if not MAPPER_LOGGER.handlers:
     _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     MAPPER_LOGGER.setLevel(logging.INFO)
     MAPPER_LOGGER.addHandler(_handler)
-    MAPPER_LOGGER.propagate = False
+    MAPPER_LOGGER.propagate = True
 
 PREPARED_UPLOAD_LOG_PATH = (
     Path(__file__).resolve().parents[3] / "logs" / "prepared_upload_payloads.log"
@@ -781,15 +788,59 @@ def _attribute_payload(
         "descriptionRu": description_ru,
         "displayDescription": description_ru or attr.description,
         "type": attr.type,
+        "attributeGroup": attr.attribute_group,
         "multiValue": attr.multi_value,
         "relevance": attr.relevance,
+        "featureRelevance": list(attr.feature_relevance or []),
         "unit": attr.unit,
+        "unitDisplayName": attr.unit_display_name,
         "allowedValues": allowed_values,
         "allowedValuesDisplay": allowed_values_display,
     }
     if is_variation_theme is not None:
         payload["isVariationTheme"] = is_variation_theme
     return payload
+
+
+def _is_relevant_category_attribute(
+    attr: Attribute,
+    *,
+    is_variation_theme: bool = False,
+) -> bool:
+    """Return attributes OTTO marks as important, mandatory, or variant-forming."""
+
+    feature_relevance = {
+        str(value).strip().upper() for value in (attr.feature_relevance or [])
+    }
+    visual_name = str(attr.name or "").casefold()
+    is_visual_attribute = any(
+        token in visual_name
+        for token in (
+            "farbe",
+            "color",
+            "colour",
+            "material",
+            "stoff",
+            "bezug",
+        )
+    )
+    return (
+        str(attr.relevance or "").upper() in {"HIGH", "MEDIUM"}
+        or "LEGAL" in feature_relevance
+        or "VARIATION_THEME" in feature_relevance
+        or is_variation_theme
+        or is_visual_attribute
+    )
+
+
+def _is_variation_category_attribute(
+    attr: Attribute,
+    variation_attribute_ids: set[int],
+) -> bool:
+    upstream_variation = attr.id in variation_attribute_ids or "VARIATION_THEME" in {
+        str(value).strip().upper() for value in (attr.feature_relevance or [])
+    }
+    return upstream_variation and is_supported_variation_attribute(attr.name)
 
 
 async def _load_category_group_contexts() -> dict[str, dict[str, Any]]:
@@ -805,6 +856,18 @@ async def _load_category_group_contexts() -> dict[str, dict[str, Any]]:
             .order_by(CategoryGroup.name.asc())
         )
         groups = result.scalars().unique().all()
+        variation_attribute_ids_by_group: dict[int, set[int]] = {
+            group.id: set() for group in groups
+        }
+        variation_rows = (
+            await session.execute(
+                select(VariationTheme.group_id, VariationTheme.attribute_id)
+            )
+        ).all()
+        for group_id, attribute_id in variation_rows:
+            variation_attribute_ids_by_group.setdefault(group_id, set()).add(
+                attribute_id
+            )
         all_attributes = [attr for group in groups for attr in group.attributes]
         attribute_fallbacks, value_fallbacks = _collect_attribute_translation_fallbacks(
             all_attributes
@@ -821,7 +884,7 @@ async def _load_category_group_contexts() -> dict[str, dict[str, Any]]:
                     {
                         "name": category.name,
                         "nameRu": category.name_ru,
-                        "displayName": category.name,
+                        "displayName": _display_with_ru(category.name, category.name_ru),
                     }
                     for category in group.categories
                     if category.name
@@ -830,13 +893,27 @@ async def _load_category_group_contexts() -> dict[str, dict[str, Any]]:
             )
             attributes = []
             for attr in group.attributes:
+                is_variation_theme = _is_variation_category_attribute(
+                    attr,
+                    variation_attribute_ids_by_group.get(group.id, set()),
+                )
+                if not _is_relevant_category_attribute(
+                    attr,
+                    is_variation_theme=is_variation_theme,
+                ):
+                    continue
                 attributes.append(
-                    _attribute_payload(attr, attribute_fallbacks, value_fallbacks)
+                    _attribute_payload(
+                        attr,
+                        attribute_fallbacks,
+                        value_fallbacks,
+                        is_variation_theme=is_variation_theme,
+                    )
                 )
             contexts[group.name] = {
                 "categoryGroup": group.name,
                 "categoryGroupRu": group.name_ru,
-                "displayCategoryGroup": group.name,
+                "displayCategoryGroup": _display_with_ru(group.name, group.name_ru),
                 "categories": categories,
                 "categoriesDisplay": categories_display,
                 "attributes": attributes,
@@ -1120,6 +1197,13 @@ async def _run_factory_prepare_task(
     product_service: ProductService,
 ) -> None:
     started_at = datetime.now(UTC)
+    MAPPER_LOGGER.info(
+        "PIPELINE event=prepare_worker_started process_id=%s controller=%s factory_id=%s",
+        process_id,
+        payload.controller.value,
+        payload.factory_id,
+    )
+    _flush_logger(MAPPER_LOGGER)
     task = await _get_factory_task_state(process_id) or {}
     task.update(
         {
@@ -1138,6 +1222,11 @@ async def _run_factory_prepare_task(
         }
     )
     await _save_factory_task_state(process_id, task)
+    MAPPER_LOGGER.info(
+        "PIPELINE event=prepare_state_initialized process_id=%s current_step=prepare_initializing",
+        process_id,
+    )
+    _flush_logger(MAPPER_LOGGER)
 
     heartbeat_stop = asyncio.Event()
 
@@ -1172,6 +1261,12 @@ async def _run_factory_prepare_task(
         MAPPER_LOGGER.info(
             "step=task_step_change process_id=%s current_step=%s", process_id, step
         )
+        MAPPER_LOGGER.info(
+            "PIPELINE event=prepare_step process_id=%s current_step=%s",
+            process_id,
+            step,
+        )
+        _flush_logger(MAPPER_LOGGER)
 
     progress_lock = asyncio.Lock()
 
@@ -1197,6 +1292,12 @@ async def _run_factory_prepare_task(
             current["partial_products_by_index"] = {}
             current["updated_at"] = datetime.now(UTC).isoformat()
             await _save_factory_task_state(process_id, current)
+            MAPPER_LOGGER.info(
+                "PIPELINE event=prepare_mapping_total process_id=%s total=%s",
+                process_id,
+                total,
+            )
+            _flush_logger(MAPPER_LOGGER)
 
     async def _append_normalized_item(index: int, product: dict[str, Any]) -> None:
         async with progress_lock:
@@ -1213,6 +1314,15 @@ async def _run_factory_prepare_task(
             current["payload_items"] = len(current["products"])
             current["updated_at"] = datetime.now(UTC).isoformat()
             await _save_factory_task_state(process_id, current)
+            MAPPER_LOGGER.info(
+                "PIPELINE event=prepare_partial_product process_id=%s index=%s payload_items=%s sku=%s ean=%s",
+                process_id,
+                index,
+                len(current["products"]),
+                product.get("sku") or product.get("productReference") or "",
+                product.get("ean") or "",
+            )
+            _flush_logger(MAPPER_LOGGER)
 
     try:
         await _set_step("building_category_preview")
@@ -1237,6 +1347,15 @@ async def _run_factory_prepare_task(
             mapped_count,
             len(products_payload),
         )
+        MAPPER_LOGGER.info(
+            "PIPELINE event=prepare_category_preview_ready process_id=%s source_items=%s mapped_items=%s payload_items=%s issues=%s",
+            process_id,
+            source_count,
+            mapped_count,
+            len(products_payload),
+            len(issues),
+        )
+        _flush_logger(MAPPER_LOGGER)
         current = await _get_factory_task_state(process_id) or {}
         current["progress_total"] = source_count
         current["progress_completed"] = min(
@@ -1282,10 +1401,25 @@ async def _run_factory_prepare_task(
                 "progress_percent": 100 if source_count > 0 else 0,
             },
         )
+        MAPPER_LOGGER.info(
+            "PIPELINE event=prepare_done process_id=%s current_step=category_preview_done source_items=%s mapped_items=%s payload_items=%s snapshot_path=%s",
+            process_id,
+            source_count,
+            mapped_count,
+            len(products_payload),
+            snapshot_path.as_posix(),
+        )
+        _flush_logger(MAPPER_LOGGER)
     except Exception as exc:
         MAPPER_LOGGER.exception(
             "step=factory_prepare_task_failed process_id=%s error=%s", process_id, exc
         )
+        MAPPER_LOGGER.exception(
+            "PIPELINE event=prepare_failed process_id=%s error=%s",
+            process_id,
+            exc,
+        )
+        _flush_logger(MAPPER_LOGGER)
         await _save_factory_task_state(
             process_id,
             {
@@ -1941,20 +2075,18 @@ async def get_db_product_categories(
 ):
     """Return OTTO subcategories from the local category cache."""
     stmt = (
-        select(func.trim(Category.name))
+        select(Category)
         .where(Category.name.is_not(None))
-        .distinct()
         .order_by(func.trim(Category.name).asc())
     )
     result = await db.execute(stmt)
     raw_items = result.scalars().all()
 
     unique_items: list[str] = []
+    display_items: list[dict[str, str | None]] = []
     seen: set[str] = set()
     for item in raw_items:
-        if item is None:
-            continue
-        normalized = item.strip()
+        normalized = str(item.name or "").strip()
         if not normalized:
             continue
         key = normalized.casefold()
@@ -1962,10 +2094,20 @@ async def get_db_product_categories(
             continue
         seen.add(key)
         unique_items.append(normalized)
+        name_ru = str(item.name_ru).strip() if item.name_ru else None
+        display_items.append(
+            {
+                "name": normalized,
+                "nameRu": name_ru,
+                "displayName": _display_with_ru(normalized, name_ru),
+            }
+        )
 
-    unique_items.sort(key=str.casefold)
+    display_items.sort(key=lambda item: item["name"].casefold())
+    unique_items = [item["name"] for item in display_items]
     return {
         "items": unique_items,
+        "itemsDisplay": display_items,
         "total": len(unique_items),
     }
 
@@ -1973,7 +2115,9 @@ async def get_db_product_categories(
 @router.get("/db/category-groups/categories")
 async def get_db_category_group_categories(
     category_group: list[str] = Query(default=[]),
+    include_low_relevance: bool = Query(default=False),
     db: AsyncSession = Depends(get_db),
+    product_service: ProductService = Depends(get_product_service),
 ):
     """Return local OTTO subcategories only for the requested CategoryGroups."""
     requested_groups: list[str] = []
@@ -1993,12 +2137,34 @@ async def get_db_category_group_categories(
 
     stmt = (
         select(CategoryGroup)
-        .options(selectinload(CategoryGroup.categories))
+        .options(
+            selectinload(CategoryGroup.categories),
+            selectinload(CategoryGroup.attributes).selectinload(Attribute.allowed_values),
+        )
         .where(func.lower(CategoryGroup.name).in_([item.casefold() for item in requested_groups]))
         .order_by(CategoryGroup.name.asc())
     )
     result = await db.execute(stmt)
     groups = result.scalars().unique().all()
+    await product_service.ensure_category_translations(db, groups=groups)
+
+    group_ids = [group.id for group in groups]
+    variation_attribute_ids_by_group: dict[int, set[int]] = {group.id: set() for group in groups}
+    if group_ids:
+        variation_rows = (
+            await db.execute(
+                select(VariationTheme.group_id, VariationTheme.attribute_id).where(
+                    VariationTheme.group_id.in_(group_ids)
+                )
+            )
+        ).all()
+        for group_id, attribute_id in variation_rows:
+            variation_attribute_ids_by_group.setdefault(group_id, set()).add(attribute_id)
+
+    all_attributes = [attr for group in groups for attr in group.attributes]
+    attribute_fallbacks, value_fallbacks = _collect_attribute_translation_fallbacks(
+        all_attributes
+    )
 
     items: list[dict[str, Any]] = []
     for group in groups:
@@ -2007,7 +2173,7 @@ async def get_db_category_group_categories(
                 {
                     "name": str(category.name).strip(),
                     "nameRu": str(category.name_ru).strip() if category.name_ru else None,
-                    "displayName": str(category.name).strip(),
+                    "displayName": _display_with_ru(category.name, category.name_ru),
                 }
                 for category in group.categories
                 if category.name and str(category.name).strip()
@@ -2021,16 +2187,39 @@ async def get_db_category_group_categories(
                 {
                     "name": str(group.name).strip(),
                     "nameRu": str(group.name_ru).strip() if group.name_ru else None,
-                    "displayName": str(group.name).strip(),
+                    "displayName": _display_with_ru(group.name, group.name_ru),
                 }
             ]
         items.append(
             {
                 "categoryGroup": group.name,
                 "categoryGroupRu": group.name_ru,
-                "displayCategoryGroup": group.name,
+                "displayCategoryGroup": _display_with_ru(group.name, group.name_ru),
                 "categories": categories,
                 "categoriesDisplay": category_items,
+                "attributes": [
+                    _attribute_payload(
+                        attr,
+                        attribute_fallbacks,
+                        value_fallbacks,
+                        is_variation_theme=_is_variation_category_attribute(
+                            attr,
+                            variation_attribute_ids_by_group.get(group.id, set()),
+                        ),
+                    )
+                    for attr in sorted(group.attributes, key=lambda item: item.name.casefold())
+                    if attr.name
+                    and (
+                        include_low_relevance
+                        or _is_relevant_category_attribute(
+                            attr,
+                            is_variation_theme=_is_variation_category_attribute(
+                                attr,
+                                variation_attribute_ids_by_group.get(group.id, set()),
+                            ),
+                        )
+                    )
+                ],
             }
         )
 
@@ -2041,6 +2230,7 @@ async def get_db_category_group_categories(
 async def get_db_category_attributes(
     category: str | None = Query(default=None),
     category_group: str | None = Query(default=None),
+    include_low_relevance: bool = Query(default=False),
     db: AsyncSession = Depends(get_db),
 ):
     """Return local OTTO attributes for a product category or CategoryGroup."""
@@ -2073,9 +2263,8 @@ async def get_db_category_attributes(
             )
         ).all()
     )
-    attribute_fallbacks, value_fallbacks = await _load_attribute_translation_fallbacks_for_names(
-        db,
-        [attr.name for attr in group.attributes if attr.name],
+    attribute_fallbacks, value_fallbacks = _collect_attribute_translation_fallbacks(
+        list(group.attributes)
     )
 
     items = [
@@ -2083,17 +2272,32 @@ async def get_db_category_attributes(
             attr,
             attribute_fallbacks,
             value_fallbacks,
-            is_variation_theme=attr.id in variation_attribute_ids,
+            is_variation_theme=_is_variation_category_attribute(
+                attr,
+                variation_attribute_ids,
+            ),
         )
         for attr in sorted(group.attributes, key=lambda item: item.name.casefold())
         if attr.name
+        and (
+            include_low_relevance
+            or _is_relevant_category_attribute(
+                attr,
+                is_variation_theme=_is_variation_category_attribute(
+                    attr,
+                    variation_attribute_ids,
+                ),
+            )
+        )
     ]
     return {
         "items": items,
         "total": len(items),
         "categoryGroup": group.name,
         "categoryGroupRu": group.name_ru,
-        "displayCategoryGroup": group.name,
+        "displayCategoryGroup": _display_with_ru(group.name, group.name_ru),
+        "category": normalized_category or None,
+        "includeLowRelevance": include_low_relevance,
     }
 
 
@@ -2252,6 +2456,7 @@ async def _get_otto_product_categories(
     page: int,
     limit: int,
     category: str | None,
+    controller: Controller,
     product_service: ProductService,
 ):
     payload = CategoryQuery(
@@ -2259,14 +2464,19 @@ async def _get_otto_product_categories(
         limit=limit,
         category=category,
     ).to_payload()
-    return await product_service.get_categories(payload)
+    return await product_service.get_categories(payload, controller=controller)
 
 
-@router.get("/categories")
+@router.get(
+    "/categories",
+    response_model=OttoCategoryResponse,
+    summary="Fetch category information directly from OTTO",
+)
 async def get_product_categories(
     page: int = Query(default=0, ge=0),
     limit: int = Query(default=1, ge=0, le=2000),
     category: str | None = Query(default=None),
+    controller: Controller = Query(default=Controller.JV),
     product_service: ProductService = Depends(get_product_service),
 ):
     """Proxy OTTO `GET /v5/products/categories` through the backend API."""
@@ -2274,11 +2484,21 @@ async def get_product_categories(
         page=page,
         limit=limit,
         category=category,
+        controller=controller,
         product_service=product_service,
     )
 
 
-@otto_v5_router.get("/categories")
+@otto_v5_router.get(
+    "/categories",
+    response_model=OttoCategoryResponse,
+    summary="Fetch category information directly from OTTO",
+    description=(
+        "Sends `GET /v5/products/categories` directly to the OTTO API and "
+        "returns category groups, categories, variation themes, and attributes."
+    ),
+    include_in_schema=True,
+)
 async def get_otto_v5_product_categories(
     page: int = Query(default=0, ge=0),
     limit: int = Query(default=10, ge=10, le=2000),
@@ -2704,6 +2924,14 @@ async def create_product_task_from_factory(
 ):
     run_id = payload.run_id or str(uuid4())
     now = datetime.now(UTC).isoformat()
+    MAPPER_LOGGER.info(
+        "PIPELINE event=api_prepare_request_received process_id=%s controller=%s factory_id=%s user_id=%s",
+        run_id,
+        payload.controller.value,
+        payload.factory_id,
+        getattr(current_user, "id", None),
+    )
+    _flush_logger(MAPPER_LOGGER)
     task = {
         "status": "IN_PROGRESS",
         "controller": payload.controller.value,
@@ -2726,12 +2954,22 @@ async def create_product_task_from_factory(
         task,
         created_by_user_id=current_user.id,
     )
+    MAPPER_LOGGER.info(
+        "PIPELINE event=api_prepare_state_created process_id=%s current_step=prepare_queued",
+        run_id,
+    )
 
     await enqueue_job(
         "prepare_factory_products_task",
         process_id=run_id,
         payload=payload.model_dump(mode="json"),
     )
+    MAPPER_LOGGER.info(
+        "PIPELINE event=api_prepare_job_enqueued process_id=%s job=prepare_factory_products_task queue=%s",
+        run_id,
+        settings.arq_queue_name,
+    )
+    _flush_logger(MAPPER_LOGGER)
 
     return ProductFactoryCreateResponseDTO(
         success=True,
@@ -2828,6 +3066,119 @@ async def delete_factory_prepare_tasks(
     return {
         "success": True,
         "deleted": len(process_ids),
+    }
+
+
+def _normalize_attribute_fill_payload(payload: dict[str, Any]) -> AttributeFillOptions:
+    del payload
+    return AttributeFillOptions(controller="xl")
+
+
+@router.post("/tasks/attribute-fill")
+async def create_attribute_fill_task(
+    payload: dict[str, Any] | None = Body(default=None),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_role([RoleEnum.SEO])),
+):
+    payload = payload or {}
+    options = _normalize_attribute_fill_payload(payload)
+    active_stmt = (
+        select(FactoryTaskState)
+        .where(
+            FactoryTaskState.created_by_user_id == current_user.id,
+            FactoryTaskState.current_step.ilike("attribute_fill%"),
+            FactoryTaskState.status == "IN_PROGRESS",
+        )
+        .order_by(FactoryTaskState.updated_at.desc())
+        .limit(1)
+    )
+    active_record = (await db.execute(active_stmt)).scalar_one_or_none()
+    if active_record is not None:
+        task = active_record.task_payload or {}
+        return {
+            "success": True,
+            "process_id": active_record.process_id,
+            "process_state": task.get("status") or active_record.status,
+            **task,
+        }
+
+    process_id = str(payload.get("run_id") or payload.get("process_id") or uuid4())
+    task = await create_attribute_fill_task_state(
+        process_id=process_id,
+        options=options,
+        created_by_user_id=current_user.id,
+    )
+    await enqueue_job(
+        "fill_active_product_attributes_task",
+        process_id=process_id,
+        payload={
+            "controller": options.controller,
+            "created_by_user_id": current_user.id,
+        },
+    )
+    return {
+        "success": True,
+        "process_id": process_id,
+        "process_state": task.get("status"),
+        **task,
+    }
+
+
+@router.get("/tasks/attribute-fill/latest")
+async def get_latest_attribute_fill_task(
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_role([RoleEnum.SEO])),
+):
+    stmt = (
+        select(FactoryTaskState)
+        .where(
+            FactoryTaskState.created_by_user_id == current_user.id,
+            FactoryTaskState.current_step.ilike("attribute_fill%"),
+        )
+        .order_by(FactoryTaskState.updated_at.desc())
+        .limit(1)
+    )
+    record = (await db.execute(stmt)).scalar_one_or_none()
+    if record is None:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"success": False, "message": "No attribute fill task"},
+        )
+
+    task = await _get_owned_factory_task_state(record.process_id, current_user.id)
+    if task is None:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"success": False, "message": "Task not found"},
+        )
+    return {
+        "success": True,
+        "process_id": record.process_id,
+        "process_state": task.get("status"),
+        **task,
+    }
+
+
+@router.get("/tasks/attribute-fill/{process_id}")
+async def get_attribute_fill_task(
+    process_id: str,
+    current_user=Depends(require_role([RoleEnum.SEO])),
+):
+    task = await _get_owned_factory_task_state(process_id, current_user.id)
+    if task is None or task.get("task_type") != "attribute_fill":
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "success": False,
+                "message": "Task not found",
+                "process_id": process_id,
+            },
+        )
+    return {
+        "success": True,
+        "process_id": process_id,
+        "process_state": task.get("status"),
+        **task,
     }
 
 
@@ -3870,6 +4221,134 @@ def _availability_payload_item(
     }
 
 
+def _normalize_shipping_profile_name(value: Any) -> str:
+    return " ".join(str(value or "").strip().casefold().split())
+
+
+def _shipping_profile_items(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, dict):
+        raw_items = []
+        for key in ("shippingProfiles", "items", "data", "results"):
+            items = value.get(key)
+            if isinstance(items, list):
+                raw_items = items
+                break
+    else:
+        raw_items = []
+
+    return [item for item in raw_items if isinstance(item, dict)]
+
+
+def _shipping_profile_id(item: dict[str, Any]) -> str:
+    return str(
+        item.get("id")
+        or item.get("shippingProfileID")
+        or item.get("shippingProfileId")
+        or item.get("profileId")
+        or ""
+    ).strip()
+
+
+def _shipping_profile_name(item: dict[str, Any]) -> str:
+    return str(
+        item.get("name")
+        or item.get("title")
+        or item.get("profileName")
+        or item.get("label")
+        or ""
+    ).strip()
+
+
+async def _map_shipping_profiles_to_controller_by_name(
+    *,
+    product_service: ProductService,
+    source_controller: Controller,
+    target_controller: Controller,
+    products: list[dict[str, Any]],
+) -> dict[str, Any]:
+    source_response = await product_service.get_shipping_profiles(
+        controller=source_controller
+    )
+    target_response = await product_service.get_shipping_profiles(
+        controller=target_controller
+    )
+    source_profiles = _shipping_profile_items(source_response)
+    target_profiles = _shipping_profile_items(target_response)
+    source_name_by_id = {
+        profile_id: profile_name
+        for item in source_profiles
+        if (profile_id := _shipping_profile_id(item))
+        and (profile_name := _shipping_profile_name(item))
+    }
+    target_by_name = {
+        normalized_name: {"id": profile_id, "name": profile_name}
+        for item in target_profiles
+        if (profile_id := _shipping_profile_id(item))
+        and (profile_name := _shipping_profile_name(item))
+        and (normalized_name := _normalize_shipping_profile_name(profile_name))
+    }
+
+    mapped = 0
+    missing: list[dict[str, str]] = []
+    for product in products:
+        source_profile_id = str(product.get("shippingProfileID") or "").strip()
+        source_profile_name = source_name_by_id.get(source_profile_id) or str(
+            product.get("shippingProfileName") or ""
+        ).strip()
+        normalized_name = _normalize_shipping_profile_name(source_profile_name)
+        target_profile = target_by_name.get(normalized_name)
+        if target_profile:
+            product["shippingProfileID"] = target_profile["id"]
+            product["shippingProfileName"] = target_profile["name"]
+            mapped += 1
+            continue
+
+        missing.append(
+            {
+                "sku": str(product.get("sku") or ""),
+                "sourceShippingProfileID": source_profile_id,
+                "sourceShippingProfileName": source_profile_name,
+            }
+        )
+
+    meta = {
+        "source_controller": source_controller.value,
+        "target_controller": target_controller.value,
+        "source_profiles": len(source_profiles),
+        "target_profiles": len(target_profiles),
+        "products": len(products),
+        "mapped": mapped,
+        "missing": missing[:50],
+    }
+    MAPPER_LOGGER.info(
+        "step=shipping_profile_name_mapping source_controller=%s target_controller=%s source_profiles=%s target_profiles=%s products=%s mapped=%s missing=%s",
+        source_controller.value,
+        target_controller.value,
+        len(source_profiles),
+        len(target_profiles),
+        len(products),
+        mapped,
+        len(missing),
+    )
+    if missing:
+        sample = ", ".join(
+            (
+                item.get("sourceShippingProfileName")
+                or item.get("sourceShippingProfileID")
+                or item.get("sku")
+                or "unknown"
+            )
+            for item in missing[:5]
+        )
+        raise ValueError(
+            f"missing {target_controller.value} shipping profile mapping by name "
+            f"for {len(missing)} products: {sample}"
+        )
+    return meta
+
+
 def _clone_products_with_account_map(
     products: list[dict[str, Any]],
     ean_map: dict[str, str],
@@ -4001,6 +4480,7 @@ async def _build_factory_submit_preview_snapshots(
     payload: dict[str, Any],
     task: dict[str, Any] | None,
     afterbuy: AfterbuyService | None,
+    product_service: ProductService,
 ) -> dict[str, Any]:
     raw_products = payload.get("products")
     media_base_url = str(payload.get("media_base_url") or "").strip() or None
@@ -4065,10 +4545,14 @@ async def _build_factory_submit_preview_snapshots(
             ).strip()
             if shipping_profile_id:
                 validated_item["shippingProfileID"] = shipping_profile_id
+                shipping_profile_name = str(item.get("shippingProfileName") or "").strip()
+                if shipping_profile_name:
+                    validated_item["shippingProfileName"] = shipping_profile_name
             validated.append(validated_item)
 
         xl_ean_map: dict[str, str] = {}
         xl_ean_map_meta: dict[str, Any] = {}
+        xl_shipping_profile_map_meta: dict[str, Any] = {}
         xl_validated: list[dict[str, Any]] = []
         xl_validated_models: list[ProductPayload] = []
         if controller == Controller.JV and afterbuy is not None:
@@ -4083,6 +4567,12 @@ async def _build_factory_submit_preview_snapshots(
                 validated,
                 xl_ean_map,
                 controller=Controller.XL,
+            )
+            xl_shipping_profile_map_meta = await _map_shipping_profiles_to_controller_by_name(
+                product_service=product_service,
+                source_controller=controller,
+                target_controller=Controller.XL,
+                products=xl_validated,
             )
             xl_validated_models = [
                 ProductPayload.model_validate(item) for item in xl_validated
@@ -4137,6 +4627,7 @@ async def _build_factory_submit_preview_snapshots(
             "ean_pool_preview_released": True,
             "xl_ean_map": xl_ean_map,
             "xl_ean_map_meta": xl_ean_map_meta,
+            "xl_shipping_profile_map_meta": xl_shipping_profile_map_meta,
             "sample": {
                 "jv": [
                     {
@@ -4399,6 +4890,7 @@ async def _run_factory_submit_task(
     xl_validated_models: list[ProductPayload] = []
     xl_ean_map: dict[str, str] = {}
     xl_ean_map_meta: dict[str, Any] = {}
+    xl_shipping_profile_map_meta: dict[str, Any] = {}
     ean_pool_assignments: list[dict[str, str]] = []
     controller_value = str(
         (task or {}).get("controller") or payload.get("controller") or "jv"
@@ -4529,6 +5021,9 @@ async def _run_factory_submit_task(
             ).strip()
             if shipping_profile_id:
                 validated_item["shippingProfileID"] = shipping_profile_id
+                shipping_profile_name = str(item.get("shippingProfileName") or "").strip()
+                if shipping_profile_name:
+                    validated_item["shippingProfileName"] = shipping_profile_name
             else:
                 MAPPER_LOGGER.warning(
                     "step=submit_final_products_missing_shipping_profile process_id=%s index=%s sku=%s source_keys=%s",
@@ -4560,6 +5055,12 @@ async def _run_factory_submit_task(
                 validated,
                 xl_ean_map,
                 controller=Controller.XL,
+            )
+            xl_shipping_profile_map_meta = await _map_shipping_profiles_to_controller_by_name(
+                product_service=product_service,
+                source_controller=controller,
+                target_controller=Controller.XL,
+                products=xl_validated,
             )
             for index, item in enumerate(xl_validated):
                 model = ProductPayload.model_validate(item)
@@ -4619,6 +5120,7 @@ async def _run_factory_submit_task(
         task["availability_snapshot_path"] = availability_file_path.as_posix()
         task["xl_ean_map"] = xl_ean_map
         task["xl_ean_map_meta"] = xl_ean_map_meta
+        task["xl_shipping_profile_map_meta"] = xl_shipping_profile_map_meta
         task["xl_products_count"] = len(xl_validated_models)
         task["final_products_count"] = len(validated)
         task["current_step"] = "otto_create_in_progress"
@@ -4781,6 +5283,7 @@ async def preview_factory_submit_payloads(
     request: Request,
     payload: dict[str, Any] = Body(default_factory=dict),
     afterbuy: AfterbuyService = Depends(get_afterbuy_login),
+    product_service: ProductService = Depends(get_product_service),
     current_user=Depends(require_role([RoleEnum.SEO])),
 ):
     if not settings.factory_submit_preview_enabled:
@@ -4816,6 +5319,7 @@ async def preview_factory_submit_payloads(
             payload=preview_payload,
             task=task,
             afterbuy=afterbuy,
+            product_service=product_service,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -4842,6 +5346,7 @@ async def preview_factory_submit_payloads(
         "xl_products_count": result.get("xl_products_count"),
         "xl_ean_map": result.get("xl_ean_map") or {},
         "xl_ean_map_meta": result.get("xl_ean_map_meta") or {},
+        "xl_shipping_profile_map_meta": result.get("xl_shipping_profile_map_meta") or {},
         "ean_pool_assignments": result.get("ean_pool_assignments") or [],
         "ean_pool_preview_released": result.get("ean_pool_preview_released"),
     }
@@ -4951,9 +5456,17 @@ async def submit_factory_prepared_products(
 
 @router.get("/fetch-otto-categories-to-db")
 async def fetch_otto_categories_to_db(
+    controller: Controller = Query(default=Controller.JV),
     product_service: ProductService = Depends(get_product_service),
     session: AsyncSession = Depends(get_db),
 ):
-    await product_service.fetch_all_categories_to_db(session)
+    counts = await product_service.fetch_all_categories_to_db(
+        session,
+        controller=controller,
+    )
 
-    return {"success": True, "message": "Category sync started"}
+    return {
+        "success": True,
+        "message": "OTTO category cache refreshed",
+        **counts,
+    }

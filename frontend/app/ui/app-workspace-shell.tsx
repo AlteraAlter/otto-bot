@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FileSpreadsheet, Home, LogOut, Menu, Package2, Trash2, X } from "lucide-react";
+import { FileSpreadsheet, Home, ListChecks, LogOut, Menu, Package2, Trash2, X } from "lucide-react";
 import { ReactNode, useEffect, useState } from "react";
 
 import { OttoLogo } from "@/components/otto-logo";
@@ -11,11 +11,12 @@ import { CurrentUser } from "../hooks/use-current-user";
 
 type AppWorkspaceShellProps = {
   currentUser: CurrentUser | null;
-  activeHref: "/" | "/creator" | "/tasks" | "/imports";
+  activeHref: "/" | "/creator" | "/tasks" | "/imports" | "/attribute-fill";
   sectionLabel: string;
   title: string;
   description: string;
   compactSidebar?: boolean;
+  hidePageHead?: boolean;
   children: ReactNode;
 };
 
@@ -25,6 +26,7 @@ export function AppWorkspaceShell({
   sectionLabel,
   title,
   description,
+  hidePageHead = false,
   children,
 }: AppWorkspaceShellProps) {
   const router = useRouter();
@@ -33,6 +35,7 @@ export function AppWorkspaceShell({
   const navItems = [
     { href: "/", label: "Каталог", icon: Home },
     { href: "/creator", label: "Создание товара", icon: Package2 },
+    { href: "/attribute-fill", label: "AI атрибуты", icon: ListChecks },
     { href: "/tasks", label: "Удаление товара", icon: Trash2 },
     { href: "/imports", label: "XLSX импорт", icon: FileSpreadsheet },
   ];
@@ -178,13 +181,15 @@ export function AppWorkspaceShell({
         ) : null}
 
         <section className="workspace workspace-content" aria-label={`${sectionLabel}: ${title}`}>
-          <header className="workspace-page-head">
-            <div>
-              <p className="page-section-label">{sectionLabel}</p>
-              <h1>{title}</h1>
-              <p>{description}</p>
-            </div>
-          </header>
+          {!hidePageHead ? (
+            <header className="workspace-page-head">
+              <div>
+                <p className="page-section-label">{sectionLabel}</p>
+                <h1>{title}</h1>
+                <p>{description}</p>
+              </div>
+            </header>
+          ) : null}
           {children}
         </section>
       </section>

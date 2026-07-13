@@ -171,9 +171,31 @@ class OttoClient:
         )
         return ProductResponse.model_validate(response)
 
-    async def get_active_products(self, payload: dict | None = None):
+    async def get_products_raw(
+        self,
+        payload: dict | None = None,
+        controller: Controller | str = Controller.JV,
+    ) -> Any:
+        """GET paginated products list without schema validation."""
+        return await self._request(
+            "GET",
+            "/v5/products",
+            params=payload,
+            controller=controller,
+        )
+
+    async def get_active_products(
+        self,
+        payload: dict | None = None,
+        controller: Controller | str = Controller.JV,
+    ):
         """GET active-status list."""
-        return await self._request("GET", "/v5/products/active-status", params=payload)
+        return await self._request(
+            "GET",
+            "/v5/products/active-status",
+            params=payload,
+            controller=controller,
+        )
 
     async def update_tasks(
         self, pid: str, controller: Controller | str = Controller.JV
@@ -190,12 +212,30 @@ class OttoClient:
             "GET", f"/v5/products/update-tasks/{pid}/failed", controller=controller
         )
 
-    async def get_marketplace_status(self, payload: dict | None = None):
+    async def get_marketplace_status(
+        self,
+        payload: dict | None = None,
+        controller: Controller | str = Controller.JV,
+    ):
         """GET marketplace status information with optional filters."""
         return await self._request(
             "GET",
             "/v5/products/marketplace-status",
             params=payload,
+            controller=controller,
+        )
+
+    async def create_or_update_products_raw(
+        self,
+        products: list[dict[str, Any]],
+        controller: Controller | str = Controller.JV,
+    ) -> Any:
+        """POST raw product payloads to OTTO without local Pydantic coercion."""
+        return await self._request(
+            "POST",
+            "/v5/products",
+            json=products,
+            controller=controller,
         )
 
     async def update_quantity(
@@ -256,11 +296,18 @@ class OttoClient:
 
         return parse(ProductCreateResponse, response_data)
 
-    async def get_categories(self, payload: dict) -> OttoCategoryResponse:
+    async def get_categories(
+        self,
+        payload: dict,
+        controller: Controller | str = Controller.JV,
+    ) -> OttoCategoryResponse:
         """Fetch category values from OTTO category-group responses."""
 
         response_data = await self._request(
-            "GET", "/v5/products/categories", params=payload
+            "GET",
+            "/v5/products/categories",
+            params=payload,
+            controller=controller,
         )
         if isinstance(response_data, list):
             response_data = {"categoryGroups": response_data}

@@ -20,6 +20,7 @@ class AttributeGenerator:
         bullet_points: list[str],
         otto_attributes: list[dict],
         exclude_attributes: list[dict],
+        image_urls: list[str] | None = None,
     ) -> dict:
 
         system_prompt = f"""
@@ -27,23 +28,30 @@ class AttributeGenerator:
 
         Rules:
         - Use only provided information.
+        - Use both SOURCE ATTRIBUTES and PRODUCT IMAGES as evidence.
         - Never invent values.
+        - Fill as many requested attributes as the evidence supports.
+        - Infer visual properties only when they are clearly visible (for example color, material, form, style, pattern, upholstery and construction).
+        - Never infer exact dimensions, quantities, certifications, technical specifications or hidden construction from an image.
         - Return only non empty values
         - Return only attributes requested in OTTO schema.
         - Return valid JSON only.
         - Attribute names must exactly match OTTO attribute names.
+        - If allowedValues are provided, use an exact allowed value whenever the evidence supports one.
         - Return exactly one best value per attribute.
         - Do not return multiple alternatives for one attribute, even for multi value attributes.
         - Numeric attributes must contain only numbers without units.
         - Exlude attributes: {json.dumps(exclude_attributes, ensure_ascii=False)}
         """
 
+        source_for_prompt = dict(source_attributes)
+        source_for_prompt.pop("imageUrls", None)
         user_prompt = f"""
         CATEGORY:
         {category}
 
         SOURCE ATTRIBUTES:
-        {json.dumps(source_attributes, ensure_ascii=False)}
+        {json.dumps(source_for_prompt, ensure_ascii=False)}
 
         BULLET POINTS:
         {json.dumps(bullet_points, ensure_ascii=False)}
@@ -51,6 +59,24 @@ class AttributeGenerator:
         OTTO ATTRIBUTES:
         {json.dumps(otto_attributes, ensure_ascii=False)}
         """
+
+        valid_image_urls = [
+            url
+            for url in (image_urls or [])
+            if isinstance(url, str)
+            and url.startswith(("http://", "https://"))
+        ][:3]
+        user_content: str | list[dict[str, str]] = user_prompt
+        if valid_image_urls:
+            user_content = [{"type": "input_text", "text": user_prompt}]
+            user_content.extend(
+                {
+                    "type": "input_image",
+                    "image_url": image_url,
+                    "detail": "high",
+                }
+                for image_url in valid_image_urls
+            )
 
         response = await self.client.responses.create(
             model=self.model,
@@ -91,7 +117,7 @@ class AttributeGenerator:
                 },
                 {
                     "role": "user",
-                    "content": user_prompt,
+                    "content": user_content,
                 },
             ],
         )

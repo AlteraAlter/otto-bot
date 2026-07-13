@@ -59,6 +59,20 @@ def normalize_field_token(value: Any) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def is_supported_variation_attribute(name: Any) -> bool:
+    """Only the primary color/material fields may create product variants."""
+
+    token = normalize_field_token(name)
+    return token in {
+        "farbe",
+        "color",
+        "colour",
+        "цвет",
+        "material",
+        "материал",
+    }
+
+
 def split_attribute_values(value: Any) -> list[str]:
     """Read OTTO attribute values from lists or comma/newline separated text."""
     if value is None:

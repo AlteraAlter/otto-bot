@@ -10,8 +10,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.clients.otto_client import OttoClient
 from app.core.configs import settings
@@ -46,6 +47,7 @@ from app.schemas.product_response import (
     UpdateProductDeliveryResponse,
     UpdateQuantityResponse,
 )
+from app.services.translation_service import TranslationError, TranslationService
 from app.services.utility_service import UtilityService
 from app.utils.helpers import to_json
 
@@ -73,9 +75,13 @@ class ProductService:
         """Fetch paginated products from OTTO using query payload filters."""
         return await self.client.get_products(payload, controller=controller)
 
-    async def get_active_products(self, payload: dict):
+    async def get_active_products(
+        self,
+        payload: dict,
+        controller: Controller = Controller.JV,
+    ):
         """Fetch active-status listing from OTTO."""
-        return await self.client.get_active_products(payload)
+        return await self.client.get_active_products(payload, controller=controller)
 
     async def update_tasks(self, pid: str, controller: Controller = Controller.JV):
         """Trigger backend update tasks for a given OTTO product id."""
@@ -84,9 +90,13 @@ class ProductService:
     async def failed_tasks(self, pid: str, controller: Controller = Controller.JV):
         return await self.client.failed_tasks(pid, controller=controller)
 
-    async def get_marketplace_status(self, payload: dict):
+    async def get_marketplace_status(
+        self,
+        payload: dict,
+        controller: Controller = Controller.JV,
+    ):
         """Fetch marketplace status information for products from OTTO."""
-        return await self.client.get_marketplace_status(payload)
+        return await self.client.get_marketplace_status(payload, controller=controller)
 
     async def create_or_update_products(
         self, payload: CreateProductRequest
@@ -128,10 +138,14 @@ class ProductService:
         """Update active flags/status for one or more products in OTTO."""
         return await self.client.update_status(payload, controller=controller)
 
-    async def get_categories(self, payload: dict):
+    async def get_categories(
+        self,
+        payload: dict,
+        controller: Controller = Controller.JV,
+    ):
         """Fetch category information from OTTO, normalized by the client."""
 
-        return await self.client.get_categories(payload)
+        return await self.client.get_categories(payload, controller=controller)
 
     async def update_quantity(
         self, payload: Optional[dict | list], controller: Controller = Controller.JV
@@ -329,153 +343,254 @@ class ProductService:
             product_operation=product_operation, quantity_operation=quantity_operation
         )
 
-    async def fetch_all_categories_to_db(self, session: AsyncSession):
-        """Фетчит все категории из ОТТО и сохраняет в БД"""
+    async def fetch_all_categories_to_db(
+        self,
+        session: AsyncSession,
+        controller: Controller = Controller.JV,
+    ) -> dict[str, int]:
+        """Atomically replace the local category cache with the current OTTO data."""
 
         self.logger.info("Синхронизация категорий OTTO запущена")
-
-        MAX_FETCH_SIZE = 10
+        page_size = 100
         page = 0
+        fetched_groups: list[CategoryGroupSchema] = []
 
-        existing_groups: dict[str, CategoryGroup] = {
-            group.name: group
-            for group in (await session.scalars(select(CategoryGroup))).all()
-        }
-
-        self.logger.info(
-            "Загружены существующие группы категорий: count=%s", len(existing_groups)
-        )
+        # Fetch everything before deleting the current cache. A transient OTTO
+        # failure must never leave the application with a half-filled taxonomy.
         while True:
-            try:
-                self.logger.info("Загрузка страницы категорий OTTO: page=%s", page)
-
-                otto_response = await self.client.get_categories(
-                    {"page": page, "limit": MAX_FETCH_SIZE}
-                )
-
-                if not otto_response.categoryGroups:
-                    self.logger.info(
-                        "Новых групп категорий OTTO не найдено: page=%s", page
-                    )
-                    break
-
-                for group_item in otto_response.categoryGroups:
-                    # Создает родительскую категорию
-                    category_group = existing_groups.get(group_item.categoryGroup)
-
-                    if not category_group:
-                        category_group = CategoryGroup(name=group_item.categoryGroup)
-                        session.add(category_group)
-                        self.logger.info(
-                            "Создана группа категорий: name=%s", category_group.name
-                        )
-
-                    else:
-                        self.logger.debug(
-                            "Группа категорий уже существует, пропускаем: name=%s",
-                            category_group.name,
-                        )
-                        continue
-
-                    # =====================
-                    # Categories
-                    # =====================
-                    self.logger.info(
-                        "Сохранение категорий группы: group=%s count=%s",
-                        category_group.name,
-                        len(group_item.categories),
-                    )
-                    for category_name in group_item.categories:
-                        category = Category(group=category_group, name=category_name)
-                        session.add(category)
-                        self.logger.debug(
-                            "Категория добавлена в сессию: group=%s category=%s",
-                            category_group.name,
-                            category.name,
-                        )
-
-                    # =====================
-                    # Attributes
-                    # =====================
-                    self.logger.info(
-                        "Сохранение атрибутов группы: group=%s count=%s",
-                        category_group.name,
-                        len(group_item.attributes),
-                    )
-                    for attr_item in group_item.attributes:
-                        attribute = Attribute(
-                            group=category_group,
-                            name=attr_item.name,
-                            type=attr_item.type,
-                            description=attr_item.description,
-                            relevance=attr_item.relevance.value
-                            if attr_item.relevance
-                            else None,
-                            multi_value=attr_item.multiValue,
-                            unit=attr_item.unit,
-                        )
-                        session.add(attribute)
-                        self.logger.debug(
-                            "Атрибут добавлен в сессию: group=%s attribute=%s",
-                            category_group.name,
-                            attribute.name,
-                        )
-
-                        # =====================
-                        # Allowed values
-                        # =====================
-                        self.logger.info(
-                            "Сохранение допустимых значений атрибута: group=%s attribute=%s count=%s",
-                            category_group.name,
-                            attribute.name,
-                            len(attr_item.allowedValues),
-                        )
-                        for item_allowed_value in attr_item.allowedValues:
-                            allowed_val = AttributeAllowedValue(
-                                attribute=attribute, value=item_allowed_value
-                            )
-                            session.add(allowed_val)
-                            self.logger.debug(
-                                "Допустимое значение добавлено в сессию: group=%s attribute=%s value=%s",
-                                category_group.name,
-                                attribute.name,
-                                allowed_val.value,
-                            )
-
-                        # =====================
-                        # Variation Themes
-                        # =====================
-                        self.logger.info(
-                            "Проверка variation themes: group=%s attribute=%s themes_count=%s",
-                            category_group.name,
-                            attr_item.name,
-                            len(group_item.variationThemes),
-                        )
-                        if attr_item.name in group_item.variationThemes:
-                            variation_theme = VariationTheme(
-                                group=category_group, attribute=attribute
-                            )
-                            session.add(variation_theme)
-                            self.logger.debug(
-                                "Variation theme добавлена в сессию: group=%s attribute=%s",
-                                category_group.name,
-                                attr_item.name,
-                            )
-
-                    existing_groups[category_group.name] = category_group
-                await session.commit()
-                self.logger.info("Страница категорий сохранена: page=%s", page)
-
-            except Exception:
-                self.logger.exception(
-                    "Ошибка синхронизации категорий OTTO, выполняется rollback: page=%s",
-                    page,
-                )
-                await session.rollback()
-
+            self.logger.info("Загрузка страницы категорий OTTO: page=%s", page)
+            response = await self.client.get_categories(
+                {"page": page, "limit": page_size},
+                controller=controller,
+            )
+            groups = response.categoryGroups
+            if not groups:
+                break
+            fetched_groups.extend(groups)
+            if len(groups) < page_size:
+                break
             page += 1
 
-        self.logger.info("Синхронизация категорий OTTO завершена")
+        if not fetched_groups:
+            raise RuntimeError("OTTO returned an empty category catalog")
+
+        group_translations = dict(
+            (
+                await session.execute(
+                    select(CategoryGroup.name, CategoryGroup.name_ru).where(
+                        CategoryGroup.name_ru.is_not(None)
+                    )
+                )
+            ).all()
+        )
+        category_translations = dict(
+            (
+                await session.execute(
+                    select(Category.name, Category.name_ru).where(
+                        Category.name_ru.is_not(None)
+                    )
+                )
+            ).all()
+        )
+        attribute_translations = {
+            (group_name, name): (name_ru, description_ru)
+            for group_name, name, name_ru, description_ru in (
+                await session.execute(
+                    select(
+                        CategoryGroup.name,
+                        Attribute.name,
+                        Attribute.name_ru,
+                        Attribute.description_ru,
+                    )
+                    .join(Attribute, Attribute.group_id == CategoryGroup.id)
+                    .where(
+                        (Attribute.name_ru.is_not(None))
+                        | (Attribute.description_ru.is_not(None))
+                    )
+                )
+            ).all()
+        }
+        value_translations = {
+            (group_name, attribute_name, value): value_ru
+            for group_name, attribute_name, value, value_ru in (
+                await session.execute(
+                    select(
+                        CategoryGroup.name,
+                        Attribute.name,
+                        AttributeAllowedValue.value,
+                        AttributeAllowedValue.value_ru,
+                    )
+                    .join(Attribute, Attribute.group_id == CategoryGroup.id)
+                    .join(
+                        AttributeAllowedValue,
+                        AttributeAllowedValue.attribute_id == Attribute.id,
+                    )
+                    .where(AttributeAllowedValue.value_ru.is_not(None))
+                )
+            ).all()
+        }
+
+        await session.execute(delete(CategoryGroup))
+        await session.flush()
+
+        category_count = 0
+        attribute_count = 0
+        allowed_value_count = 0
+        variation_theme_count = 0
+        seen_groups: set[str] = set()
+        seen_categories: set[str] = set()
+
+        for group_item in fetched_groups:
+            group_name = group_item.categoryGroup.strip()
+            if not group_name or group_name in seen_groups:
+                continue
+            seen_groups.add(group_name)
+            group = CategoryGroup(
+                name=group_name,
+                name_ru=group_translations.get(group_name),
+            )
+            session.add(group)
+
+            for raw_category_name in group_item.categories:
+                category_name = str(raw_category_name or "").strip()
+                if not category_name or category_name in seen_categories:
+                    continue
+                seen_categories.add(category_name)
+                group.categories.append(
+                    Category(
+                        name=category_name,
+                        name_ru=category_translations.get(category_name),
+                    )
+                )
+                category_count += 1
+
+            variation_names = set(group_item.variationThemes)
+            seen_attributes: set[str] = set()
+            for attr_item in group_item.attributes:
+                attribute_name = attr_item.name.strip()
+                if not attribute_name or attribute_name in seen_attributes:
+                    continue
+                seen_attributes.add(attribute_name)
+                name_ru, description_ru = attribute_translations.get(
+                    (group_name, attribute_name),
+                    (None, None),
+                )
+                attribute = Attribute(
+                    name=attribute_name,
+                    name_ru=name_ru,
+                    attribute_group=attr_item.attributeGroup,
+                    feature_relevance=list(attr_item.featureRelevance),
+                    type=attr_item.type,
+                    description=attr_item.description,
+                    description_ru=description_ru,
+                    relevance=attr_item.relevance.value if attr_item.relevance else None,
+                    multi_value=attr_item.multiValue,
+                    unit=attr_item.unit,
+                    unit_display_name=attr_item.unitDisplayName,
+                )
+                group.attributes.append(attribute)
+                attribute_count += 1
+
+                seen_values: set[str] = set()
+                for raw_value in attr_item.allowedValues:
+                    value = str(raw_value or "").strip()
+                    if not value or value in seen_values:
+                        continue
+                    seen_values.add(value)
+                    attribute.allowed_values.append(
+                        AttributeAllowedValue(
+                            value=value,
+                            value_ru=value_translations.get(
+                                (group_name, attribute_name, value)
+                            ),
+                        )
+                    )
+                    allowed_value_count += 1
+
+                if attribute_name in variation_names:
+                    session.add(VariationTheme(group=group, attribute=attribute))
+                    variation_theme_count += 1
+
+        await session.commit()
+        result = {
+            "groups": len(seen_groups),
+            "categories": category_count,
+            "attributes": attribute_count,
+            "allowedValues": allowed_value_count,
+            "variationThemes": variation_theme_count,
+        }
+        self.logger.info("Синхронизация категорий OTTO завершена: %s", result)
+        return result
+
+    async def ensure_category_translations(
+        self,
+        session: AsyncSession,
+        *,
+        groups: list[CategoryGroup] | None = None,
+    ) -> None:
+        """Fill missing Russian labels for OTTO category groups and categories."""
+
+        if not str(settings.deepl_api_key_test or "").strip():
+            self.logger.warning(
+                "DeepL API key is not configured; category translations were skipped."
+            )
+            return
+
+        if groups is None:
+            result = await session.execute(
+                select(CategoryGroup)
+                .options(selectinload(CategoryGroup.categories))
+                .order_by(CategoryGroup.name.asc())
+            )
+            groups = list(result.scalars().unique().all())
+
+        translator = TranslationService(session)
+        translated_groups = 0
+        translated_categories = 0
+
+        for group in groups:
+            group_name = str(group.name or "").strip()
+            if group_name and not str(group.name_ru or "").strip():
+                try:
+                    group.name_ru = await translator.translate(
+                        group_name,
+                        source_lang="DE",
+                        target_lang="RU",
+                        context="otto_category_group",
+                    )
+                    translated_groups += 1
+                except TranslationError:
+                    self.logger.exception(
+                        "Не удалось перевести группу категории: group=%s",
+                        group_name,
+                    )
+
+            for category in group.categories:
+                category_name = str(category.name or "").strip()
+                if not category_name or str(category.name_ru or "").strip():
+                    continue
+                try:
+                    category.name_ru = await translator.translate(
+                        category_name,
+                        source_lang="DE",
+                        target_lang="RU",
+                        context=f"otto_category:{group_name}",
+                    )
+                    translated_categories += 1
+                except TranslationError:
+                    self.logger.exception(
+                        "Не удалось перевести категорию: group=%s category=%s",
+                        group_name,
+                        category_name,
+                    )
+
+        if translated_groups or translated_categories:
+            await session.commit()
+            self.logger.info(
+                "Переводы категорий сохранены: groups=%s categories=%s",
+                translated_groups,
+                translated_categories,
+            )
 
 
 async def main(): ...

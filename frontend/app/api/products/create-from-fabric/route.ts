@@ -24,31 +24,31 @@ export async function POST(request: Request) {
     if (response.status === 504) {
       return NextResponse.json(
         {
-          success: true,
-          process_state: "IN_PROGRESS",
-          process_id: null,
+          success: false,
+          process_state: "FAILED",
           issues: [
-            "Запрос обрабатывается дольше обычного. Процесс запущен, проверьте статус чуть позже.",
+            "Backend не ответил вовремя. Процесс не подтвержден, попробуйте запустить подготовку еще раз.",
           ],
-          message: "Processing is still running",
+          message: "Backend request timed out",
         },
-        { status: 200 },
+        { status: 504 },
       );
     }
 
     return toClientResponse(response);
-  } catch {
+  } catch (error) {
     return NextResponse.json(
       {
-        success: true,
-        process_state: "IN_PROGRESS",
-        process_id: null,
+        success: false,
+        process_state: "FAILED",
         issues: [
-          "Сеть/шлюз не дождались ответа, но процесс мог продолжиться в фоне. Проверьте статус позже.",
+          error instanceof Error
+            ? `Backend недоступен: ${error.message}`
+            : "Backend недоступен. Запрос подготовки не был подтвержден.",
         ],
-        message: "Processing may still be running",
+        message: "Backend request failed",
       },
-      { status: 200 },
+      { status: 502 },
     );
   }
 }

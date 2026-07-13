@@ -70,9 +70,10 @@ class ProductMapper:
         controller: str,
         otto_client: OttoClient | None = None,
         category_group_contexts: dict[str, dict[str, Any]] | None = None,
+        gpt_api_key: str | None = None,
     ):
         self.products = products
-        self._gpt = GPTHelper(settings.gpt_key)
+        self._gpt = GPTHelper(gpt_api_key or settings.gpt_key)
         self.category_group_contexts = category_group_contexts or {}
 
         self.classifier: CategoryClassifier = CategoryClassifier(
@@ -222,6 +223,89 @@ class ProductMapper:
         return shaped
 
     @staticmethod
+    def _is_color_autofill_attribute(name: Any) -> bool:
+        token = str(name or "").strip().casefold()
+        return "farbe" in token and "lichtfarbe" not in token
+
+    @classmethod
+    def _autofill_color_attributes(
+        cls,
+        attributes: list[dict],
+        otto_attributes: list[dict],
+        source_color: Any = None,
+    ) -> list[dict]:
+        """Fill missing component color fields from the primary Farbe value."""
+
+        result = [dict(item) for item in attributes if isinstance(item, dict)]
+        by_name = {
+            str(item.get("name") or "").strip().casefold(): item
+            for item in result
+            if str(item.get("name") or "").strip()
+        }
+        primary = by_name.get("farbe")
+        raw_values = primary.get("values") if primary else source_color
+        if isinstance(raw_values, list):
+            color_values = [str(value).strip() for value in raw_values if str(value).strip()]
+        else:
+            color_text = str(raw_values or "").strip()
+            color_values = [color_text] if color_text else []
+        if not color_values:
+            return result
+
+        if primary is None:
+            primary = {
+                "name": "Farbe",
+                "values": color_values,
+                "additional": True,
+            }
+            result.append(primary)
+            by_name["farbe"] = primary
+
+        for option in otto_attributes:
+            if not isinstance(option, dict):
+                continue
+            name = str(option.get("name") or "").strip()
+            if not cls._is_color_autofill_attribute(name):
+                continue
+            key = name.casefold()
+            existing = by_name.get(key)
+            if existing is not None:
+                existing_values = existing.get("values")
+                if isinstance(existing_values, list) and any(
+                    str(value).strip() for value in existing_values
+                ):
+                    continue
+
+            allowed_values = [
+                str(value).strip()
+                for value in (option.get("allowedValues") or [])
+                if str(value).strip()
+            ]
+            canonical_by_value = {value.casefold(): value for value in allowed_values}
+            target_values: list[str] = []
+            for color in color_values:
+                if allowed_values:
+                    canonical = canonical_by_value.get(color.casefold())
+                    if canonical:
+                        target_values.append(canonical)
+                else:
+                    target_values.append(color)
+            if not target_values:
+                continue
+
+            if existing is not None:
+                existing["values"] = target_values
+            else:
+                added = {
+                    "name": name,
+                    "values": target_values,
+                    "additional": True,
+                }
+                result.append(added)
+                by_name[key] = added
+        return result
+
+    @staticmethod
     def _prepare_ai_source(
         source: dict,
         *,
@@ -277,6 +361,10 @@ class ProductMapper:
     @staticmethod
     def _source_with_product_edits(source: dict | None, product: dict) -> dict:
         merged: dict[str, Any] = dict(source or {})
+        media_assets = product.get("mediaAssets")
+        if isinstance(media_assets, list):
+            merged["mediaAssets"] = media_assets
+
         product_description = product.get("productDescription")
         description = (
             product_description if isinstance(product_description, dict) else {}
@@ -371,16 +459,27 @@ class ProductMapper:
             source.get("pictureurls"),
             source.get("Bild"),
             source.get("bild"),
+            source.get("imageUrls"),
+            source.get("mediaAssets"),
         ]
         urls: list[str] = []
         for raw_value in raw_values:
-            if not isinstance(raw_value, str):
-                continue
-            for part in raw_value.replace("\n", ",").replace(";", ",").split(","):
-                url = part.strip()
-                if url.startswith(("http://", "https://")) and url not in urls:
-                    urls.append(url)
-        return urls[:5]
+            candidates = raw_value if isinstance(raw_value, list) else [raw_value]
+            for candidate in candidates:
+                if isinstance(candidate, dict):
+                    candidate = (
+                        candidate.get("location")
+                        or candidate.get("url")
+                        or candidate.get("filename")
+                    )
+                if not isinstance(candidate, str):
+                    continue
+                parts = candidate.replace("\n", ",").replace(";", ",").split(",")
+                for part in parts:
+                    url = part.strip()
+                    if url.startswith(("http://", "https://")) and url not in urls:
+                        urls.append(url)
+        return urls[:3]
 
     async def enrich_after_category_approval(
         self,
@@ -398,6 +497,7 @@ class ProductMapper:
         compact_source = self._prepare_ai_source(
             ai_source,
             include_descriptions=False,
+            include_images=True,
         )
         category = str(product_description.get("category") or "").strip()
         category_group = str(result.get("aiCategoryGroup") or "").strip()
@@ -455,6 +555,7 @@ class ProductMapper:
             )
 
             generated_attrs: list[dict] = []
+            cleaned_otto_attrs: list[dict] = []
             if category_attrs_task:
                 try:
                     self.logger.info(
@@ -486,11 +587,12 @@ class ProductMapper:
                         )
                     else:
                         generated = await self.attribute_generator.generate(
-                            category=category_group,
+                            category=category,
                             source_attributes=compact_source,
                             bullet_points=bullet_points,
                             otto_attributes=cleaned_otto_attrs,
                             exclude_attributes=direct_map,
+                            image_urls=self._extract_image_urls(compact_source),
                         )
                         generated_attrs = self._shape_generated_attributes(
                             generated.get("attributes", []) or []
@@ -524,7 +626,11 @@ class ProductMapper:
             product_description["category"] = category
             product_description["bulletPoints"] = bullet_points
             product_description["description"] = description
-            product_description["attributes"] = [*direct_map, *generated_attrs]
+            product_description["attributes"] = self._autofill_color_attributes(
+                [*direct_map, *generated_attrs],
+                cleaned_otto_attrs,
+                compact_source.get("Farbe"),
+            )
             result["productDescription"] = product_description
 
             self.logger.info("Полгостью успешно сработал маппер для ean=%s", ean)
@@ -660,19 +766,20 @@ class ProductMapper:
 
             if "name" not in item or "type" not in item:
                 continue
-            if item.get("relevance") == "HIGH":
-                result.append(
-                    {
-                        "name": item["name"],
-                        "description": item.get("description"),
-                        "type": item["type"],
-                        "multiValue": item.get("multiValue", False),
-                        "relevance": item.get("relevance"),
-                        "allowedValues": item.get("allowedValues"),
-                        "recommendedValues": item.get("recommendedValues"),
-                        "exampleValues": item.get("exampleValues", []),
-                    }
-                )
+            result.append(
+                {
+                    "name": item["name"],
+                    "description": item.get("description"),
+                    "type": item["type"],
+                    "multiValue": item.get("multiValue", False),
+                    "relevance": item.get("relevance"),
+                    "featureRelevance": item.get("featureRelevance", []),
+                    "isVariationTheme": item.get("isVariationTheme", False),
+                    "allowedValues": item.get("allowedValues"),
+                    "recommendedValues": item.get("recommendedValues"),
+                    "exampleValues": item.get("exampleValues", []),
+                }
+            )
 
         return result
 

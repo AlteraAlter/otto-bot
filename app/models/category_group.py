@@ -13,6 +13,14 @@ class CategoryGroup(Base):
 
     name_ru: Mapped[str | None] = mapped_column(String, nullable=True)
 
-    categories: Mapped[list["Category"]] = relationship(back_populates="group")
+    categories: Mapped[list["Category"]] = relationship(
+        back_populates="group",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
-    attributes: Mapped[list["Attribute"]] = relationship(back_populates="group")
+    attributes: Mapped[list["Attribute"]] = relationship(
+        back_populates="group",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )

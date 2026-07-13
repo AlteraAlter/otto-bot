@@ -5,12 +5,21 @@ from app.services.product_variation_logic import (
     build_combination_key,
     build_variant_combinations,
     expand_product_variants_for_otto,
+    is_supported_variation_attribute,
     preview_variant_generation,
     validate_variant_export_identifiers,
 )
 
 
 class ProductVariationLogicTests(unittest.TestCase):
+    def test_only_primary_color_and_material_are_variant_dimensions(self):
+        self.assertTrue(is_supported_variation_attribute("Farbe"))
+        self.assertTrue(is_supported_variation_attribute("Material"))
+        self.assertFalse(is_supported_variation_attribute("Farbe Sitzfläche"))
+        self.assertFalse(is_supported_variation_attribute("Farbe Gestell"))
+        self.assertFalse(is_supported_variation_attribute("Farbe Korpus"))
+        self.assertFalse(is_supported_variation_attribute("Gestellmaterial"))
+
     def test_combination_key_is_order_independent_and_normalized(self):
         left = build_combination_key({"material": " Leather ", "color": "RED"})
         right = build_combination_key({"color": " red ", "material": "leather"})
