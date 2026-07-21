@@ -1469,6 +1469,7 @@ async def run_attribute_fill_chunk_task(
                     AttributeFillItem.process_id == process_id,
                     AttributeFillItem.chunk_id == chunk_id,
                     AttributeFillItem.is_active.is_(True),
+                    AttributeFillItem.status.in_(("queued", "running")),
                 )
                 .order_by(AttributeFillItem.id.asc())
             )

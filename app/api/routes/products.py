@@ -33,7 +33,7 @@ from sqlalchemy import asc, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.arq_app import enqueue_job
+from app.arq_app import enqueue_job, enqueue_jobs
 from app.core.configs import settings
 from app.core.user_auth import UserAuth
 from app.database import SessionLocal, get_db
@@ -201,6 +201,7 @@ FACTORY_MAP_TIMEOUT_SEC = 1800
 FACTORY_NORMALIZE_TIMEOUT_SEC = 20
 FACTORY_PRODUCT_CONCURRENCY = settings.factory_product_concurrency
 FACTORY_AI_ENRICH_ITEM_TIMEOUT_SEC = settings.factory_ai_enrich_item_timeout_seconds
+FACTORY_AI_ENRICH_CHUNK_SIZE = settings.factory_ai_enrich_chunk_size
 MAX_OTTO_MEDIA_ASSETS = 19
 MEDIA_URL_RE = re.compile(r"https?://[^\s,;|\"'<>]+")
 FACTORY_OTTO_CREATE_BATCH_SIZE = 100
@@ -209,6 +210,7 @@ FACTORY_OTTO_UPDATE_TASK_FALLBACK_SLEEP_SEC = 5
 FACTORY_AVAILABILITY_AFTER_CREATE_DELAY_SEC = 8
 FACTORY_TASK_STATE_SERVICE = FactoryTaskStateService()
 PRODUCT_DEACTIVATE_CONCURRENCY = 10
+FACTORY_AI_ENRICHMENT_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 def _reset_log_file(path: Path) -> None:
@@ -3512,14 +3514,291 @@ def _build_aftercool_comparison(
     }
 
 
+def _factory_ai_api_keys() -> list[str]:
+    raw_keys = settings.openai_attribute_fill_api_keys or ""
+    normalized = raw_keys.replace("\n", ",").replace(";", ",")
+    keys = [item.strip() for item in normalized.split(",") if item.strip()]
+    return keys or [settings.gpt_key]
+
+
+def _factory_ai_key_for_slot(slot: int | None) -> str:
+    keys = _factory_ai_api_keys()
+    if not keys:
+        return settings.gpt_key
+    index = int(slot or 0) % len(keys)
+    return keys[index]
+
+
+def _factory_ai_key_label(slot: int | None) -> str:
+    keys = _factory_ai_api_keys()
+    if not keys:
+        return "default"
+    index = int(slot or 0) % len(keys)
+    return f"key-{index + 1}/{len(keys)}"
+
+
+def _factory_enrichment_lock(process_id: str) -> asyncio.Lock:
+    lock = FACTORY_AI_ENRICHMENT_LOCKS.get(process_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        FACTORY_AI_ENRICHMENT_LOCKS[process_id] = lock
+    return lock
+
+
+def _factory_ai_enrichment_chunks(total: int, key_count: int) -> list[dict[str, Any]]:
+    chunk_size = max(1, int(FACTORY_AI_ENRICH_CHUNK_SIZE or 50))
+    if total <= 0:
+        return []
+    base_chunk_count = max(1, (total + chunk_size - 1) // chunk_size)
+    chunk_count = max(base_chunk_count, min(total, max(1, key_count)))
+    chunks: list[dict[str, Any]] = []
+    for chunk_id in range(chunk_count):
+        start = (chunk_id * total) // chunk_count
+        end = ((chunk_id + 1) * total) // chunk_count
+        if end <= start:
+            continue
+        ai_key_slot = chunk_id % max(1, key_count)
+        chunks.append(
+            {
+                "chunkId": chunk_id,
+                "startIndex": start,
+                "endIndex": end,
+                "productCount": end - start,
+                "status": "queued",
+                "aiKeySlot": ai_key_slot,
+                "keyLabel": _factory_ai_key_label(ai_key_slot),
+                "completed": 0,
+                "failed": 0,
+            }
+        )
+    return chunks
+
+
+async def _run_factory_enrichment_one(
+    *,
+    process_id: str,
+    index: int,
+    item: dict[str, Any],
+    ai_mapper,
+    source_items: list[Any],
+    source_items_by_identity: dict[str, dict[str, Any]],
+    chunk_id: int,
+) -> tuple[dict[str, Any], str | None]:
+    model = ProductPayload.model_validate(item)
+    model_dump = model.model_dump(mode="json", exclude_none=True)
+    source_item = _find_source_item_for_product(
+        product=model_dump,
+        index=index,
+        source_items=source_items,
+        source_items_by_identity=source_items_by_identity,
+    )
+    MAPPER_LOGGER.info(
+        "step=category_approval_enrichment_item_start process_id=%s chunk_id=%s index=%s sku=%s category=%s source_available=%s",
+        process_id,
+        chunk_id,
+        index,
+        model.sku,
+        model.productDescription.category,
+        source_item is not None,
+    )
+    try:
+        enriched_payload = await asyncio.wait_for(
+            ai_mapper.enrich_after_category_approval(
+                model_dump,
+                source_item=source_item,
+            ),
+            timeout=FACTORY_AI_ENRICH_ITEM_TIMEOUT_SEC,
+        )
+        enriched_model = ProductPayload.model_validate(enriched_payload)
+        enriched_dump = enriched_model.model_dump(mode="json", exclude_none=True)
+        for key, value in item.items():
+            if key not in enriched_dump:
+                enriched_dump[key] = value
+        enriched_dump["aftercoolComparison"] = _build_aftercool_comparison(
+            source_item=source_item,
+            generated_product=enriched_dump,
+        )
+        MAPPER_LOGGER.info(
+            "step=category_approval_enrichment_item_done process_id=%s chunk_id=%s index=%s sku=%s bullet_points=%s attributes=%s",
+            process_id,
+            chunk_id,
+            index,
+            enriched_model.sku,
+            len(enriched_model.productDescription.bulletPoints),
+            len(enriched_model.productDescription.attributes),
+        )
+        return enriched_dump, None
+    except Exception as exc:
+        fallback_model = ProductPayload.model_validate(item)
+        fallback_dump = fallback_model.model_dump(mode="json", exclude_none=True)
+        for key, value in item.items():
+            if key not in fallback_dump:
+                fallback_dump[key] = value
+        fallback_dump["aftercoolComparison"] = _build_aftercool_comparison(
+            source_item=source_item,
+            generated_product=fallback_dump,
+        )
+        message = f"AI enrichment failed at index={index} sku={fallback_model.sku}: {exc}"
+        MAPPER_LOGGER.exception(
+            "step=category_approval_enrichment_item_failed process_id=%s chunk_id=%s index=%s sku=%s error=%s",
+            process_id,
+            chunk_id,
+            index,
+            fallback_model.sku,
+            exc,
+        )
+        return fallback_dump, message
+
+
+async def _save_factory_enrichment_item_progress(
+    *,
+    process_id: str,
+    index: int,
+    enriched_dump: dict[str, Any],
+    chunk_id: int,
+    failure_message: str | None,
+) -> None:
+    lock = _factory_enrichment_lock(process_id)
+    async with lock:
+        task = await _get_factory_task_state(process_id)
+        if task is None:
+            return
+        products = task.get("products")
+        next_products = list(products) if isinstance(products, list) else []
+        if index < len(next_products):
+            next_products[index] = enriched_dump
+        task["products"] = next_products
+
+        by_index_raw = task.get("partial_products_by_index")
+        by_index = dict(by_index_raw) if isinstance(by_index_raw, dict) else {}
+        by_index[str(index)] = enriched_dump
+        task["partial_products_by_index"] = by_index
+        task["progress_total"] = max(int(task.get("progress_total") or 0), len(next_products))
+        task["progress_completed"] = min(
+            int(task.get("progress_total") or len(next_products) or 0),
+            len(by_index),
+        )
+        task["progress_percent"] = int(
+            round(
+                (
+                    int(task.get("progress_completed") or 0)
+                    / max(1, int(task.get("progress_total") or len(next_products) or 1))
+                )
+                * 100
+            )
+        )
+
+        chunks = task.get("ai_enrichment_chunks")
+        if isinstance(chunks, list):
+            for chunk in chunks:
+                if isinstance(chunk, dict) and int(chunk.get("chunkId") or -1) == chunk_id:
+                    chunk["status"] = "running"
+                    chunk["completed"] = int(chunk.get("completed") or 0) + 1
+                    if failure_message:
+                        chunk["failed"] = int(chunk.get("failed") or 0) + 1
+                    break
+
+        if failure_message:
+            failures = task.get("ai_enrichment_item_failures")
+            failure_list = list(failures) if isinstance(failures, list) else []
+            failure_list.append(failure_message)
+            task["ai_enrichment_item_failures"] = failure_list[-500:]
+
+        progress_at = datetime.now(UTC).isoformat()
+        task["status"] = "IN_PROGRESS"
+        task["current_step"] = "ai_enrichment_in_progress"
+        task["updated_at"] = progress_at
+        task["heartbeat_at"] = progress_at
+        await _save_factory_task_state(process_id, task)
+
+
+async def _mark_factory_enrichment_chunk_terminal(
+    *,
+    process_id: str,
+    chunk_id: int,
+    status_value: str,
+    error: str | None = None,
+) -> None:
+    lock = _factory_enrichment_lock(process_id)
+    async with lock:
+        task = await _get_factory_task_state(process_id)
+        if task is None:
+            return
+        now = datetime.now(UTC).isoformat()
+        chunks = task.get("ai_enrichment_chunks")
+        if isinstance(chunks, list):
+            for chunk in chunks:
+                if isinstance(chunk, dict) and int(chunk.get("chunkId") or -1) == chunk_id:
+                    chunk["status"] = status_value
+                    chunk["finishedAt"] = now
+                    if error:
+                        chunk["error"] = error
+                    break
+
+            terminal_statuses = {"done", "done_with_errors", "failed"}
+            all_terminal = all(
+                isinstance(chunk, dict)
+                and str(chunk.get("status") or "") in terminal_statuses
+                for chunk in chunks
+            )
+        else:
+            all_terminal = False
+
+        task["updated_at"] = now
+        task["heartbeat_at"] = now
+
+        if all_terminal:
+            total = int(task.get("progress_total") or 0)
+            completed = int(task.get("progress_completed") or 0)
+            failures = task.get("ai_enrichment_item_failures")
+            failure_list = list(failures) if isinstance(failures, list) else []
+            failed_chunks = [
+                chunk
+                for chunk in chunks
+                if isinstance(chunk, dict) and str(chunk.get("status") or "") == "failed"
+            ]
+            if failed_chunks or completed < total:
+                task["status"] = "FAILED"
+                task["current_step"] = "ai_enrichment_failed"
+                task["issues"] = [
+                    *[str(item) for item in failure_list[:100]],
+                    *[
+                        f"AI enrichment chunk {chunk.get('chunkId')} failed: {chunk.get('error')}"
+                        for chunk in failed_chunks[:20]
+                    ],
+                ] or ["AI enrichment did not complete all chunks"]
+            else:
+                products = task.get("products")
+                task["status"] = "DONE"
+                task["products"] = list(products) if isinstance(products, list) else []
+                task["partial_products_by_index"] = {}
+                task["current_step"] = "ai_enrichment_done"
+                task["enriched_at"] = now
+                task["finished_at"] = now
+                task["progress_completed"] = total
+                task["progress_percent"] = 100
+                if failure_list:
+                    task["issues"] = [
+                        *[str(item) for item in failure_list[:100]],
+                        *(
+                            [f"{len(failure_list) - 100} more AI enrichment item failures"]
+                            if len(failure_list) > 100
+                            else []
+                        ),
+                    ]
+            task["current_step_started_at"] = now
+            FACTORY_AI_ENRICHMENT_LOCKS.pop(process_id, None)
+
+        await _save_factory_task_state(process_id, task)
+
+
 async def _run_factory_enrichment_task(
     *,
     process_id: str,
     payload: dict[str, Any],
     product_service: ProductService,
 ) -> None:
-    from app.mapper.product_mapper import ProductMapper
-
+    del product_service
     task = await _get_factory_task_state(process_id)
     products = payload.get("products")
     if task is None or not isinstance(products, list) or not products:
@@ -3531,24 +3810,16 @@ async def _run_factory_enrichment_task(
         )
         return
 
-    source_items_raw = task.get("source_items_raw")
-    source_items = source_items_raw if isinstance(source_items_raw, list) else []
-    source_items_by_identity = _build_source_item_lookup(source_items)
     controller_value = str(
         task.get("controller") or payload.get("controller") or "jv"
     ).lower()
-    controller = Controller(controller_value)
-    category_group_contexts = await _load_category_group_contexts()
-    ai_mapper = ProductMapper(
-        products=[],
-        controller=controller.value,
-        otto_client=product_service.client,
-        category_group_contexts=category_group_contexts,
-    )
+    Controller(controller_value)
+    keys = _factory_ai_api_keys()
+    chunks = _factory_ai_enrichment_chunks(len(products), len(keys))
 
     now = datetime.now(UTC).isoformat()
     task["status"] = "IN_PROGRESS"
-    task["current_step"] = "ai_enrichment_in_progress"
+    task["current_step"] = "ai_enrichment_chunks_queued"
     task["current_step_started_at"] = now
     task["updated_at"] = now
     task["heartbeat_at"] = now
@@ -3559,226 +3830,162 @@ async def _run_factory_enrichment_task(
     task["progress_percent"] = 0
     task["products"] = products
     task["partial_products_by_index"] = {}
+    task["ai_enrichment_chunks"] = chunks
+    task["ai_enrichment_chunk_size"] = max(1, int(FACTORY_AI_ENRICH_CHUNK_SIZE or 50))
+    task["ai_enrichment_key_count"] = len(keys)
+    task["ai_enrichment_item_failures"] = []
     await _save_factory_task_state(process_id, task)
 
+    await enqueue_jobs(
+        [
+            (
+                "enrich_factory_products_chunk_task",
+                {
+                    "process_id": process_id,
+                    "chunk_id": int(chunk["chunkId"]),
+                    "start_index": int(chunk["startIndex"]),
+                    "end_index": int(chunk["endIndex"]),
+                    "ai_key_slot": int(chunk["aiKeySlot"]),
+                    "controller": controller_value,
+                },
+            )
+            for chunk in chunks
+        ]
+    )
     MAPPER_LOGGER.info(
-        "MAPPER начался успешно: process_id=%s products=%s",
+        "MAPPER chunks queued: process_id=%s products=%s chunks=%s ai_keys=%s chunk_size=%s",
         process_id,
         len(products),
+        len(chunks),
+        len(keys),
+        task["ai_enrichment_chunk_size"],
     )
 
-    heartbeat_stop = asyncio.Event()
-    progress_lock = asyncio.Lock()
 
-    async def _heartbeat_loop() -> None:
-        while not heartbeat_stop.is_set():
-            now_heartbeat = datetime.now(UTC).isoformat()
-            async with progress_lock:
-                if task.get("status") != "IN_PROGRESS":
-                    return
-                task["heartbeat_at"] = now_heartbeat
-                task["updated_at"] = now_heartbeat
-                task["heartbeat_count"] = int(task.get("heartbeat_count", 0)) + 1
-                await _save_factory_task_state(process_id, task)
-            await asyncio.sleep(FACTORY_HEARTBEAT_INTERVAL_SEC)
 
-    heartbeat_task = asyncio.create_task(_heartbeat_loop())
+async def _run_factory_enrichment_chunk_task(
+    *,
+    process_id: str,
+    chunk_id: int,
+    start_index: int,
+    end_index: int,
+    ai_key_slot: int | None,
+    controller: str,
+    product_service: ProductService,
+) -> None:
+    from app.mapper.product_mapper import ProductMapper
 
-    enriched_products: list[dict[str, Any] | None] = [None] * len(products)
-    item_failures: list[str] = []
-    work_queue: asyncio.Queue[tuple[int, dict[str, Any]] | None] = asyncio.Queue()
+    lock = _factory_enrichment_lock(process_id)
+    async with lock:
+        task = await _get_factory_task_state(process_id)
+        if task is None:
+            MAPPER_LOGGER.error(
+                "step=factory_ai_enrichment_chunk_missing_task process_id=%s chunk_id=%s",
+                process_id,
+                chunk_id,
+            )
+            return
+        now = datetime.now(UTC).isoformat()
+        chunks = task.get("ai_enrichment_chunks")
+        if isinstance(chunks, list):
+            for chunk in chunks:
+                if isinstance(chunk, dict) and int(chunk.get("chunkId") or -1) == chunk_id:
+                    chunk["status"] = "running"
+                    chunk["startedAt"] = now
+                    chunk["aiKeySlot"] = ai_key_slot
+                    chunk["keyLabel"] = _factory_ai_key_label(ai_key_slot)
+                    break
+        task["status"] = "IN_PROGRESS"
+        task["current_step"] = "ai_enrichment_in_progress"
+        task["updated_at"] = now
+        task["heartbeat_at"] = now
+        await _save_factory_task_state(process_id, task)
 
+    products_raw = task.get("products")
+    products = products_raw if isinstance(products_raw, list) else []
+    if not products:
+        await _mark_factory_enrichment_chunk_terminal(
+            process_id=process_id,
+            chunk_id=chunk_id,
+            status_value="failed",
+            error="No products in factory task state",
+        )
+        return
+
+    source_items_raw = task.get("source_items_raw")
+    source_items = source_items_raw if isinstance(source_items_raw, list) else []
+    source_items_by_identity = _build_source_item_lookup(source_items)
+    category_group_contexts = await _load_category_group_contexts()
+    ai_mapper = ProductMapper(
+        products=[],
+        controller=controller,
+        otto_client=product_service.client,
+        category_group_contexts=category_group_contexts,
+        gpt_api_key=_factory_ai_key_for_slot(ai_key_slot),
+    )
+
+    chunk_failures = 0
+    MAPPER_LOGGER.info(
+        "step=factory_ai_enrichment_chunk_start process_id=%s chunk_id=%s start=%s end=%s ai_key_slot=%s key_label=%s",
+        process_id,
+        chunk_id,
+        start_index,
+        end_index,
+        ai_key_slot,
+        _factory_ai_key_label(ai_key_slot),
+    )
     try:
-
-        async def _enrich_one(index: int, item: dict[str, Any]) -> None:
-            model = ProductPayload.model_validate(item)
-            model_dump = model.model_dump(mode="json", exclude_none=True)
-            source_item = _find_source_item_for_product(
-                product=model_dump,
+        for index in range(max(0, start_index), min(len(products), end_index)):
+            item = products[index]
+            if not isinstance(item, dict):
+                continue
+            latest = await _get_factory_task_state(process_id)
+            partial = latest.get("partial_products_by_index") if latest else None
+            if isinstance(partial, dict) and str(index) in partial:
+                continue
+            enriched_dump, failure_message = await _run_factory_enrichment_one(
+                process_id=process_id,
                 index=index,
+                item=item,
+                ai_mapper=ai_mapper,
                 source_items=source_items,
                 source_items_by_identity=source_items_by_identity,
+                chunk_id=chunk_id,
             )
-            MAPPER_LOGGER.info(
-                "step=category_approval_enrichment_item_start process_id=%s index=%s sku=%s category=%s source_available=%s",
-                process_id,
-                index,
-                model.sku,
-                model.productDescription.category,
-                source_item is not None,
-            )
-            enriched_payload = await asyncio.wait_for(
-                ai_mapper.enrich_after_category_approval(
-                    model_dump,
-                    source_item=source_item,
-                ),
-                timeout=FACTORY_AI_ENRICH_ITEM_TIMEOUT_SEC,
-            )
-            enriched_model = ProductPayload.model_validate(enriched_payload)
-            enriched_dump = enriched_model.model_dump(
-                mode="json", exclude_none=True
-            )
-            for key, value in item.items():
-                if key not in enriched_dump:
-                    enriched_dump[key] = value
-            enriched_dump["aftercoolComparison"] = _build_aftercool_comparison(
-                source_item=source_item,
-                generated_product=enriched_dump,
-            )
-            enriched_products[index] = enriched_dump
-            async with progress_lock:
-                by_index_raw = task.get("partial_products_by_index")
-                by_index = by_index_raw if isinstance(by_index_raw, dict) else {}
-                by_index[str(index)] = enriched_dump
-                task["partial_products_by_index"] = by_index
-                current_products = task.get("products")
-                next_products = list(current_products) if isinstance(current_products, list) else list(products)
-                if index < len(next_products):
-                    next_products[index] = enriched_dump
-                task["products"] = next_products
-                task["progress_completed"] = int(task.get("progress_completed", 0)) + 1
-                task["progress_percent"] = int(
-                    round((task["progress_completed"] / max(1, len(products))) * 100)
-                )
-                progress_at = datetime.now(UTC).isoformat()
-                task["updated_at"] = progress_at
-                task["heartbeat_at"] = progress_at
-                await _save_factory_task_state(process_id, task)
-            MAPPER_LOGGER.info(
-                "step=category_approval_enrichment_item_done process_id=%s index=%s sku=%s bullet_points=%s attributes=%s",
-                process_id,
-                index,
-                enriched_model.sku,
-                len(enriched_model.productDescription.bulletPoints),
-                len(enriched_model.productDescription.attributes),
+            if failure_message:
+                chunk_failures += 1
+            await _save_factory_enrichment_item_progress(
+                process_id=process_id,
+                index=index,
+                enriched_dump=enriched_dump,
+                chunk_id=chunk_id,
+                failure_message=failure_message,
             )
 
-        async def _worker(worker_id: int) -> None:
-            while True:
-                queued = await work_queue.get()
-                try:
-                    if queued is None:
-                        return
-                    index, item = queued
-                    try:
-                        await _enrich_one(index, item)
-                    except Exception as exc:
-                        fallback_model = ProductPayload.model_validate(item)
-                        fallback_dump = fallback_model.model_dump(
-                            mode="json",
-                            exclude_none=True,
-                        )
-                        for key, value in item.items():
-                            if key not in fallback_dump:
-                                fallback_dump[key] = value
-                        fallback_source_item = _find_source_item_for_product(
-                            product=fallback_dump,
-                            index=index,
-                            source_items=source_items,
-                            source_items_by_identity=source_items_by_identity,
-                        )
-                        fallback_dump["aftercoolComparison"] = _build_aftercool_comparison(
-                            source_item=fallback_source_item,
-                            generated_product=fallback_dump,
-                        )
-                        enriched_products[index] = fallback_dump
-                        message = f"AI enrichment failed at index={index} sku={fallback_model.sku}: {exc}"
-                        item_failures.append(message)
-                        MAPPER_LOGGER.exception(
-                            "step=category_approval_enrichment_item_failed process_id=%s worker=%s index=%s sku=%s error=%s",
-                            process_id,
-                            worker_id,
-                            index,
-                            fallback_model.sku,
-                            exc,
-                        )
-                        async with progress_lock:
-                            by_index_raw = task.get("partial_products_by_index")
-                            by_index = by_index_raw if isinstance(by_index_raw, dict) else {}
-                            by_index[str(index)] = fallback_dump
-                            task["partial_products_by_index"] = by_index
-                            current_products = task.get("products")
-                            next_products = list(current_products) if isinstance(current_products, list) else list(products)
-                            if index < len(next_products):
-                                next_products[index] = fallback_dump
-                            task["products"] = next_products
-                            task["progress_completed"] = (
-                                int(task.get("progress_completed", 0)) + 1
-                            )
-                            task["progress_percent"] = int(
-                                round(
-                                    (task["progress_completed"] / max(1, len(products)))
-                                    * 100
-                                )
-                            )
-                            progress_at = datetime.now(UTC).isoformat()
-                            task["updated_at"] = progress_at
-                            task["heartbeat_at"] = progress_at
-                            await _save_factory_task_state(process_id, task)
-                finally:
-                    work_queue.task_done()
-
-        for index, item in enumerate(products):
-            await work_queue.put((index, item))
-
-        worker_count = min(FACTORY_PRODUCT_CONCURRENCY, len(products))
-        workers = [
-            asyncio.create_task(_worker(worker_id)) for worker_id in range(worker_count)
-        ]
-        for _ in workers:
-            await work_queue.put(None)
-        await work_queue.join()
-        await asyncio.gather(*workers)
-
-        task["status"] = "DONE"
-        task["products"] = [
-            item for item in enriched_products if isinstance(item, dict)
-        ]
-        task["partial_products_by_index"] = {}
-        task["current_step"] = "ai_enrichment_done"
-        task["current_step_started_at"] = datetime.now(UTC).isoformat()
-        task["updated_at"] = task["current_step_started_at"]
-        task["heartbeat_at"] = task["current_step_started_at"]
-        task["enriched_at"] = task["current_step_started_at"]
-        task["finished_at"] = task["current_step_started_at"]
-        task["progress_completed"] = len(products)
-        task["progress_total"] = len(products)
-        task["progress_percent"] = 100
-        if item_failures:
-            task["issues"] = [
-                *item_failures[:100],
-                *(
-                    [f"{len(item_failures) - 100} more AI enrichment item failures"]
-                    if len(item_failures) > 100
-                    else []
-                ),
-            ]
-        await _save_factory_task_state(process_id, task)
+        await _mark_factory_enrichment_chunk_terminal(
+            process_id=process_id,
+            chunk_id=chunk_id,
+            status_value="done_with_errors" if chunk_failures else "done",
+        )
         MAPPER_LOGGER.info(
-            "Маппер полностью закончен process_id=%s products=%s item_failures=%s",
+            "step=factory_ai_enrichment_chunk_done process_id=%s chunk_id=%s failures=%s",
             process_id,
-            len(task["products"]),
-            len(item_failures),
+            chunk_id,
+            chunk_failures,
         )
     except Exception as exc:
-        task["status"] = "FAILED"
-        task["current_step"] = "ai_enrichment_failed"
-        task["current_step_started_at"] = datetime.now(UTC).isoformat()
-        task["updated_at"] = task["current_step_started_at"]
-        task["heartbeat_at"] = task["current_step_started_at"]
-        task["issues"] = [str(exc)]
-        await _save_factory_task_state(process_id, task)
+        await _mark_factory_enrichment_chunk_terminal(
+            process_id=process_id,
+            chunk_id=chunk_id,
+            status_value="failed",
+            error=str(exc),
+        )
         MAPPER_LOGGER.exception(
-            "Ошибка генерации process_id=%s error=%s",
+            "step=factory_ai_enrichment_chunk_failed process_id=%s chunk_id=%s error=%s",
             process_id,
+            chunk_id,
             exc,
         )
-    finally:
-        heartbeat_stop.set()
-        try:
-            await heartbeat_task
-        except Exception:
-            pass
 
 
 @router.post("/tasks/create-from-factory/{process_id}/enrich")
@@ -3828,7 +4035,8 @@ async def enrich_factory_prepared_products(
     if (
         task is not None
         and task.get("status") == "IN_PROGRESS"
-        and task.get("current_step") == "ai_enrichment_in_progress"
+        and task.get("current_step")
+        in {"ai_enrichment_queued", "ai_enrichment_chunks_queued", "ai_enrichment_in_progress"}
     ):
         return {
             "success": True,

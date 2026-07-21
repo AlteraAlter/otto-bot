@@ -84,6 +84,31 @@ async def enrich_factory_products_task(
     )
 
 
+async def enrich_factory_products_chunk_task(
+    ctx: dict[str, Any],
+    *,
+    process_id: str,
+    chunk_id: int,
+    start_index: int,
+    end_index: int,
+    ai_key_slot: int | None = None,
+    controller: str,
+) -> None:
+    """Generate AI enrichment for one prepared-products chunk."""
+    del ctx
+    from app.api.routes.products import _run_factory_enrichment_chunk_task
+
+    await _run_factory_enrichment_chunk_task(
+        process_id=process_id,
+        chunk_id=chunk_id,
+        start_index=start_index,
+        end_index=end_index,
+        ai_key_slot=ai_key_slot,
+        controller=controller,
+        product_service=get_product_service(),
+    )
+
+
 async def submit_factory_products_task(
     ctx: dict[str, Any],
     *,
@@ -177,6 +202,7 @@ class WorkerSettings:
         sync_afterbuy_jv_lister_task,
         prepare_factory_products_task,
         enrich_factory_products_task,
+        enrich_factory_products_chunk_task,
         submit_factory_products_task,
         submit_factory_availability_task,
         regenerate_product_variant_image_task,

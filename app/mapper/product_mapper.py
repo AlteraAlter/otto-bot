@@ -73,13 +73,27 @@ class ProductMapper:
         gpt_api_key: str | None = None,
     ):
         self.products = products
-        self._gpt = GPTHelper(gpt_api_key or settings.gpt_key)
+        raw_key_pool = settings.openai_attribute_fill_api_keys or ""
+        key_pool = [
+            item.strip()
+            for item in raw_key_pool.replace("\n", ",").replace(";", ",").split(",")
+            if item.strip()
+        ]
+        self._gpt_keys = (
+            [gpt_api_key] if gpt_api_key else (key_pool or [settings.gpt_key])
+        )
+        self._gpt = GPTHelper(self._gpt_keys[0] or settings.gpt_key)
         self.category_group_contexts = category_group_contexts or {}
 
-        self.classifier: CategoryClassifier = CategoryClassifier(
-            self._gpt.client,
-            sorted(self.category_group_contexts) or settings.CATEGORIES,
-        )
+        classifier_categories = sorted(self.category_group_contexts) or settings.CATEGORIES
+        self._classifier_pool: list[CategoryClassifier] = [
+            CategoryClassifier(
+                GPTHelper(key or settings.gpt_key).client,
+                classifier_categories,
+            )
+            for key in self._gpt_keys
+        ]
+        self.classifier: CategoryClassifier = self._classifier_pool[0]
 
         self.bullet_point_generator: BulletPointGenerator = BulletPointGenerator(
             self._gpt.client
@@ -117,7 +131,10 @@ class ProductMapper:
                     ean,
                 )
                 async with semaphore:
-                    mapped = await self.clean_data(product)
+                    mapped = await self.clean_data(
+                        product,
+                        ai_key_slot=index % max(1, len(self._classifier_pool)),
+                    )
                 result[index] = mapped
                 if on_item_mapped is not None:
                     await on_item_mapped(index, mapped)
@@ -153,7 +170,7 @@ class ProductMapper:
             "issues": issues,
         }
 
-    async def clean_data(self, product):
+    async def clean_data(self, product, ai_key_slot: int | None = None):
         # ean = product.get("EAN") or product.get("ean")
 
         result = {
@@ -174,7 +191,10 @@ class ProductMapper:
         )
 
         self.logger.info("Старт генерации категория для ean=%s", ean)
-        category_result = await self.get_category(category_source)
+        category_result = await self.get_category(
+            category_source,
+            ai_key_slot=ai_key_slot,
+        )
         category_group = str(category_result.get("categoryGroup") or "").strip()
         result["categoryGroup"] = category_group
         result["category"] = ""
@@ -660,7 +680,7 @@ class ProductMapper:
             self._category_attrs_cache[cache_key] = cleaned_otto_attrs
             return cleaned_otto_attrs
 
-    async def get_category(self, product: dict):
+    async def get_category(self, product: dict, ai_key_slot: int | None = None):
         cache_key = hashlib.sha256(
             json.dumps(product, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
@@ -668,7 +688,10 @@ class ProductMapper:
         if cached is not None:
             return cached
 
-        response = await self.classifier.classify(product)
+        classifier = self._classifier_pool[
+            int(ai_key_slot or 0) % max(1, len(self._classifier_pool))
+        ]
+        response = await classifier.classify(product)
         result = {"categoryGroup": response.get("categoryGroup")}
         self._category_group_prediction_cache[cache_key] = result
         return result

@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     arq_job_expires_seconds: int = 14 * 24 * 60 * 60
     factory_product_concurrency: int = 10
     factory_ai_enrich_item_timeout_seconds: int = 300
+    factory_ai_enrich_chunk_size: int = 50
     factory_submit_preview_enabled: bool = True
 
     # Sentry
