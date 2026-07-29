@@ -85,7 +85,9 @@ class ProductMapper:
         self._gpt = GPTHelper(self._gpt_keys[0] or settings.gpt_key)
         self.category_group_contexts = category_group_contexts or {}
 
-        classifier_categories = sorted(self.category_group_contexts) or settings.CATEGORIES
+        classifier_categories = (
+            sorted(self.category_group_contexts) or settings.CATEGORIES
+        )
         self._classifier_pool: list[CategoryClassifier] = [
             CategoryClassifier(
                 GPTHelper(key or settings.gpt_key).client,
@@ -265,7 +267,9 @@ class ProductMapper:
         primary = by_name.get("farbe")
         raw_values = primary.get("values") if primary else source_color
         if isinstance(raw_values, list):
-            color_values = [str(value).strip() for value in raw_values if str(value).strip()]
+            color_values = [
+                str(value).strip() for value in raw_values if str(value).strip()
+            ]
         else:
             color_text = str(raw_values or "").strip()
             color_values = [color_text] if color_text else []
@@ -337,7 +341,9 @@ class ProductMapper:
         if isinstance(title, str) and title.strip():
             prepared["Artikelbeschreibung"] = title.strip()
 
-        specifics = ProductMapper._parse_item_specifics(source.get("CustomItemSpecifics"))
+        specifics = ProductMapper._parse_item_specifics(
+            source.get("CustomItemSpecifics")
+        )
         for key in AI_SOURCE_SPECIFIC_KEYS:
             value = specifics.get(key) or source.get(key)
             if ProductMapper._has_ai_value(value):
@@ -423,9 +429,7 @@ class ProductMapper:
                 raw_values = raw_attr.get("values", raw_attr.get("value"))
                 if isinstance(raw_values, list):
                     values = [
-                        str(value).strip()
-                        for value in raw_values
-                        if str(value).strip()
+                        str(value).strip() for value in raw_values if str(value).strip()
                     ]
                     if not values:
                         continue
@@ -579,10 +583,10 @@ class ProductMapper:
             if category_attrs_task:
                 try:
                     self.logger.info(
-                            "Генерация оставшихся аттрибутов: ean=%s category_group=%s",
-                            ean,
-                            category_group,
-                        )
+                        "Генерация оставшихся аттрибутов: ean=%s category_group=%s",
+                        ean,
+                        category_group,
+                    )
                     cleaned_otto_attrs = await category_attrs_task
                     self.logger.info("Клин аттрибутов для ean=%s", ean)
                     direct_attr_names = {item["name"] for item in direct_map}
@@ -701,7 +705,9 @@ class ProductMapper:
         if not category_group:
             return None
         group_context = self.category_group_contexts.get(category_group)
-        categories = group_context.get("categories") if isinstance(group_context, dict) else None
+        categories = (
+            group_context.get("categories") if isinstance(group_context, dict) else None
+        )
         if isinstance(categories, list) and categories:
             return str(categories[0])
         return category_group
@@ -711,7 +717,11 @@ class ProductMapper:
             return None
         category_key = category.casefold()
         for group_name, group_context in self.category_group_contexts.items():
-            categories = group_context.get("categories") if isinstance(group_context, dict) else None
+            categories = (
+                group_context.get("categories")
+                if isinstance(group_context, dict)
+                else None
+            )
             if not isinstance(categories, list):
                 continue
             if any(str(item).casefold() == category_key for item in categories):
@@ -725,7 +735,9 @@ class ProductMapper:
             if str(item).strip() and str(item).strip() != "Made in Europa"
         ]
         if len(product["bulletPoints"]) < 5:
-            generated = await self.bullet_point_generator.generate_bullet_points(product)
+            generated = await self.bullet_point_generator.generate_bullet_points(
+                product
+            )
 
             if not isinstance(generated, list):
                 return product["bulletPoints"]

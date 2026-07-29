@@ -226,7 +226,11 @@ class ProductVariantService:
                 price=product.price,
                 image_url=first_image,
                 media_asset_links=base_media[:1] if first_image else [],
-                status="ready" if is_source and product.ean and product.sku else "pending_generation",
+                status=(
+                    "ready"
+                    if is_source and product.ean and product.sku
+                    else "pending_generation"
+                ),
                 source="source" if is_source else "generated",
             )
             self.session.add(variant)
@@ -315,7 +319,9 @@ class ProductVariantService:
             variant.price = None if raw_price in (None, "") else float(raw_price)
         if "mediaAssetLinks" in patch and isinstance(patch["mediaAssetLinks"], list):
             variant.media_asset_links = [
-                str(item).strip() for item in patch["mediaAssetLinks"] if str(item).strip()
+                str(item).strip()
+                for item in patch["mediaAssetLinks"]
+                if str(item).strip()
             ]
         if "status" in patch:
             status_value = str(patch["status"] or "").strip()
@@ -377,7 +383,9 @@ async def find_identifier_conflicts(
         product_filters.append(Product.ean.in_(eans))
     if product_filters:
         rows = (
-            await session.execute(select(Product.sku, Product.ean).where(or_(*product_filters)))
+            await session.execute(
+                select(Product.sku, Product.ean).where(or_(*product_filters))
+            )
         ).all()
         for sku, ean in rows:
             if sku in skus:

@@ -28,7 +28,9 @@ def upgrade() -> None:
         sa.Column("lister_factory_id", sa.String(), nullable=True),
         sa.Column("status", sa.String(length=30), nullable=False),
         sa.Column("error_message", sa.Text(), nullable=True),
-        sa.Column("raw_payload", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column(
+            "raw_payload", postgresql.JSONB(astext_type=sa.Text()), nullable=True
+        ),
         sa.Column(
             "fetched_at",
             sa.DateTime(timezone=True),

@@ -81,7 +81,9 @@ class ProductVariationLogicTests(unittest.TestCase):
                 ]
             },
             "pricing": {"standardPrice": {"amount": 100, "currency": "EUR"}},
-            "mediaAssets": [{"type": "IMAGE", "location": "https://example.com/base.jpg"}],
+            "mediaAssets": [
+                {"type": "IMAGE", "location": "https://example.com/base.jpg"}
+            ],
             "variants": [
                 {
                     "combinationKey": "one",
@@ -90,7 +92,11 @@ class ProductVariationLogicTests(unittest.TestCase):
                     "price": "120",
                     "imageUrl": "https://example.com/variant.jpg",
                     "combination": [
-                        {"attributeId": "material", "name": "Material", "value": "textile"},
+                        {
+                            "attributeId": "material",
+                            "name": "Material",
+                            "value": "textile",
+                        },
                         {"attributeId": "color", "name": "Color", "value": "black"},
                     ],
                 }
@@ -104,7 +110,9 @@ class ProductVariationLogicTests(unittest.TestCase):
         self.assertEqual(expanded[0]["sku"], "SKU-1")
         self.assertEqual(expanded[0]["ean"], "EAN-1")
         self.assertEqual(expanded[0]["pricing"]["standardPrice"]["amount"], 120.0)
-        self.assertEqual(expanded[0]["mediaAssets"][0]["location"], "https://example.com/variant.jpg")
+        self.assertEqual(
+            expanded[0]["mediaAssets"][0]["location"], "https://example.com/variant.jpg"
+        )
         attrs = expanded[0]["productDescription"]["attributes"]
         values_by_name = {item["name"]: item["values"] for item in attrs}
         self.assertEqual(values_by_name["Material"], ["textile"])
@@ -124,8 +132,13 @@ class ProductVariationLogicTests(unittest.TestCase):
                 "description": "Edited parent description",
                 "attributes": [{"name": "Color", "values": ["red", "black"]}],
             },
-            "pricing": {"standardPrice": {"amount": 250, "currency": "EUR"}, "vat": "FULL"},
-            "mediaAssets": [{"type": "IMAGE", "location": "https://example.com/base.jpg"}],
+            "pricing": {
+                "standardPrice": {"amount": 250, "currency": "EUR"},
+                "vat": "FULL",
+            },
+            "mediaAssets": [
+                {"type": "IMAGE", "location": "https://example.com/base.jpg"}
+            ],
             "shippingProfileID": "shipping-1",
             "variants": [
                 {
@@ -148,8 +161,16 @@ class ProductVariationLogicTests(unittest.TestCase):
                             "description": "Old stale description",
                             "attributes": [{"name": "Color", "values": ["red"]}],
                         },
-                        "pricing": {"standardPrice": {"amount": 0, "currency": "EUR"}, "vat": "FULL"},
-                        "mediaAssets": [{"type": "IMAGE", "location": "https://example.com/stale.jpg"}],
+                        "pricing": {
+                            "standardPrice": {"amount": 0, "currency": "EUR"},
+                            "vat": "FULL",
+                        },
+                        "mediaAssets": [
+                            {
+                                "type": "IMAGE",
+                                "location": "https://example.com/stale.jpg",
+                            }
+                        ],
                     },
                 }
             ],
@@ -160,10 +181,16 @@ class ProductVariationLogicTests(unittest.TestCase):
 
         self.assertEqual(payload["sku"], "SKU-1")
         self.assertEqual(payload["ean"], "EAN-1")
-        self.assertEqual(payload["productDescription"]["productLine"], "Edited parent title")
-        self.assertEqual(payload["productDescription"]["description"], "Edited parent description")
+        self.assertEqual(
+            payload["productDescription"]["productLine"], "Edited parent title"
+        )
+        self.assertEqual(
+            payload["productDescription"]["description"], "Edited parent description"
+        )
         self.assertEqual(payload["pricing"]["standardPrice"]["amount"], 250)
-        self.assertEqual(payload["mediaAssets"][0]["location"], "https://example.com/base.jpg")
+        self.assertEqual(
+            payload["mediaAssets"][0]["location"], "https://example.com/base.jpg"
+        )
         self.assertEqual(payload["shippingProfileID"], "shipping-1")
 
     def test_variant_generated_local_image_is_made_absolute_for_otto(self):
@@ -174,7 +201,9 @@ class ProductVariationLogicTests(unittest.TestCase):
             "productDescription": {
                 "attributes": [{"name": "Color", "values": ["red", "black"]}],
             },
-            "mediaAssets": [{"type": "IMAGE", "location": "https://example.com/base.jpg"}],
+            "mediaAssets": [
+                {"type": "IMAGE", "location": "https://example.com/base.jpg"}
+            ],
             "variants": [
                 {
                     "combinationKey": "one",
@@ -182,7 +211,10 @@ class ProductVariationLogicTests(unittest.TestCase):
                     "ean": "EAN-1",
                     "imageUrl": "/generated-media/variant-black.jpg",
                     "mediaAssets": [
-                        {"type": "IMAGE", "location": "/generated-media/variant-black.jpg"}
+                        {
+                            "type": "IMAGE",
+                            "location": "/generated-media/variant-black.jpg",
+                        }
                     ],
                     "combination": [
                         {"attributeId": "color", "name": "Color", "value": "black"},

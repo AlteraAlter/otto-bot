@@ -3010,7 +3010,9 @@ async def deactivate_products_by_ean(
         )
     )
     accounts_by_identifier: dict[str, set[str]] = {}
-    for account, row_ean, row_sku, row_reference in (await db.execute(account_stmt)).all():
+    for account, row_ean, row_sku, row_reference in (
+        await db.execute(account_stmt)
+    ).all():
         account_text = str(account or "").strip().lower()
         if not account_text:
             continue
@@ -3044,9 +3046,7 @@ async def deactivate_products_by_ean(
         sku = str(
             import_row.sku
             if import_row is not None and import_row.sku
-            else product_row.sku
-            if product_row is not None and product_row.sku
-            else ""
+            else product_row.sku if product_row is not None and product_row.sku else ""
         ).strip()
         item_result = {
             "ean": ean,
@@ -3070,7 +3070,9 @@ async def deactivate_products_by_ean(
                 results[index] = item_result
                 return
         if product_row is None or not sku:
-            item_result["message"] = "Не найден товар в локальной базе по EAN/SKU/reference"
+            item_result["message"] = (
+                "Не найден товар в локальной базе по EAN/SKU/reference"
+            )
             results[index] = item_result
             return
 
@@ -3102,7 +3104,9 @@ async def deactivate_products_by_ean(
                     )
             item_result["status_success"] = True
             item_result["success"] = True
-            item_result["message"] = "Количество выставлено 0, деактивация отправлена в OTTO"
+            item_result["message"] = (
+                "Количество выставлено 0, деактивация отправлена в OTTO"
+            )
             product_row.active_status = "Inaktiv"
             product_row.marketplace_status = "Inaktiv"
             product_row.error_message = None

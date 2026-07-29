@@ -54,10 +54,14 @@ class OpenAIVariantImageProvider:
 
     async def generate(self, prompt: str, source_image_url: str | None) -> bytes:
         if not self.api_key:
-            raise RuntimeError("OpenAI image provider is not configured: missing API key.")
+            raise RuntimeError(
+                "OpenAI image provider is not configured: missing API key."
+            )
         source = await load_source_image(source_image_url)
         if source is None:
-            raise FurnitureImageGenerationError("Source image is required for furniture variant generation.")
+            raise FurnitureImageGenerationError(
+                "Source image is required for furniture variant generation."
+            )
         return await self._edit(prompt, source)
 
     async def _edit(self, prompt: str, source: tuple[str, bytes, str]) -> bytes:
@@ -84,11 +88,18 @@ class OpenAIVariantImageProvider:
                 if exc.status_code != 400:
                     raise
 
-        raise FurnitureImageGenerationError("OpenAI image edit failed for all parameter variants.")
+        raise FurnitureImageGenerationError(
+            "OpenAI image edit failed for all parameter variants."
+        )
 
     def _edit_attempts(self) -> list[dict[str, str]]:
-        primary_model = str(settings.openai_image_model or "gpt-image-2").strip() or "gpt-image-2"
-        fallback_model = str(settings.openai_image_fallback_model or "gpt-image-1").strip() or "gpt-image-1"
+        primary_model = (
+            str(settings.openai_image_model or "gpt-image-2").strip() or "gpt-image-2"
+        )
+        fallback_model = (
+            str(settings.openai_image_fallback_model or "gpt-image-1").strip()
+            or "gpt-image-1"
+        )
         base = {
             "quality": str(settings.openai_image_quality or "high").strip() or "high",
             "size": str(settings.openai_image_edit_size or "auto").strip() or "auto",
@@ -191,12 +202,15 @@ def local_media_path(url: str) -> Path | None:
     parsed = urlparse(url)
     path = parsed.path if parsed.scheme else url
     for prefix, root in (
-        (settings.generated_media_url_prefix.rstrip("/"), settings.generated_media_root),
+        (
+            settings.generated_media_url_prefix.rstrip("/"),
+            settings.generated_media_root,
+        ),
         ("/uploads", os.getenv("UPLOADS_DIR", "storage/uploads")),
     ):
         normalized_prefix = prefix or "/generated-media"
         if path == normalized_prefix or path.startswith(f"{normalized_prefix}/"):
-            relative = path[len(normalized_prefix):].lstrip("/")
+            relative = path[len(normalized_prefix) :].lstrip("/")
             candidate = (Path(root) / relative).resolve()
             root_path = Path(root).resolve()
             if root_path == candidate or root_path in candidate.parents:
@@ -204,7 +218,9 @@ def local_media_path(url: str) -> Path | None:
     return None
 
 
-async def load_source_image(source_image_url: str | None) -> tuple[str, bytes, str] | None:
+async def load_source_image(
+    source_image_url: str | None,
+) -> tuple[str, bytes, str] | None:
     if not source_image_url:
         return None
     source = source_image_url.strip()
@@ -213,7 +229,11 @@ async def load_source_image(source_image_url: str | None) -> tuple[str, bytes, s
 
     local_path = local_media_path(source)
     if local_path is not None and local_path.exists():
-        return local_path.name, local_path.read_bytes(), mime_type_for_image(local_path.name)
+        return (
+            local_path.name,
+            local_path.read_bytes(),
+            mime_type_for_image(local_path.name),
+        )
 
     parsed = urlparse(source)
     if parsed.scheme not in {"http", "https"}:
@@ -264,7 +284,9 @@ def safe_media_filename(value: str, *, suffix: str = ".jpg") -> str:
 
 
 def build_variant_image_prompt(variant: ProductVariant) -> str:
-    color, material = furniture_surface_parts(variant.variation_attributes_snapshot or [])
+    color, material = furniture_surface_parts(
+        variant.variation_attributes_snapshot or []
+    )
     return build_furniture_image_prompt(
         color=color,
         material=material,
@@ -338,17 +360,35 @@ def furniture_surface_parts(combination: list[dict[str, str]]) -> tuple[str, str
         fallback_values.append(value)
 
     color = ", ".join(dict.fromkeys(color_values)) or "same as the selected variant"
-    material = ", ".join(dict.fromkeys(material_values)) or ", ".join(dict.fromkeys(fallback_values)) or "same as the selected variant"
+    material = (
+        ", ".join(dict.fromkeys(material_values))
+        or ", ".join(dict.fromkeys(fallback_values))
+        or "same as the selected variant"
+    )
     return color, material
 
 
-def visual_material_color_parts(combination: list[dict[str, str]]) -> list[dict[str, str]]:
+def visual_material_color_parts(
+    combination: list[dict[str, str]],
+) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     for item in combination:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name") or "").lower()
-        if any(token in name for token in ("material", "bezug", "stoff", "fabric", "color", "colour", "farbe", "grundfarbe")):
+        if any(
+            token in name
+            for token in (
+                "material",
+                "bezug",
+                "stoff",
+                "fabric",
+                "color",
+                "colour",
+                "farbe",
+                "grundfarbe",
+            )
+        ):
             result.append(item)
     return result
 
@@ -363,7 +403,9 @@ async def store_generated_image(
 ) -> tuple[str, str]:
     root = Path(settings.generated_media_root)
     root.mkdir(parents=True, exist_ok=True)
-    filename = safe_media_filename(filename_stem or f"variant-{variant_id}-{uuid4().hex}", suffix=suffix)
+    filename = safe_media_filename(
+        filename_stem or f"variant-{variant_id}-{uuid4().hex}", suffix=suffix
+    )
     destination = root / filename
     destination.write_bytes(content)
     normalized = normalize_generated_image(destination, target_size=target_size)

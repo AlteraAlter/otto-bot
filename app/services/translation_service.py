@@ -51,20 +51,26 @@ class DeepLTranslationService:
         elif raw_base_url.endswith("/v2"):
             raw_base_url = raw_base_url[: -len("/v2")]
         self.base_url = raw_base_url
-        self.timeout = timeout if timeout is not None else settings.deepl_timeout_seconds
+        self.timeout = (
+            timeout if timeout is not None else settings.deepl_timeout_seconds
+        )
         self.min_interval_seconds = (
             min_interval_seconds
             if min_interval_seconds is not None
             else settings.deepl_min_interval_seconds
         )
-        self.max_retries = max_retries if max_retries is not None else settings.deepl_max_retries
+        self.max_retries = (
+            max_retries if max_retries is not None else settings.deepl_max_retries
+        )
         self.retry_base_delay_seconds = (
             retry_base_delay_seconds
             if retry_base_delay_seconds is not None
             else settings.deepl_retry_base_delay_seconds
         )
 
-    async def translate(self, text: str, *, source_lang: str | None, target_lang: str) -> str:
+    async def translate(
+        self, text: str, *, source_lang: str | None, target_lang: str
+    ) -> str:
         translations = await self.translate_many(
             [text],
             source_lang=source_lang,
@@ -130,11 +136,15 @@ class DeepLTranslationService:
                     break
                 except httpx.HTTPStatusError as exc:
                     if not self._should_retry(exc.response.status_code, attempt):
-                        raise TranslationError(f"DeepL translation failed: {exc}") from exc
+                        raise TranslationError(
+                            f"DeepL translation failed: {exc}"
+                        ) from exc
                     await asyncio.sleep(self._retry_delay(attempt, exc.response))
                 except httpx.RequestError as exc:
                     if attempt >= self.max_retries:
-                        raise TranslationError(f"DeepL translation failed: {exc}") from exc
+                        raise TranslationError(
+                            f"DeepL translation failed: {exc}"
+                        ) from exc
                     await asyncio.sleep(self._retry_delay(attempt))
 
         if response is None:
@@ -169,12 +179,16 @@ class DeepLTranslationService:
             return False
         return status_code in {429, 500, 502, 503, 504}
 
-    def _retry_delay(self, attempt: int, response: httpx.Response | None = None) -> float:
-        retry_after = self._retry_after_seconds(response) if response is not None else None
+    def _retry_delay(
+        self, attempt: int, response: httpx.Response | None = None
+    ) -> float:
+        retry_after = (
+            self._retry_after_seconds(response) if response is not None else None
+        )
         if retry_after is not None:
             return min(max(retry_after, self.min_interval_seconds), 90.0)
 
-        exponential = self.retry_base_delay_seconds * (2 ** attempt)
+        exponential = self.retry_base_delay_seconds * (2**attempt)
         return min(max(exponential, self.min_interval_seconds), 90.0)
 
     @staticmethod
@@ -282,7 +296,9 @@ class TranslationService:
         except (DBAPIError, ProgrammingError):
             await self.db.rollback()
 
-        missing = [value for value in unique_originals if value not in cached_by_original]
+        missing = [
+            value for value in unique_originals if value not in cached_by_original
+        ]
         for start in range(0, len(missing), 50):
             batch = missing[start : start + 50]
             translated_batch = await self.deepl.translate_many(

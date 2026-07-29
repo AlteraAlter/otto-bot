@@ -23,7 +23,7 @@ def redis_settings_from_url(url: str) -> RedisSettings:
         password=parsed.password,
         ssl=parsed.scheme == "rediss",
     )
-    
+
 
 redis_settings = redis_settings_from_url(settings.arq_redis_url or settings.redis_url)
 

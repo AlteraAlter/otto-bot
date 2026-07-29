@@ -10,7 +10,6 @@ from itertools import product as cartesian_product
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urljoin
 
-
 VARIANT_STATUSES = {
     "draft",
     "pending_generation",
@@ -345,27 +344,48 @@ def expand_product_variants_for_otto(
     for variant in variants:
         combination_items = variant.get("combination")
         combination = VariantCombination(
-            key=str(variant.get("combinationKey") or variant.get("combination_key") or ""),
-            values=tuple(
-                (
-                    str(item.get("attributeId") or item.get("attribute_id") or item.get("id") or item.get("name") or ""),
-                    str(item.get("name") or item.get("attributeName") or item.get("attributeId") or ""),
-                    str(item.get("value") or ""),
+            key=str(
+                variant.get("combinationKey") or variant.get("combination_key") or ""
+            ),
+            values=(
+                tuple(
+                    (
+                        str(
+                            item.get("attributeId")
+                            or item.get("attribute_id")
+                            or item.get("id")
+                            or item.get("name")
+                            or ""
+                        ),
+                        str(
+                            item.get("name")
+                            or item.get("attributeName")
+                            or item.get("attributeId")
+                            or ""
+                        ),
+                        str(item.get("value") or ""),
+                    )
+                    for item in combination_items
+                    if isinstance(item, dict)
                 )
-                for item in combination_items
-                if isinstance(item, dict)
-            )
-            if isinstance(combination_items, list)
-            else tuple(),
+                if isinstance(combination_items, list)
+                else tuple()
+            ),
         )
         variant_payload = copy.deepcopy(latest_base_payload)
 
         if combination.values:
-            variant_payload = _apply_combination_to_product(variant_payload, combination)
+            variant_payload = _apply_combination_to_product(
+                variant_payload, combination
+            )
         if product_reference:
             variant_payload["productReference"] = product_reference
-        variant_sku = str(variant.get("sku") or variant_payload.get("sku") or "").strip()
-        variant_ean = str(variant.get("ean") or variant_payload.get("ean") or "").strip()
+        variant_sku = str(
+            variant.get("sku") or variant_payload.get("sku") or ""
+        ).strip()
+        variant_ean = str(
+            variant.get("ean") or variant_payload.get("ean") or ""
+        ).strip()
         variant_payload["sku"] = variant_sku
         variant_payload["ean"] = variant_ean or None
 
@@ -383,10 +403,14 @@ def expand_product_variants_for_otto(
         if media_assets:
             variant_payload["mediaAssets"] = media_assets
         else:
-            image_url = str(variant.get("imageUrl") or variant.get("image_url") or "").strip()
+            image_url = str(
+                variant.get("imageUrl") or variant.get("image_url") or ""
+            ).strip()
             absolute_image_url = _absolute_media_location(image_url, media_base_url)
             if absolute_image_url:
-                variant_payload["mediaAssets"] = [{"type": "IMAGE", "location": absolute_image_url}]
+                variant_payload["mediaAssets"] = [
+                    {"type": "IMAGE", "location": absolute_image_url}
+                ]
             elif latest_media_assets:
                 variant_payload["mediaAssets"] = copy.deepcopy(latest_media_assets)
 

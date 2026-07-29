@@ -43,10 +43,16 @@ class AttributeFillChunk(Base):
     updated_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     skipped_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    generated_attributes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    generated_attributes: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -78,10 +84,14 @@ class AttributeFillItem(Base):
     sku: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     ean: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     product_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    product_category: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    product_category: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, index=True
+    )
     active_status: Mapped[object | None] = mapped_column(JSONB, nullable=True)
     marketplace_status: Mapped[object | None] = mapped_column(JSONB, nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, index=True
+    )
     status: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
@@ -92,8 +102,12 @@ class AttributeFillItem(Base):
     result_summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     attributes_added: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

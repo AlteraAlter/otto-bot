@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.ean_pool import EanPoolItem
 
-
 EAN_POOL_STATUSES = {"available", "reserved", "used", "disabled"}
 
 
@@ -57,17 +56,19 @@ class EanPoolService:
 
         stmt = (
             insert(EanPoolItem)
-            .values([
-                {
-                    "ean": ean,
-                    "status": "available",
-                    "source": source,
-                    "note": note,
-                    "created_by_user_id": created_by_user_id,
-                    "metadata_json": metadata or None,
-                }
-                for ean in eans
-            ])
+            .values(
+                [
+                    {
+                        "ean": ean,
+                        "status": "available",
+                        "source": source,
+                        "note": note,
+                        "created_by_user_id": created_by_user_id,
+                        "metadata_json": metadata or None,
+                    }
+                    for ean in eans
+                ]
+            )
             .on_conflict_do_nothing(index_elements=["ean"])
             .returning(EanPoolItem)
         )
@@ -80,7 +81,9 @@ class EanPoolService:
         }
 
     async def stats(self) -> dict[str, int]:
-        stmt = select(EanPoolItem.status, func.count(EanPoolItem.id)).group_by(EanPoolItem.status)
+        stmt = select(EanPoolItem.status, func.count(EanPoolItem.id)).group_by(
+            EanPoolItem.status
+        )
         rows = (await self.session.execute(stmt)).all()
         result = {status: 0 for status in EAN_POOL_STATUSES}
         for status, count in rows:
@@ -93,7 +96,11 @@ class EanPoolService:
         status: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        stmt = select(EanPoolItem).order_by(EanPoolItem.id.asc()).limit(max(1, min(limit, 1000)))
+        stmt = (
+            select(EanPoolItem)
+            .order_by(EanPoolItem.id.asc())
+            .limit(max(1, min(limit, 1000)))
+        )
         if status:
             stmt = stmt.where(EanPoolItem.status == status)
         items = list((await self.session.scalars(stmt)).all())

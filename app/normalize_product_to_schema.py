@@ -7,7 +7,6 @@ import re
 import xml.etree.ElementTree as ET
 from typing import Any
 
-
 BRAND_IDS_BY_CONTROLLER = {
     "jv": "UO4EGHSX",
     "xl": "6HMOZBOU",

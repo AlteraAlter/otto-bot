@@ -147,9 +147,7 @@ def _normalize_description_rows(
                 normalized_value = (
                     _normalize_text(value)
                     if isinstance(value, str)
-                    else _normalize_text(str(value))
-                    if value is not None
-                    else None
+                    else _normalize_text(str(value)) if value is not None else None
                 )
                 if normalized_value:
                     rows.append(

@@ -118,9 +118,11 @@ class ProductService:
             self.logger.debug(
                 "Подготовлен продукт для отправки в OTTO: sku=%s controller=%s payload=%s",
                 getattr(product, "sku", None),
-                payload.controller.value
-                if isinstance(payload.controller, Controller)
-                else payload.controller,
+                (
+                    payload.controller.value
+                    if isinstance(payload.controller, Controller)
+                    else payload.controller
+                ),
                 product.model_dump(mode="json", by_alias=True),
             )
 
@@ -201,9 +203,11 @@ class ProductService:
             payload.quantity or "20",
             payload.shippingProfileID,
             payload.processingTime or "DEFAULT",
-            payload.controller.value
-            if isinstance(payload.controller, Controller)
-            else payload.controller,
+            (
+                payload.controller.value
+                if isinstance(payload.controller, Controller)
+                else payload.controller
+            ),
         )
 
         quantity_payload = UpdateQuantity(
@@ -511,7 +515,9 @@ class ProductService:
                     type=attr_item.type,
                     description=attr_item.description,
                     description_ru=description_ru,
-                    relevance=attr_item.relevance.value if attr_item.relevance else None,
+                    relevance=(
+                        attr_item.relevance.value if attr_item.relevance else None
+                    ),
                     multi_value=attr_item.multiValue,
                     unit=attr_item.unit,
                     unit_display_name=attr_item.unitDisplayName,

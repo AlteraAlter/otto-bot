@@ -144,8 +144,12 @@ class OttoXlsxNameMapping(Base):
     target_product_category: Mapped[str | None] = mapped_column(String, nullable=True)
     source_name: Mapped[str] = mapped_column(Text, nullable=False)
     target_name: Mapped[str] = mapped_column(Text, nullable=False)
-    source_normalized_name: Mapped[str] = mapped_column(Text, nullable=False, index=True)
-    target_normalized_name: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    source_normalized_name: Mapped[str] = mapped_column(
+        Text, nullable=False, index=True
+    )
+    target_normalized_name: Mapped[str] = mapped_column(
+        Text, nullable=False, index=True
+    )
     source_row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     target_row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     score: Mapped[float] = mapped_column(Float, nullable=False)

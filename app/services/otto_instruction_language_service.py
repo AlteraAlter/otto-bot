@@ -190,7 +190,9 @@ def _attribute_values(attr: dict[str, Any]) -> Any:
 
 def _is_target_value(value: Any) -> bool:
     if isinstance(value, list):
-        normalized_values = [normalize_text(item) for item in value if normalize_text(item)]
+        normalized_values = [
+            normalize_text(item) for item in value if normalize_text(item)
+        ]
         return normalized_values == [TARGET_VALUE]
     return normalize_text(value) == TARGET_VALUE
 
@@ -236,7 +238,9 @@ def replace_instruction_language_attribute(
     return updated, False
 
 
-def prepare_product_for_submit(product: dict[str, Any], *, controller: str) -> dict[str, Any]:
+def prepare_product_for_submit(
+    product: dict[str, Any], *, controller: str
+) -> dict[str, Any]:
     """Strip read-only GET fields while preserving the product update payload."""
     allowed_top_level = {
         "productReference",

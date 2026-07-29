@@ -26,7 +26,9 @@ def normalize_generated_image(
     source = Path(path)
     if Image is None:
         if target_size is not None:
-            raise RuntimeError("Pillow is required to preserve source image dimensions.")
+            raise RuntimeError(
+                "Pillow is required to preserve source image dimensions."
+            )
         return source
     if not source.exists():
         return source
@@ -34,7 +36,9 @@ def normalize_generated_image(
     allowed_formats = {
         item.strip().lower() for item in settings.otto_allowed_image_formats.split(",")
     }
-    target_format = "JPEG" if "jpg" in allowed_formats or "jpeg" in allowed_formats else "PNG"
+    target_format = (
+        "JPEG" if "jpg" in allowed_formats or "jpeg" in allowed_formats else "PNG"
+    )
     suffix = ".jpg" if target_format == "JPEG" else ".png"
     target = source.with_suffix(suffix)
 
@@ -64,7 +68,9 @@ def normalize_generated_image(
 
         min_width = max(1, int(settings.otto_image_min_width))
         min_height = max(1, int(settings.otto_image_min_height))
-        if not preserve_exact_size and (rgb.width < min_width or rgb.height < min_height):
+        if not preserve_exact_size and (
+            rgb.width < min_width or rgb.height < min_height
+        ):
             raise ValueError(
                 f"Image is too small: {rgb.width}x{rgb.height}, "
                 f"minimum {min_width}x{min_height}."

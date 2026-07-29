@@ -13,7 +13,9 @@ class ImageProcessingServiceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             source = Path(tmpdir) / "generated.png"
-            image_processing_service.Image.new("RGB", (1024, 1024), (240, 240, 240)).save(source)
+            image_processing_service.Image.new(
+                "RGB", (1024, 1024), (240, 240, 240)
+            ).save(source)
 
             normalized = normalize_generated_image(source, target_size=(751, 463))
 

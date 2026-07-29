@@ -11,7 +11,6 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-
 revision: str = "20260624120000"
 down_revision: Union[str, Sequence[str], None] = (
     "f187c05e21e8",
@@ -44,7 +43,9 @@ def upgrade() -> None:
         sa.Column("image_path", sa.String(), nullable=True),
         sa.Column("image_url", sa.String(), nullable=True),
         sa.Column("media_asset_links", postgresql.ARRAY(sa.String()), nullable=True),
-        sa.Column("status", sa.String(length=40), server_default="draft", nullable=False),
+        sa.Column(
+            "status", sa.String(length=40), server_default="draft", nullable=False
+        ),
         sa.Column("generation_error", sa.Text(), nullable=True),
         sa.Column(
             "source",
@@ -96,14 +97,18 @@ def upgrade() -> None:
         "product_variants",
         ["sku"],
         unique=True,
-        postgresql_where=sa.text("sku IS NOT NULL AND sku <> '' AND is_deleted = false"),
+        postgresql_where=sa.text(
+            "sku IS NOT NULL AND sku <> '' AND is_deleted = false"
+        ),
     )
     op.create_index(
         "uq_product_variants_ean_active",
         "product_variants",
         ["ean"],
         unique=True,
-        postgresql_where=sa.text("ean IS NOT NULL AND ean <> '' AND is_deleted = false"),
+        postgresql_where=sa.text(
+            "ean IS NOT NULL AND ean <> '' AND is_deleted = false"
+        ),
     )
 
 
@@ -114,6 +119,8 @@ def downgrade() -> None:
         "uq_product_variants_product_combination_active",
         table_name="product_variants",
     )
-    op.drop_index("ix_product_variants_product_reference", table_name="product_variants")
+    op.drop_index(
+        "ix_product_variants_product_reference", table_name="product_variants"
+    )
     op.drop_index("ix_product_variants_product_id", table_name="product_variants")
     op.drop_table("product_variants")

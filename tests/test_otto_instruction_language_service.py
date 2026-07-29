@@ -92,9 +92,7 @@ class FakeOttoClient:
                 {
                     "sku": "CHANGED",
                     "productDescription": {
-                        "attributes": [
-                            {"name": ATTRIBUTE_NAME, "values": ["English"]}
-                        ],
+                        "attributes": [{"name": ATTRIBUTE_NAME, "values": ["English"]}],
                     },
                 },
                 {

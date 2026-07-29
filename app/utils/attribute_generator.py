@@ -63,8 +63,7 @@ class AttributeGenerator:
         valid_image_urls = [
             url
             for url in (image_urls or [])
-            if isinstance(url, str)
-            and url.startswith(("http://", "https://"))
+            if isinstance(url, str) and url.startswith(("http://", "https://"))
         ][:3]
         user_content: str | list[dict[str, str]] = user_prompt
         if valid_image_urls:

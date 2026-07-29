@@ -127,9 +127,7 @@ def _media_shape(product: dict[str, Any]) -> dict[str, Any]:
 def _attribute_fill_api_keys() -> list[str]:
     raw_keys = settings.openai_attribute_fill_api_keys or ""
     keys = [
-        item.strip()
-        for item in raw_keys.replace("\n", ",").split(",")
-        if item.strip()
+        item.strip() for item in raw_keys.replace("\n", ",").split(",") if item.strip()
     ]
     return keys or [settings.gpt_key]
 
@@ -254,12 +252,14 @@ def _product_summary(
         "ean": _clean_text(product.get("ean")),
         "productReference": _clean_text(product.get("productReference")),
         "productCategory": _category_from_product(product),
-        "marketplaceStatus": marketplace_status
-        if marketplace_status is not None
-        else product.get("marketplaceStatus"),
-        "activeStatus": active_status
-        if active_status is not None
-        else product.get("activeStatus"),
+        "marketplaceStatus": (
+            marketplace_status
+            if marketplace_status is not None
+            else product.get("marketplaceStatus")
+        ),
+        "activeStatus": (
+            active_status if active_status is not None else product.get("activeStatus")
+        ),
     }
 
 
@@ -314,7 +314,9 @@ def _is_variation_category_attribute(
     return upstream_variation and is_supported_variation_attribute(attr.name)
 
 
-def _append_task_item(task: dict[str, Any], key: str, item: dict[str, Any], limit: int = 100) -> None:
+def _append_task_item(
+    task: dict[str, Any], key: str, item: dict[str, Any], limit: int = 100
+) -> None:
     items = task.get(key)
     if not isinstance(items, list):
         items = []
@@ -327,15 +329,18 @@ def _existing_attributes(product: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(description, dict):
         return []
     attrs = description.get("attributes")
-    return [item for item in attrs if isinstance(item, dict)] if isinstance(attrs, list) else []
+    return (
+        [item for item in attrs if isinstance(item, dict)]
+        if isinstance(attrs, list)
+        else []
+    )
 
 
 def _existing_attribute_names(product: dict[str, Any]) -> set[str]:
     return {
         name.casefold()
         for item in _existing_attributes(product)
-        if (name := _clean_text(item.get("name")))
-        and _attribute_has_value(item)
+        if (name := _clean_text(item.get("name"))) and _attribute_has_value(item)
     }
 
 
@@ -403,7 +408,9 @@ def _new_attribute_rows(
             continue
         if allowed_names and name.casefold() not in allowed_names:
             continue
-        cleaned_values = [value for value in (_clean_text(item) for item in values) if value]
+        cleaned_values = [
+            value for value in (_clean_text(item) for item in values) if value
+        ]
         unique_values: list[str] = []
         for value in cleaned_values:
             key = (name.casefold(), value.casefold())
@@ -533,7 +540,9 @@ async def _fetch_all_pages(
     total: int | None = None
     page = 0
     while True:
-        logger.info("step=attribute_fill_fetch_page_start label=%s page=%s", label, page)
+        logger.info(
+            "step=attribute_fill_fetch_page_start label=%s page=%s", label, page
+        )
         for attempt in range(OTTO_RATE_LIMIT_RETRIES + 1):
             try:
                 payload = await fetch_page({"page": page, "limit": page_size})
@@ -713,7 +722,9 @@ async def _prepare_attribute_fill_tables(
             continue
         counts["status_checked_products"] += 1
         active_status = active_by_sku.get(sku, product.get("activeStatus"))
-        marketplace_status = marketplace_by_sku.get(sku, product.get("marketplaceStatus"))
+        marketplace_status = marketplace_by_sku.get(
+            sku, product.get("marketplaceStatus")
+        )
         is_active = (
             _status_key(active_status) in ACTIVE_ACTIVE_STATUSES
             and _status_key(marketplace_status) in ACTIVE_MARKETPLACE_STATUSES
@@ -782,11 +793,15 @@ async def _prepare_attribute_fill_tables(
             delete(AttributeFillItem).where(AttributeFillItem.process_id == process_id)
         )
         await session.execute(
-            delete(AttributeFillChunk).where(AttributeFillChunk.process_id == process_id)
+            delete(AttributeFillChunk).where(
+                AttributeFillChunk.process_id == process_id
+            )
         )
         await session.flush()
         for start in range(0, len(item_rows), 1000):
-            await session.execute(insert(AttributeFillItem), item_rows[start : start + 1000])
+            await session.execute(
+                insert(AttributeFillItem), item_rows[start : start + 1000]
+            )
         if chunks:
             await session.execute(
                 insert(AttributeFillChunk),
@@ -838,7 +853,9 @@ def _active_products(
             continue
         counts["status_checked_products"] += 1
         active_status = active_by_sku.get(sku, product.get("activeStatus"))
-        marketplace_status = marketplace_by_sku.get(sku, product.get("marketplaceStatus"))
+        marketplace_status = marketplace_by_sku.get(
+            sku, product.get("marketplaceStatus")
+        )
         is_active = (
             _status_key(active_status) in ACTIVE_ACTIVE_STATUSES
             and _status_key(marketplace_status) in ACTIVE_MARKETPLACE_STATUSES
@@ -1220,7 +1237,9 @@ async def run_attribute_fill_task(
 ) -> dict[str, Any]:
     """Coordinate OTTO fetching, active filtering, chunk persistence, and fan-out."""
 
-    options = AttributeFillOptions(controller=_clean_text(controller) or DEFAULT_CONTROLLER)
+    options = AttributeFillOptions(
+        controller=_clean_text(controller) or DEFAULT_CONTROLLER
+    )
     task = await ATTRIBUTE_FILL_TASK_SERVICE.get_task(process_id)
     if task is None:
         task = await create_attribute_fill_task_state(
@@ -1463,17 +1482,21 @@ async def run_attribute_fill_chunk_task(
             raise ValueError(f"Attribute fill chunk not found: {process_id}/{chunk_id}")
         slot = int(ai_key_slot if ai_key_slot is not None else chunk.ai_key_slot)
         item_rows = (
-            await session.execute(
-                select(AttributeFillItem)
-                .where(
-                    AttributeFillItem.process_id == process_id,
-                    AttributeFillItem.chunk_id == chunk_id,
-                    AttributeFillItem.is_active.is_(True),
-                    AttributeFillItem.status.in_(("queued", "running")),
+            (
+                await session.execute(
+                    select(AttributeFillItem)
+                    .where(
+                        AttributeFillItem.process_id == process_id,
+                        AttributeFillItem.chunk_id == chunk_id,
+                        AttributeFillItem.is_active.is_(True),
+                        AttributeFillItem.status.in_(("queued", "running")),
+                    )
+                    .order_by(AttributeFillItem.id.asc())
                 )
-                .order_by(AttributeFillItem.id.asc())
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
     products = [dict(item.raw_product or {}) for item in item_rows]
     item_ids = [item.id for item in item_rows]
@@ -1635,7 +1658,9 @@ async def run_attribute_fill_chunk_task(
     chunk_failed_count = 0
     chunk_generated_attributes = 0
 
-    for local_index, (item_id, product) in enumerate(zip(item_ids, products, strict=True), start=1):
+    for local_index, (item_id, product) in enumerate(
+        zip(item_ids, products, strict=True), start=1
+    ):
         sku = _sku_from_item(product)
         try:
             logger.info(
@@ -1699,9 +1724,9 @@ async def run_attribute_fill_chunk_task(
                     status=db_status,
                     result_summary=product_summary,
                     attributes_added=int(attributes_added or 0),
-                    error_message=product_summary.get("reason")
-                    if db_status == "failed"
-                    else None,
+                    error_message=(
+                        product_summary.get("reason") if db_status == "failed" else None
+                    ),
                     finished_at=datetime.now(UTC),
                 )
             )
@@ -1721,10 +1746,9 @@ async def run_attribute_fill_chunk_task(
                 task_state["updated_products"] = (
                     int(task_state.get("updated_products") or 0) + 1
                 )
-                task_state["generated_attributes"] = (
-                    int(task_state.get("generated_attributes") or 0)
-                    + int(attributes_added or 0)
-                )
+                task_state["generated_attributes"] = int(
+                    task_state.get("generated_attributes") or 0
+                ) + int(attributes_added or 0)
             else:
                 task_state["skipped_products"] = (
                     int(task_state.get("skipped_products") or 0) + 1
@@ -1736,7 +1760,9 @@ async def run_attribute_fill_chunk_task(
             )
             task_state["updated_at"] = progress_at
             task_state["heartbeat_at"] = progress_at
-            _append_task_item(task_state, "completed_products", product_summary, limit=200)
+            _append_task_item(
+                task_state, "completed_products", product_summary, limit=200
+            )
 
         await _mutate_task_state(
             process_id,

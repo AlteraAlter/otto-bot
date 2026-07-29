@@ -8,7 +8,6 @@ Create Date: 2026-07-08 11:00:00.000000
 from alembic import op
 import sqlalchemy as sa
 
-
 revision = "20260708110000"
 down_revision = "d1f4c806768b"
 branch_labels = None
@@ -16,7 +15,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("attributes", sa.Column("attribute_group", sa.String(), nullable=True))
+    op.add_column(
+        "attributes", sa.Column("attribute_group", sa.String(), nullable=True)
+    )
     op.add_column(
         "attributes",
         sa.Column(

@@ -326,9 +326,7 @@ def _extract_stammartikel_details_html(raw_description: Any) -> str | None:
         return None
 
     normalized_text = (
-        text.replace("\\&quot;", '"')
-        .replace('\\"', '"')
-        .replace("&quot;", '"')
+        text.replace("\\&quot;", '"').replace('\\"', '"').replace("&quot;", '"')
     )
 
     if BeautifulSoup is not None:

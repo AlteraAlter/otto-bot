@@ -61,9 +61,13 @@ async def prepare_factory_products_task(
             afterbuy=get_afterbuy_login(),
             product_service=get_product_service(),
         )
-        logger.info("PIPELINE event=arq_prepare_task_finished process_id=%s", process_id)
+        logger.info(
+            "PIPELINE event=arq_prepare_task_finished process_id=%s", process_id
+        )
     except Exception:
-        logger.exception("PIPELINE event=arq_prepare_task_crashed process_id=%s", process_id)
+        logger.exception(
+            "PIPELINE event=arq_prepare_task_crashed process_id=%s", process_id
+        )
         raise
 
 

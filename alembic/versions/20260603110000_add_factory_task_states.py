@@ -41,7 +41,9 @@ def upgrade() -> None:
             server_default=sa.func.now(),
         ),
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
-        sa.ForeignKeyConstraint(["created_by_user_id"], ["users.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(
+            ["created_by_user_id"], ["users.id"], ondelete="SET NULL"
+        ),
         sa.PrimaryKeyConstraint("process_id"),
     )
     op.create_index(

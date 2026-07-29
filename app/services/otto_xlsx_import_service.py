@@ -978,9 +978,9 @@ async def rebuild_name_mappings_by_name(
         targets.append(target)
         target_index = len(targets) - 1
         exact_by_name[normalized_name].append(target)
-        exact_by_category_name[
-            (target["product_category"], normalized_name)
-        ].append(target)
+        exact_by_category_name[(target["product_category"], normalized_name)].append(
+            target
+        )
         for token in tokens:
             token_index[token].append(target_index)
 
@@ -1325,11 +1325,7 @@ async def import_otto_xlsx_rows_to_products(
 
     for start in range(0, len(rows), safe_batch_size):
         chunk = rows[start : start + safe_batch_size]
-        eans = {
-            ean
-            for row in chunk
-            if (ean := clean_xlsx_text(row.ean))
-        }
+        eans = {ean for row in chunk if (ean := clean_xlsx_text(row.ean))}
         media_by_ean: dict[str, list[str]] = {}
         if eans:
             cached_rows = (
@@ -1340,11 +1336,7 @@ async def import_otto_xlsx_rows_to_products(
                     ).where(ProductImageCache.ean.in_(eans))
                 )
             ).all()
-            media_by_ean = {
-                ean: links
-                for ean, links in cached_rows
-                if ean and links
-            }
+            media_by_ean = {ean: links for ean, links in cached_rows if ean and links}
 
         payloads: list[dict[str, Any]] = []
         for row in chunk:
@@ -1370,8 +1362,7 @@ async def import_otto_xlsx_rows_to_products(
 
         insert_stmt = insert(table).values(payloads)
         update_values = {
-            column: getattr(insert_stmt.excluded, column)
-            for column in update_columns
+            column: getattr(insert_stmt.excluded, column) for column in update_columns
         }
         update_values["media_asset_links"] = func.coalesce(
             insert_stmt.excluded.media_asset_links,

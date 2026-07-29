@@ -12,7 +12,7 @@ from app.schemas.external_schemes.until_schemes import (
     ActiveStatusByEanResponse,
     CreateOrUpdateProductVariationRequest,
     GetProductRequest,
-    ShippingProfileResponse
+    ShippingProfileResponse,
 )
 from app.schemas.product_response import (
     AttributeSchema,
@@ -27,15 +27,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-
-EXTERNAL_PRODUCT_BRAND_ID_BY_CONTROLLER: dict[Controller, str] = {
-    Controller.JV: "UO4EGHSX",
-    Controller.XL: "6HMOZBOU",
+EXTERNAL_PRODUCT_BRAND_ID_BY_CONTROLLER: dict[str, str] = {
+    "jv": "UO4EGHSX",
+    "xl": "6HMOZBOU",
 }
 
 
-EXTERNAL_PRODUCT_COMPLIANCE_BY_CONTROLLER: dict[Controller, dict[str, Any]] = {
-    Controller.JV: {
+EXTERNAL_PRODUCT_COMPLIANCE_BY_CONTROLLER: dict[str, dict[str, Any]] = {
+    "jv": {
         "productSafety": {
             "addresses": [
                 {
@@ -51,7 +50,7 @@ EXTERNAL_PRODUCT_COMPLIANCE_BY_CONTROLLER: dict[Controller, dict[str, Any]] = {
             ]
         }
     },
-    Controller.XL: {
+    "xl": {
         "productSafety": {
             "addresses": [
                 {
@@ -83,49 +82,28 @@ def _process_uvp(price: float) -> float:
 
 
 class ExternalService:
-    
+
     def __init__(self, client: ExternalOttoClient):
         self.client = client
-        
-        
+
     async def get_products(self, payload: GetProductRequest, controller: str):
         data = await self.client.get_products(payload, controller)
         return data
-    
-    
+
     async def create_or_update_product(
-        self,
-        payload: CreateOrUpdateProductVariationRequest,
-        controller: str
+        self, payload: CreateOrUpdateProductVariationRequest, controller: str
     ):
         prepared_payload = self._prepare_create_or_update_payload(payload, controller)
         data = await self.client.create_or_update_product(prepared_payload, controller)
         return data
-
-    @staticmethod
-    def _controller_enum(controller: Any) -> Controller:
-        value = str(getattr(controller, "value", controller) or "jv").strip().lower()
-        try:
-            return Controller(value)
-        except ValueError:
-            return Controller.JV
 
     def _prepare_create_or_update_payload(
         self,
         payload: CreateOrUpdateProductVariationRequest,
         controller: str,
     ) -> list[dict[str, Any]]:
-        controller_enum = self._controller_enum(controller)
-        brand_id = EXTERNAL_PRODUCT_BRAND_ID_BY_CONTROLLER.get(
-            controller_enum,
-            EXTERNAL_PRODUCT_BRAND_ID_BY_CONTROLLER[Controller.JV],
-        )
-        compliance_payload = deepcopy(
-            EXTERNAL_PRODUCT_COMPLIANCE_BY_CONTROLLER.get(
-                controller_enum,
-                EXTERNAL_PRODUCT_COMPLIANCE_BY_CONTROLLER[Controller.JV],
-            )
-        )
+        brand_id = EXTERNAL_PRODUCT_BRAND_ID_BY_CONTROLLER[controller]
+        compliance_payload = EXTERNAL_PRODUCT_COMPLIANCE_BY_CONTROLLER[controller]
 
         products = payload.model_dump(
             mode="json",
@@ -203,18 +181,17 @@ class ExternalService:
             ),
             response=response,
         )
-    
-    
+
     async def get_shipping_profiles(
         self,
         controller: str,
         # repository: ExternalApiRepository
     ):
-        
+
         # NOTE: Сдесь получает с самого ОТТО
         data = await self.client.get_shipping_profiles(controller)
         shipping_profiles = ShippingProfileResponse.model_validate(data["results"])
-        
+
         # NOTE: Сдесь запрос для записи в базу
         # await repository.create_shipping_profile(shipping_profiles)
 
@@ -245,7 +222,6 @@ class ExternalService:
                     ) or self._stable_int_id("category", normalized)
                     categories.append(
                         ExternalCategoryItem(
-                            id=category_id,
                             categoryId=category_id,
                             name=normalized,
                         )
@@ -348,7 +324,6 @@ class ExternalService:
         return ExternalCategoriesResponse(
             categories=[
                 ExternalCategoryItem(
-                    id=item.id,
                     categoryId=item.id,
                     name=item.name,
                 )
@@ -382,7 +357,6 @@ class ExternalService:
 
         attributes = [
             AttributeSchema(
-                id=attr.id,
                 attributeId=attr.id,
                 attributeKey=str(attr.id),
                 name=attr.name,
@@ -463,4 +437,3 @@ class ExternalService:
             variations[0].get("sku") or variations[0].get("SKU") or ""
         ).strip()
         return first_sku or None
-        

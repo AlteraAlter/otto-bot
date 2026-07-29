@@ -3,7 +3,7 @@ from app.schemas.external_schemes.until_schemes import (
     ActiveStatusByEanResponse,
     CreateOrUpdateProductVariationRequest,
     GetProductRequest,
-    ShippingProfileResponse
+    ShippingProfileResponse,
 )
 from app.schemas.product_query import CategoryQuery
 from app.schemas.product_response import (
@@ -69,7 +69,7 @@ async def create_or_update_product(
     payload: Annotated[CreateOrUpdateProductVariationRequest, Body()],
     controller: Annotated[str, Query()] = "jv",
     service: ExternalService = Depends(get_external_api_service),
-    repository: ExternalApiRepository = Depends(get_external_repository)
+    repository: ExternalApiRepository = Depends(get_external_repository),
 ):
     data = await service.create_or_update_product(payload, controller)
     return data
@@ -94,7 +94,7 @@ async def deactivate_product_by_ean(
 @router.get("/shipping_profiles", response_model=ShippingProfileResponse)
 async def get_shipping_profiles(
     controller: Annotated[str, Query()] = "jv",
-    service: ExternalService = Depends(get_external_api_service)
+    service: ExternalService = Depends(get_external_api_service),
 ):
     data = await service.get_shipping_profiles(controller)
     return data

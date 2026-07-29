@@ -68,12 +68,11 @@ class ExternalOttoClient:
             )
 
         return response.status_code, self._parse_response(response)
-    
-    
+
     async def create_or_update_product(
         self,
         payload: CreateOrUpdateProductVariationRequest | list[dict[str, Any]],
-        controller: str
+        controller: str,
     ):
         header = await self._header(controller)
         json_payload = (
@@ -81,32 +80,22 @@ class ExternalOttoClient:
             if isinstance(payload, CreateOrUpdateProductVariationRequest)
             else payload
         )
-        
+
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{self.base_url}/v5/products",
-                headers=header,
-                json=json_payload
+                f"{self.base_url}/v5/products", headers=header, json=json_payload
             )
-            
+
         response.raise_for_status()
         return response.json()
-    
-    
-    async def create_avalability(
-        self,
-        payload,
-        controller
-    ):
-        ...
-        
-    
+
+    async def create_avalability(self, payload, controller): ...
+
     async def get_shipping_profiles(self, controller: str):
         header = await self._header(controller)
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                f"{self.base_url}/v1/shipping-profiles",
-                headers=header
+                f"{self.base_url}/v1/shipping-profiles", headers=header
             )
         response.raise_for_status()
         return response.json()

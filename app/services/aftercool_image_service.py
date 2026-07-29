@@ -17,7 +17,10 @@ from app.models.otto_xlsx_import import OttoXlsxImportRow
 from app.models.product_image_cache import ProductImageCache
 import app.models.product_variants  # noqa: F401
 from app.models.products import Product
-from app.services.otto_xlsx_import_service import clean_xlsx_text, valid_import_row_filters
+from app.services.otto_xlsx_import_service import (
+    clean_xlsx_text,
+    valid_import_row_filters,
+)
 
 
 def _deduplicate_links(values: Iterable[Any]) -> list[str]:
@@ -32,7 +35,9 @@ def _deduplicate_links(values: Iterable[Any]) -> list[str]:
     return links
 
 
-def extract_aftercool_image_links(payload: Any) -> tuple[str | None, list[str], list[str]]:
+def extract_aftercool_image_links(
+    payload: Any,
+) -> tuple[str | None, list[str], list[str]]:
     """Return gallery URL, picture URLs, and all image links from Aftercool payload."""
     if not isinstance(payload, dict):
         return None, [], []
@@ -56,7 +61,9 @@ def image_cache_payload(
     error_message: str | None = None,
 ) -> dict[str, Any]:
     payload = payload or {}
-    gallery_url, picture_urls, media_asset_links = extract_aftercool_image_links(payload)
+    gallery_url, picture_urls, media_asset_links = extract_aftercool_image_links(
+        payload
+    )
     return {
         "ean": ean,
         "product_id": clean_xlsx_text(payload.get("product_id")),

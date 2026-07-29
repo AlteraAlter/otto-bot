@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from redis import asyncio as redis_asyncio
+
 try:
     from motor.motor_asyncio import AsyncIOMotorClient
 except ImportError:  # pragma: no cover - optional dependency fallback
@@ -42,9 +43,7 @@ class FactoryTaskStateService:
         try:
             self._mongo_client = AsyncIOMotorClient(settings.mongodb_url)
             database = self._mongo_client[settings.mongodb_database]
-            self._mongo_collection = database[
-                settings.mongodb_factory_tasks_collection
-            ]
+            self._mongo_collection = database[settings.mongodb_factory_tasks_collection]
             await self._mongo_collection.create_index("process_id", unique=True)
             await self._mongo_collection.create_index("created_by_user_id")
             await self._mongo_collection.create_index("controller")
@@ -203,15 +202,13 @@ class FactoryTaskStateService:
                                 str(factory_id) if factory_id is not None else None
                             ),
                             "status": status,
-                            "current_step": str(current_step)
-                            if current_step
-                            else None,
+                            "current_step": str(current_step) if current_step else None,
                             "task_payload": normalized,
                             "error_message": error_message,
                             "updated_at": now,
-                            "finished_at": now
-                            if status in {"DONE", "FAILED"}
-                            else None,
+                            "finished_at": (
+                                now if status in {"DONE", "FAILED"} else None
+                            ),
                         },
                         "$setOnInsert": {"created_at": now},
                     },

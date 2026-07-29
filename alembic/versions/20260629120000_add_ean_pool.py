@@ -11,7 +11,6 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-
 revision: str = "20260629120000"
 down_revision: Union[str, Sequence[str], None] = "f6b6e9ddec37"
 branch_labels: Union[str, Sequence[str], None] = None
@@ -23,11 +22,15 @@ def upgrade() -> None:
         "ean_pool",
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("ean", sa.String(length=32), nullable=False),
-        sa.Column("status", sa.String(length=20), server_default="available", nullable=False),
+        sa.Column(
+            "status", sa.String(length=20), server_default="available", nullable=False
+        ),
         sa.Column("source", sa.String(length=40), nullable=True),
         sa.Column("reserved_for", sa.String(length=255), nullable=True),
         sa.Column("used_for", sa.String(length=255), nullable=True),
-        sa.Column("metadata_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column(
+            "metadata_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True
+        ),
         sa.Column("note", sa.Text(), nullable=True),
         sa.Column("created_by_user_id", sa.Integer(), nullable=True),
         sa.Column(
@@ -48,7 +51,9 @@ def upgrade() -> None:
             "status IN ('available', 'reserved', 'used', 'disabled')",
             name="ck_ean_pool_status",
         ),
-        sa.ForeignKeyConstraint(["created_by_user_id"], ["users.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(
+            ["created_by_user_id"], ["users.id"], ondelete="SET NULL"
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("ean", name="uq_ean_pool_ean"),
     )

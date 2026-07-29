@@ -42,9 +42,11 @@ async def test_get_external_category_attributes_success(client: AsyncClient):
     )
     assert categories_response.status_code == 200
 
-    category_id = ExternalCategoriesResponse.model_validate(
-        categories_response.json()
-    ).categories[0].categoryId
+    category_id = (
+        ExternalCategoriesResponse.model_validate(categories_response.json())
+        .categories[0]
+        .categoryId
+    )
     assert category_id is not None
 
     response = await client.get(

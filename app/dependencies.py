@@ -52,13 +52,11 @@ def get_otto_client() -> OttoClient:
         timeout=settings.otto_timeout_seconds,
     )
 
+
 @lru_cache
 def get_external_otto_client() -> ExternalOttoClient:
-    
-    return ExternalOttoClient(
-        auth = get_otto_auth(),
-        base_url=settings.otto_base_url
-    )
+
+    return ExternalOttoClient(auth=get_otto_auth(), base_url=settings.otto_base_url)
 
 
 @lru_cache
@@ -66,13 +64,16 @@ def get_product_service() -> ProductService:
     """Create a cached product service wrapper."""
     return ProductService(client=get_otto_client())
 
+
 @lru_cache
 def get_external_api_service() -> ExternalService:
-    
+
     return ExternalService(client=get_external_otto_client())
 
 
-async def get_external_repository(session: AsyncSession = Depends(get_db)) -> ExternalApiRepository:
+async def get_external_repository(
+    session: AsyncSession = Depends(get_db),
+) -> ExternalApiRepository:
     return ExternalApiRepository(session)
 
 
