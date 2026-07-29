@@ -93,8 +93,11 @@ export default function Home() {
       title="Управление товарами"
       description="Минималистичный обзор базы товаров с правильными полями из импортированной таблицы."
     >
-      <section className="workspace-summary-strip" aria-label="Ключевые показатели каталога">
-        <div className="hero-stats">
+      <section
+        className="catalog-overview catalog-overview--stats-only"
+        aria-label="Ключевые показатели каталога"
+      >
+        <div className="catalog-overview__stats hero-stats">
           {heroStats.map((item) => (
             <div className={`hero-stat ${item.tone}`} key={item.label}>
               <span>{item.label}</span>
@@ -123,16 +126,21 @@ export default function Home() {
           products={dashboard.products}
           query={dashboard.query}
           selectedId={dashboard.selectedId}
+          selectedProductIds={dashboard.selectedProductIds}
           sortBy={dashboard.sortBy}
           sortOrder={dashboard.sortOrder}
           tablePage={dashboard.tablePage}
           totalTablePages={dashboard.totalTablePages}
+          onBulkPriceUpdate={dashboard.updateProductPrices}
           onCategoryFilterChange={dashboard.setCategoryFilter}
+          onClearProductSelection={dashboard.clearProductSelection}
           onOpenProduct={dashboard.openProduct}
           onPageChange={dashboard.setTablePage}
           onQueryChange={dashboard.setQuery}
           onSortByChange={dashboard.setSortBy}
           onSortOrderChange={dashboard.setSortOrder}
+          onTogglePageSelection={dashboard.togglePageSelection}
+          onToggleProductSelection={dashboard.toggleProductSelection}
         />
 
         {isPanelRendered ? (
@@ -141,6 +149,7 @@ export default function Home() {
             isDetailOpen={isPanelRendered}
             selectedProduct={renderedProduct}
             onClose={handleClosePanel}
+            onUpdatePrices={dashboard.updateProductPrices}
           />
         ) : null}
       </section>

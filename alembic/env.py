@@ -14,7 +14,9 @@ import app.models.ean_pool
 import app.models.factories
 import app.models.factory_task_states
 import app.models.jv_lister
+import app.models.otto_xlsx_import
 import app.models.product_attributes
+import app.models.product_image_cache
 import app.models.product_import_tasks
 import app.models.product_variants
 import app.models.products

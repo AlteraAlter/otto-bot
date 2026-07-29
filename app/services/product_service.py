@@ -138,6 +138,26 @@ class ProductService:
         """Update active flags/status for one or more products in OTTO."""
         return await self.client.update_status(payload, controller=controller)
 
+    async def update_status_with_status(
+        self,
+        payload: dict,
+        controller: Controller = Controller.JV,
+    ):
+        """Update active flags/status and return the upstream status code."""
+        return await self.client.update_status_with_status(
+            payload, controller=controller
+        )
+
+    async def update_prices_with_status(
+        self,
+        payload: list[dict],
+        controller: Controller = Controller.JV,
+    ):
+        """Update product prices in OTTO and return the upstream status code."""
+        return await self.client.update_prices_with_status(
+            payload, controller=controller
+        )
+
     async def get_categories(
         self,
         payload: dict,
@@ -152,6 +172,14 @@ class ProductService:
     ):
         """Upload or create quantity for sku(product)"""
         return await self.client.update_quantity(payload, controller=controller)
+
+    async def update_quantity_with_status(
+        self, payload: Optional[dict | list], controller: Controller = Controller.JV
+    ):
+        """Upload quantity and return the upstream status code."""
+        return await self.client.update_quantity_with_status(
+            payload, controller=controller
+        )
 
     async def update_product_delivery_information(
         self, payload: dict, controller: Controller = Controller.JV

@@ -129,6 +129,14 @@ class AfterbuyService:
             session, controller, factory_id, limit=limit
         )
 
+    async def get_images_by_ean(self, ean: str) -> dict[str, Any]:
+        """Fetch Aftercool image metadata for one EAN."""
+        session = await self.client.login(
+            username=self.auth.username,
+            password=self.auth.password,
+        )
+        return await self.client.get_images_by_ean(session=session, ean=ean)
+
     async def enrich_items_with_stammartikel_description(
         self,
         *,

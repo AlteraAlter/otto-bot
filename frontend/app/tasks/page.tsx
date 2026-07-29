@@ -7,9 +7,6 @@ import { readApiErrorMessage, readJsonResponse } from "../lib/api";
 import { useCurrentUser } from "../hooks/use-current-user";
 import { AppWorkspaceShell } from "../ui/app-workspace-shell";
 import { PageLoadingShell } from "../ui/page-loading-shell";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 
 type DeactivateItemResult = {
   ean: string;
@@ -51,6 +48,13 @@ export default function TasksPage() {
   const eans = useMemo(() => parseEans(deactivateInput), [deactivateInput]);
   const failedCount = results.filter((item) => !item.success).length;
   const successCount = results.length - failedCount;
+  const isErrorMessage =
+    message.startsWith("Ошибка") ||
+    message.startsWith("Не удалось") ||
+    message.startsWith("Добавьте") ||
+    message.startsWith("Готово с ошибками");
+  const statusTone =
+    isErrorMessage ? "error" : results.length > 0 && failedCount === 0 ? "success" : "processing";
 
   async function submitDeactivate() {
     if (eans.length === 0) {
@@ -69,13 +73,24 @@ export default function TasksPage() {
         cache: "no-store",
       });
       const payload = await readJsonResponse<DeactivateResponse>(response);
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      const failed = Number(
+        payload?.failed ?? items.filter((item) => !item.success).length,
+      );
+      setResults(items);
       if (!response.ok || payload?.success === false) {
-        setMessage(readApiErrorMessage(payload, "Не удалось деактивировать товары", response.status));
+        const apiMessage = readApiErrorMessage(
+          payload,
+          "Не удалось деактивировать товары",
+          response.status,
+        );
+        setMessage(
+          items.length > 0
+            ? `Готово с ошибками: ${failed} из ${items.length} не обработано.`
+            : apiMessage,
+        );
         return;
       }
-      const items = Array.isArray(payload?.items) ? payload.items : [];
-      const failed = Number(payload?.failed ?? 0);
-      setResults(items);
       setMessage(
         failed > 0
           ? `Готово с ошибками: ${failed} из ${items.length} не обработано.`
@@ -105,91 +120,132 @@ export default function TasksPage() {
       sectionLabel="Удаление"
       title="Удаление товаров"
       description="Деактивация товаров по EAN без истории задач."
+      hidePageHead
     >
-      <div className="deactivate-workspace">
+      <div className="delete-page">
+        <header className="page-header">
+          <div>
+            <span className="page-header__eyebrow">Удаление</span>
+            <h1>Удаление товаров</h1>
+            <p>Деактивация товаров по EAN без истории задач.</p>
+          </div>
+        </header>
+
         {error ? <p className="helper-banner">{error}</p> : null}
 
-        <Card className="deactivate-panel">
-          <div className="deactivate-panel-head">
-            <div>
-              <span className="deactivate-kicker">OTTO</span>
-              <h2>Удалить по EAN</h2>
+        <div className="delete-page__content">
+          <section className="delete-card">
+            <header className="delete-card__header">
+              <div>
+                <span className="delete-card__marketplace">OTTO</span>
+                <h2>Удалить по EAN</h2>
+              </div>
+              <span className="delete-card__count">
+                {`${eans.length} EAN${eans.length === 1 ? "" : "s"}`}
+              </span>
+            </header>
+
+            <div className="delete-form-grid">
+              <label className="form-field">
+                <span className="form-field__label">Контроллер</span>
+                <select
+                  className="controller-select"
+                  value={controller}
+                  onChange={(event) => setController(event.target.value as "jv" | "xl")}
+                  disabled={isSubmitting}
+                >
+                  <option value="jv">JV</option>
+                  <option value="xl">XL</option>
+                </select>
+              </label>
+
+              <label className="form-field">
+                <span className="form-field__label">Список EAN</span>
+                <textarea
+                  className="ean-textarea"
+                  rows={4}
+                  value={deactivateInput}
+                  onChange={(event) => setDeactivateInput(event.target.value)}
+                  placeholder={`3212215141\n13214514\n4069424980745`}
+                  disabled={isSubmitting}
+                />
+              </label>
             </div>
-            <Badge variant={eans.length > 0 ? "secondary" : "outline"}>
-              {`${eans.length} EAN${eans.length === 1 ? "" : "s"}`}
-            </Badge>
-          </div>
 
-          <div className="deactivate-grid">
-            <label className="deactivate-field">
-              Контроллер
-              <select value={controller} onChange={(event) => setController(event.target.value as "jv" | "xl")} disabled={isSubmitting}>
-                <option value="jv">JV</option>
-                <option value="xl">XL</option>
-              </select>
-            </label>
+            <div className="delete-status" data-status={statusTone}>
+              {isErrorMessage ? <CircleAlert size={16} /> : <CheckCircle2 size={16} />}
+              <span>{message}</span>
+            </div>
 
-            <label className="deactivate-field deactivate-eans">
-              Список EAN
-              <textarea
-                rows={12}
-                value={deactivateInput}
-                onChange={(event) => setDeactivateInput(event.target.value)}
-                placeholder={`3212215141\n13214514\n4069424980745`}
-                disabled={isSubmitting}
-              />
-            </label>
-          </div>
-
-          <div className={`deactivate-message ${message.startsWith("Ошибка") || message.startsWith("Не удалось") || message.startsWith("Добавьте") ? "is-error" : ""}`}>
-            {message.startsWith("Ошибка") || message.startsWith("Не удалось") || message.startsWith("Добавьте") ? <CircleAlert size={16} /> : <CheckCircle2 size={16} />}
-            <span>{message}</span>
-          </div>
-
-          <div className="deactivate-actions">
-            <Button type="button" variant="secondary" onClick={clearForm} disabled={isSubmitting || (!deactivateInput && results.length === 0)}>
-              <RotateCcw size={16} />
-              Очистить
-            </Button>
-            <Button type="button" onClick={() => void submitDeactivate()} disabled={isSubmitting || eans.length === 0}>
-              {isSubmitting ? <Loader2 className="spin" size={16} /> : <PowerOff size={16} />}
-              {isSubmitting ? "Удаляю" : "Удалить товары"}
-            </Button>
-          </div>
-        </Card>
+            <div className="delete-card__actions">
+              <button
+                className="delete-button delete-button--secondary"
+                type="button"
+                onClick={clearForm}
+                disabled={isSubmitting || (!deactivateInput && results.length === 0)}
+              >
+                <RotateCcw size={16} />
+                Очистить
+              </button>
+              <button
+                className="delete-button delete-button--danger"
+                type="button"
+                onClick={() => void submitDeactivate()}
+                disabled={isSubmitting || eans.length === 0}
+              >
+                {isSubmitting ? <Loader2 className="spin" size={16} /> : <PowerOff size={16} />}
+                {isSubmitting ? "Удаляю" : "Удалить товары"}
+              </button>
+            </div>
+          </section>
 
         {results.length > 0 ? (
-          <Card className="deactivate-results">
-            <div className="deactivate-results-head">
+          <section className="delete-results">
+            <header className="delete-results__header">
               <div>
                 <h2>Результат</h2>
                 <p>{`Успешно: ${successCount}, с ошибкой: ${failedCount}`}</p>
               </div>
-              <Badge variant={failedCount > 0 ? "outline" : "success"}>
+              <span
+                className={`delete-badge ${failedCount > 0 ? "delete-badge--error" : "delete-badge--success"}`}
+              >
                 {failedCount > 0 ? "Проверить" : "Готово"}
-              </Badge>
-            </div>
+              </span>
+            </header>
 
-            <div className="deactivate-result-list">
+            <div className="delete-results__list">
               {results.map((item) => (
-                <article className={`deactivate-result-row ${item.success ? "is-success" : "is-failed"}`} key={`${item.ean}-${item.sku}`}>
-                  <div className="deactivate-result-icon" aria-hidden="true">
+                <article
+                  className="result-row"
+                  data-status={item.success ? "success" : "error"}
+                  key={`${item.ean}-${item.sku}`}
+                >
+                  <div className="result-row__icon" aria-hidden="true">
                     {item.success ? <CheckCircle2 size={18} /> : <XCircle size={18} />}
                   </div>
-                  <div>
+                  <div className="result-row__identity">
                     <strong>{item.ean}</strong>
                     <span>{item.sku || "SKU не найден"}</span>
                   </div>
-                  <div className="deactivate-result-checks">
-                    <Badge variant={item.quantity_success ? "secondary" : "outline"}>Количество 0</Badge>
-                    <Badge variant={item.status_success ? "secondary" : "outline"}>Неактивен</Badge>
+                  <div className="result-row__badges">
+                    <span
+                      className={`delete-badge ${item.quantity_success ? "delete-badge--success" : "delete-badge--error"}`}
+                    >
+                      Количество 0
+                    </span>
+                    <span
+                      className={`delete-badge ${item.status_success ? "delete-badge--success" : "delete-badge--error"}`}
+                    >
+                      Неактивен
+                    </span>
                   </div>
-                  <p>{item.message}</p>
+                  <p className="result-row__message">{item.message}</p>
                 </article>
               ))}
             </div>
-          </Card>
+          </section>
         ) : null}
+        </div>
       </div>
     </AppWorkspaceShell>
   );

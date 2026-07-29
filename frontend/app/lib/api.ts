@@ -14,6 +14,15 @@ export function readApiErrorMessage(
     return payload.detail;
   }
 
+  if (
+    payload &&
+    typeof payload === "object" &&
+    "message" in payload &&
+    typeof payload.message === "string"
+  ) {
+    return payload.message;
+  }
+
   if (Array.isArray(payload)) {
     const firstMessage = payload.find(
       (item) =>

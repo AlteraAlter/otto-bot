@@ -58,6 +58,8 @@ class Relevance(str, Enum):
 
 
 class AttributeSchema(BaseModel):
+    attributeId: Optional[int] = None
+    attributeKey: Optional[str] = None
     name: str
     type: str
     attributeGroup: Optional[str] = None
@@ -81,3 +83,16 @@ class OttoCategoryResponse(BaseModel):
     categoryGroups: list[CategoryGroupSchema]
 
     model_config = ConfigDict(extra="ignore")
+
+
+class ExternalCategoryItem(BaseModel):
+    categoryId: Optional[int] = None
+    name: str
+
+
+class ExternalCategoriesResponse(BaseModel):
+    categories: list[ExternalCategoryItem]
+
+
+class ExternalCategoryAttributesResponse(BaseModel):
+    attributes: list[AttributeSchema]

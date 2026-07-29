@@ -48,6 +48,7 @@ from app.models.categories import Category
 from app.models.category_group import CategoryGroup
 from app.models.factories import Factories
 from app.models.factory_task_states import FactoryTaskState
+from app.models.otto_xlsx_import import OttoXlsxImportRow
 from app.models.product_import_tasks import ProductImportTask
 from app.models.products import Product
 from app.models.variation_theme import VariationTheme
@@ -93,6 +94,7 @@ from app.services.attribute_fill_service import (
 from app.services.afterbuy_service import AfterbuyService
 from app.services.ean_pool_service import EanPoolService, ean_pool_item_to_dict
 from app.services.factory_task_state_service import FactoryTaskStateService
+from app.services.otto_xlsx_import_service import map_eans_from_import_by_name
 from app.services.product_service import ProductService
 from app.services.product_variant_service import (
     ProductVariantService,
@@ -104,7 +106,10 @@ from app.services.product_variation_logic import (
     is_supported_variation_attribute,
     validate_variant_export_identifiers,
 )
-from app.services.translation_service import TranslationService, normalize_translation_text
+from app.services.translation_service import (
+    TranslationService,
+    normalize_translation_text,
+)
 from app.services.variant_image_service import generate_variant_image_from_snapshot
 
 router = APIRouter(
@@ -336,7 +341,9 @@ def _is_empty_stale_factory_failure(task: dict[str, Any]) -> bool:
     if _has_factory_task_products(task):
         return False
     current_step = str(task.get("current_step") or "")
-    return bool(task.get("stuck")) or current_step.startswith(("prepare_", "building_category_"))
+    return bool(task.get("stuck")) or current_step.startswith(
+        ("prepare_", "building_category_")
+    )
 
 
 async def _mark_factory_task_stale_if_needed(
@@ -757,8 +764,8 @@ def _attribute_payload(
     attr_key = _translation_lookup_key(attr.name)
     fallback = attribute_fallbacks.get(attr_key, {})
     name_ru = _clean_translation(attr.name_ru) or fallback.get("nameRu")
-    description_ru = (
-        _clean_translation(attr.description_ru) or fallback.get("descriptionRu")
+    description_ru = _clean_translation(attr.description_ru) or fallback.get(
+        "descriptionRu"
     )
     allowed_values = sorted(
         {item.value for item in attr.allowed_values if item.value},
@@ -769,9 +776,7 @@ def _attribute_payload(
             {
                 "value": item.value,
                 "valueRu": _clean_translation(item.value_ru)
-                or value_fallbacks.get(
-                    (attr_key, _translation_lookup_key(item.value))
-                ),
+                or value_fallbacks.get((attr_key, _translation_lookup_key(item.value))),
                 "displayValue": item.value,
             }
             for item in attr.allowed_values
@@ -886,7 +891,9 @@ async def _load_category_group_contexts() -> dict[str, dict[str, Any]]:
                     {
                         "name": category.name,
                         "nameRu": category.name_ru,
-                        "displayName": _display_with_ru(category.name, category.name_ru),
+                        "displayName": _display_with_ru(
+                            category.name, category.name_ru
+                        ),
                     }
                     for category in group.categories
                     if category.name
@@ -1479,6 +1486,56 @@ def _summarize_task_error(exc: Exception) -> str:
     return f"{compact[: MAX_TASK_ERROR_LENGTH - 1].rstrip()}…"
 
 
+def _truncate_text(value: str, max_length: int = MAX_TASK_ERROR_LENGTH) -> str:
+    compact = " ".join(value.strip().split())
+    if len(compact) <= max_length:
+        return compact
+    return f"{compact[: max_length - 1].rstrip()}…"
+
+
+def _summarize_otto_payload(payload: Any) -> str:
+    if payload is None:
+        return "empty response"
+    if isinstance(payload, dict):
+        for key in ("message", "detail", "error", "errors"):
+            value = payload.get(key)
+            if value:
+                return _truncate_text(json.dumps(value, ensure_ascii=False))
+    if isinstance(payload, list) and payload:
+        return _truncate_text(json.dumps(payload[0], ensure_ascii=False))
+    return _truncate_text(json.dumps(payload, ensure_ascii=False, default=str))
+
+
+def _summarize_external_error(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        body = response.text.strip()
+        if body:
+            return _truncate_text(
+                f"OTTO {response.status_code} {response.reason_phrase}: {body}"
+            )
+        return f"OTTO {response.status_code} {response.reason_phrase}"
+    return _summarize_task_error(exc)
+
+
+def _product_lookup_keys(product: Product) -> list[str]:
+    keys: list[str] = []
+    for value in (product.ean, product.sku, product.product_reference):
+        text = str(value or "").strip()
+        if text and text not in keys:
+            keys.append(text)
+    return keys
+
+
+def _import_row_lookup_keys(row: OttoXlsxImportRow) -> list[str]:
+    keys: list[str] = []
+    for value in (row.ean, row.sku, row.product_reference):
+        text = str(value or "").strip()
+        if text and text not in keys:
+            keys.append(text)
+    return keys
+
+
 def _task_to_dto(task: ProductImportTask) -> ProductImportTaskDTO:
     return ProductImportTaskDTO(
         id=task.id,
@@ -1992,6 +2049,32 @@ def _normalized_product_category_expression():
     return func.lower(func.trim(Product.product_category))
 
 
+def _read_optional_price(value: Any, field_name: str) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a number or null")
+    try:
+        parsed = float(str(value).replace(",", "."))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a number or null") from exc
+    if parsed < 0:
+        raise ValueError(f"{field_name} must be greater than or equal to 0")
+    return parsed
+
+
+def _process_uvp(price: float) -> float:
+    if price > 5000:
+        value = price * 1.10
+    elif 2500 <= price <= 4999:
+        value = price * 1.18
+    elif 1000 <= price <= 2499:
+        value = price * 1.25
+    else:
+        value = price * 1.35
+    return round(value, 2)
+
+
 @router.get("/db")
 async def get_db_products(
     db: AsyncSession = Depends(get_db),
@@ -2141,9 +2224,15 @@ async def get_db_category_group_categories(
         select(CategoryGroup)
         .options(
             selectinload(CategoryGroup.categories),
-            selectinload(CategoryGroup.attributes).selectinload(Attribute.allowed_values),
+            selectinload(CategoryGroup.attributes).selectinload(
+                Attribute.allowed_values
+            ),
         )
-        .where(func.lower(CategoryGroup.name).in_([item.casefold() for item in requested_groups]))
+        .where(
+            func.lower(CategoryGroup.name).in_(
+                [item.casefold() for item in requested_groups]
+            )
+        )
         .order_by(CategoryGroup.name.asc())
     )
     result = await db.execute(stmt)
@@ -2151,7 +2240,9 @@ async def get_db_category_group_categories(
     await product_service.ensure_category_translations(db, groups=groups)
 
     group_ids = [group.id for group in groups]
-    variation_attribute_ids_by_group: dict[int, set[int]] = {group.id: set() for group in groups}
+    variation_attribute_ids_by_group: dict[int, set[int]] = {
+        group.id: set() for group in groups
+    }
     if group_ids:
         variation_rows = (
             await db.execute(
@@ -2161,7 +2252,9 @@ async def get_db_category_group_categories(
             )
         ).all()
         for group_id, attribute_id in variation_rows:
-            variation_attribute_ids_by_group.setdefault(group_id, set()).add(attribute_id)
+            variation_attribute_ids_by_group.setdefault(group_id, set()).add(
+                attribute_id
+            )
 
     all_attributes = [attr for group in groups for attr in group.attributes]
     attribute_fallbacks, value_fallbacks = _collect_attribute_translation_fallbacks(
@@ -2174,7 +2267,9 @@ async def get_db_category_group_categories(
             [
                 {
                     "name": str(category.name).strip(),
-                    "nameRu": str(category.name_ru).strip() if category.name_ru else None,
+                    "nameRu": (
+                        str(category.name_ru).strip() if category.name_ru else None
+                    ),
                     "displayName": _display_with_ru(category.name, category.name_ru),
                 }
                 for category in group.categories
@@ -2209,7 +2304,9 @@ async def get_db_category_group_categories(
                             variation_attribute_ids_by_group.get(group.id, set()),
                         ),
                     )
-                    for attr in sorted(group.attributes, key=lambda item: item.name.casefold())
+                    for attr in sorted(
+                        group.attributes, key=lambda item: item.name.casefold()
+                    )
                     if attr.name
                     and (
                         include_low_relevance
@@ -2243,11 +2340,17 @@ async def get_db_category_attributes(
 
     stmt = (
         select(CategoryGroup)
-        .options(selectinload(CategoryGroup.attributes).selectinload(Attribute.allowed_values))
+        .options(
+            selectinload(CategoryGroup.attributes).selectinload(
+                Attribute.allowed_values
+            )
+        )
         .order_by(CategoryGroup.name.asc())
     )
     if normalized_category:
-        stmt = stmt.join(Category).where(func.lower(Category.name) == normalized_category.casefold())
+        stmt = stmt.join(Category).where(
+            func.lower(Category.name) == normalized_category.casefold()
+        )
     else:
         stmt = stmt.where(func.lower(CategoryGroup.name) == normalized_group.casefold())
 
@@ -2303,6 +2406,252 @@ async def get_db_category_attributes(
     }
 
 
+@router.patch("/db/prices")
+async def update_db_product_prices(
+    payload: dict[str, Any],
+    db: AsyncSession = Depends(get_db),
+    _current_user=Depends(require_role([RoleEnum.SEO])),
+    product_service: ProductService = Depends(get_product_service),
+):
+    """Update catalog price fields locally and push standardPrice to OTTO."""
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"message": "items must be a non-empty array"},
+        )
+    if len(raw_items) > 200:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"message": "Cannot update more than 200 products at once"},
+        )
+
+    controller_value = str(payload.get("controller") or "auto").strip().lower()
+    if controller_value not in {"auto", Controller.JV.value, Controller.XL.value}:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"message": f"Invalid controller: {controller_value}"},
+        )
+
+    ids: list[int] = []
+    skus: list[str] = []
+    normalized_items: list[dict[str, Any]] = []
+    price_fields = {
+        "price": "price",
+        "recommendedRetailPrice": "recommended_retail_price",
+        "salePrice": "sale_price",
+    }
+
+    try:
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                raise ValueError("Each item must be an object")
+
+            product_id = raw_item.get("id")
+            sku = str(raw_item.get("sku") or "").strip()
+            normalized: dict[str, Any] = {}
+            if product_id not in (None, ""):
+                try:
+                    normalized["id"] = int(product_id)
+                    ids.append(normalized["id"])
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("id must be an integer") from exc
+            elif sku:
+                normalized["sku"] = sku
+                skus.append(sku)
+            else:
+                raise ValueError("Each item must include id or sku")
+
+            updates: dict[str, float | None] = {}
+            for api_field, model_field in price_fields.items():
+                if api_field in raw_item:
+                    updates[model_field] = _read_optional_price(
+                        raw_item.get(api_field), api_field
+                    )
+            if updates.get("price") is not None:
+                updates["recommended_retail_price"] = _process_uvp(updates["price"])
+            if not updates:
+                raise ValueError(
+                    "Each item must include price, recommendedRetailPrice or salePrice"
+                )
+            normalized["updates"] = updates
+            normalized_items.append(normalized)
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"message": str(exc)},
+        )
+
+    stmt = select(Product).where(
+        or_(
+            Product.id.in_(ids or [-1]),
+            Product.sku.in_(skus or [""]),
+        )
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    products_by_id = {item.id: item for item in rows}
+    products_by_sku = {str(item.sku): item for item in rows if item.sku}
+
+    missing: list[str] = []
+    for normalized in normalized_items:
+        product = (
+            products_by_id.get(normalized["id"])
+            if "id" in normalized
+            else products_by_sku.get(normalized["sku"])
+        )
+        if product is None:
+            missing.append(str(normalized.get("id") or normalized.get("sku")))
+            continue
+
+    if missing:
+        await db.rollback()
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"message": f"Products not found: {', '.join(missing[:20])}"},
+        )
+
+    identifiers: set[str] = set()
+    for product in rows:
+        identifiers.update(_product_lookup_keys(product))
+
+    import_stmt = select(OttoXlsxImportRow).where(
+        or_(
+            OttoXlsxImportRow.ean.in_(identifiers or {""}),
+            OttoXlsxImportRow.sku.in_(identifiers or {""}),
+            OttoXlsxImportRow.product_reference.in_(identifiers or {""}),
+        )
+    )
+    if controller_value != "auto":
+        import_stmt = import_stmt.where(OttoXlsxImportRow.account == controller_value)
+    import_rows = (await db.execute(import_stmt)).scalars().all()
+
+    price_payloads_by_account: dict[str, list[dict[str, Any]]] = {}
+    import_rows_to_update: list[tuple[OttoXlsxImportRow, dict[str, float | None]]] = []
+    for normalized in normalized_items:
+        if "price" not in normalized["updates"]:
+            continue
+        price_value = normalized["updates"]["price"]
+        if price_value is None:
+            continue
+
+        product = (
+            products_by_id.get(normalized["id"])
+            if "id" in normalized
+            else products_by_sku.get(normalized["sku"])
+        )
+        if product is None:
+            continue
+
+        product_keys = set(_product_lookup_keys(product))
+        matching_rows = [
+            row
+            for row in import_rows
+            if product_keys.intersection(_import_row_lookup_keys(row))
+        ]
+        accounts = sorted({str(row.account).lower() for row in matching_rows})
+        if not accounts:
+            await db.rollback()
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={
+                    "message": (
+                        f"Не найден OTTO аккаунт для SKU {product.sku or product.id}. "
+                        "Выберите JV/XL или переимпортируйте XLSX."
+                    )
+                },
+            )
+        if controller_value == "auto" and len(accounts) > 1:
+            await db.rollback()
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={
+                    "message": (
+                        f"SKU {product.sku or product.id} найден в нескольких аккаунтах "
+                        f"({', '.join(account.upper() for account in accounts)}). Выберите JV или XL."
+                    )
+                },
+            )
+
+        account = accounts[0]
+        account_row = next(
+            row for row in matching_rows if str(row.account).lower() == account
+        )
+        otto_sku = str(account_row.sku or product.sku or "").strip()
+        if not otto_sku:
+            await db.rollback()
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"message": f"Не найден SKU для товара {product.id}"},
+            )
+        price_payloads_by_account.setdefault(account, []).append(
+            {
+                "sku": otto_sku,
+                "standardPrice": {
+                    "amount": price_value,
+                    "currency": "EUR",
+                },
+            }
+        )
+        import_rows_to_update.append((account_row, normalized["updates"]))
+
+    otto_results: list[dict[str, Any]] = []
+    for account, otto_payload in price_payloads_by_account.items():
+        otto_status, otto_response = await product_service.update_prices_with_status(
+            otto_payload,
+            controller=Controller(account),
+        )
+        if otto_status != status.HTTP_202_ACCEPTED:
+            await db.rollback()
+            return JSONResponse(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                content={
+                    "message": (
+                        f"OTTO {account.upper()} не принял цены "
+                        f"({otto_status}): {_summarize_otto_payload(otto_response)}"
+                    )
+                },
+            )
+        otto_results.append(
+            {
+                "controller": account,
+                "count": len(otto_payload),
+                "response": otto_response,
+            }
+        )
+
+    updated_products: list[Product] = []
+    now = datetime.utcnow()
+    for normalized in normalized_items:
+        product = (
+            products_by_id.get(normalized["id"])
+            if "id" in normalized
+            else products_by_sku.get(normalized["sku"])
+        )
+        if product is None:
+            continue
+        for field_name, value in normalized["updates"].items():
+            setattr(product, field_name, value)
+        product.last_changed_at = now
+        updated_products.append(product)
+
+    for import_row, updates in import_rows_to_update:
+        if "price" in updates:
+            import_row.price = updates["price"]
+        if "recommended_retail_price" in updates:
+            import_row.recommended_retail_price = updates["recommended_retail_price"]
+
+    await db.commit()
+    for product in updated_products:
+        await db.refresh(product)
+
+    return {
+        "success": True,
+        "updated": len(updated_products),
+        "otto": otto_results,
+        "items": [_product_to_dict(item) for item in updated_products],
+    }
+
+
 @router.post("/{product_id}/variants/preview")
 async def preview_product_variants(
     product_id: int,
@@ -2328,7 +2677,10 @@ async def generate_product_variants(
         for item in result.get("items", []):
             if not isinstance(item, dict):
                 continue
-            if item.get("source") == "source" or item.get("status") != "pending_generation":
+            if (
+                item.get("source") == "source"
+                or item.get("status") != "pending_generation"
+            ):
                 continue
             variant_id = item.get("id")
             if not isinstance(variant_id, int):
@@ -2419,7 +2771,9 @@ async def generate_product_variant_image(
 ):
     combination_payload = payload.get("combination")
     if not isinstance(combination_payload, list):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="combination is required")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="combination is required"
+        )
 
     combination: list[dict[str, str]] = []
     for item in combination_payload:
@@ -2429,9 +2783,14 @@ async def generate_product_variant_image(
         value = str(item.get("value")).strip()
         attribute_id = str(item.get("attributeId")).strip()
         if name and value:
-            combination.append({"attributeId": attribute_id, "name": name, "value": value})
+            combination.append(
+                {"attributeId": attribute_id, "name": name, "value": value}
+            )
     if not combination:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="combination has no usable values")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="combination has no usable values",
+        )
 
     try:
         result = await generate_variant_image_from_snapshot(
@@ -2580,9 +2939,11 @@ async def create_availability(
         payload.sku,
         payload.quantity,
         payload.shippingProfileID,
-        payload.controller.value
-        if isinstance(payload.controller, Controller)
-        else payload.controller,
+        (
+            payload.controller.value
+            if isinstance(payload.controller, Controller)
+            else payload.controller
+        ),
     )
     return await product_service.create_availability(payload)
 
@@ -2620,16 +2981,73 @@ async def deactivate_products_by_ean(
             content={"success": False, "message": "No valid EAN values provided"},
         )
 
-    stmt = select(Product).where(Product.ean.in_(eans))
+    import_stmt = select(OttoXlsxImportRow).where(
+        OttoXlsxImportRow.account == controller.value,
+        or_(
+            OttoXlsxImportRow.ean.in_(eans),
+            OttoXlsxImportRow.sku.in_(eans),
+            OttoXlsxImportRow.product_reference.in_(eans),
+        ),
+    )
+    import_rows = (await db.execute(import_stmt)).scalars().all()
+    import_rows_by_identifier: dict[str, OttoXlsxImportRow] = {}
+    product_identifiers = set(eans)
+    for row in import_rows:
+        for key in _import_row_lookup_keys(row):
+            product_identifiers.add(key)
+            import_rows_by_identifier.setdefault(key, row)
+
+    account_stmt = select(
+        OttoXlsxImportRow.account,
+        OttoXlsxImportRow.ean,
+        OttoXlsxImportRow.sku,
+        OttoXlsxImportRow.product_reference,
+    ).where(
+        or_(
+            OttoXlsxImportRow.ean.in_(eans),
+            OttoXlsxImportRow.sku.in_(eans),
+            OttoXlsxImportRow.product_reference.in_(eans),
+        )
+    )
+    accounts_by_identifier: dict[str, set[str]] = {}
+    for account, row_ean, row_sku, row_reference in (await db.execute(account_stmt)).all():
+        account_text = str(account or "").strip().lower()
+        if not account_text:
+            continue
+        for value in (row_ean, row_sku, row_reference):
+            key = str(value or "").strip()
+            if key:
+                accounts_by_identifier.setdefault(key, set()).add(account_text)
+
+    stmt = select(Product).where(
+        or_(
+            Product.ean.in_(product_identifiers),
+            Product.sku.in_(product_identifiers),
+            Product.product_reference.in_(product_identifiers),
+        )
+    )
     existing_rows = (await db.execute(stmt)).scalars().all()
-    products_by_ean = {str(item.ean): item for item in existing_rows if item.ean}
+    products_by_identifier: dict[str, Product] = {}
+    for product in existing_rows:
+        for key in _product_lookup_keys(product):
+            products_by_identifier.setdefault(key, product)
 
     semaphore = asyncio.Semaphore(PRODUCT_DEACTIVATE_CONCURRENCY)
     results: list[dict[str, Any] | None] = [None] * len(eans)
 
     async def _deactivate_one(index: int, ean: str) -> None:
-        product_row = products_by_ean.get(ean)
-        sku = str((product_row.sku if product_row and product_row.sku else ean)).strip()
+        import_row = import_rows_by_identifier.get(ean)
+        product_row = products_by_identifier.get(ean)
+        if import_row is not None:
+            for key in _import_row_lookup_keys(import_row):
+                product_row = product_row or products_by_identifier.get(key)
+        sku = str(
+            import_row.sku
+            if import_row is not None and import_row.sku
+            else product_row.sku
+            if product_row is not None and product_row.sku
+            else ""
+        ).strip()
         item_result = {
             "ean": ean,
             "sku": sku,
@@ -2638,27 +3056,71 @@ async def deactivate_products_by_ean(
             "success": False,
             "message": "",
         }
+        if import_row is None:
+            other_accounts = sorted(
+                account
+                for account in accounts_by_identifier.get(ean, set())
+                if account != controller.value
+            )
+            if other_accounts:
+                item_result["message"] = (
+                    f"Товар найден в {', '.join(account.upper() for account in other_accounts)}, "
+                    f"а выбран {controller.value.upper()}"
+                )
+                results[index] = item_result
+                return
+        if product_row is None or not sku:
+            item_result["message"] = "Не найден товар в локальной базе по EAN/SKU/reference"
+            results[index] = item_result
+            return
+
         try:
             async with semaphore:
-                quantity_response = await product_service.update_quantity(
-                    {"sku": sku, "quantity": "0"},
-                    controller=controller,
+                quantity_status, quantity_response = (
+                    await product_service.update_quantity_with_status(
+                        {"sku": sku, "quantity": 0},
+                        controller=controller,
+                    )
                 )
-                await product_service.update_status(
-                    {"status": [{"sku": sku, "active": False}]},
-                    controller=controller,
+                if quantity_status != status.HTTP_200_OK:
+                    raise RuntimeError(
+                        "quantity update failed "
+                        f"({quantity_status}): {_summarize_otto_payload(quantity_response)}"
+                    )
+                item_result["quantity_success"] = True
+
+                active_status_code, active_status_response = (
+                    await product_service.update_status_with_status(
+                        {"status": [{"sku": sku, "active": False}]},
+                        controller=controller,
+                    )
                 )
-            item_result["quantity_success"] = True
+                if active_status_code != status.HTTP_202_ACCEPTED:
+                    raise RuntimeError(
+                        "active-status update failed "
+                        f"({active_status_code}): {_summarize_otto_payload(active_status_response)}"
+                    )
             item_result["status_success"] = True
             item_result["success"] = True
-            item_result["message"] = "deactivated"
-            if product_row is not None:
-                product_row.active_status = "false"
-                product_row.marketplace_status = "INACTIVE"
-                product_row.error_message = None
-            _ = quantity_response
+            item_result["message"] = "Количество выставлено 0, деактивация отправлена в OTTO"
+            product_row.active_status = "Inaktiv"
+            product_row.marketplace_status = "Inaktiv"
+            product_row.error_message = None
+            if import_row is not None:
+                import_row.active_status = "Inaktiv"
+                import_row.marketplace_status = "Inaktiv"
+            _ = active_status_response
         except Exception as exc:
-            item_result["message"] = str(exc)
+            MAPPER_LOGGER.warning(
+                "step=deactivate_product_failed controller=%s input=%s sku=%s error=%s",
+                controller.value,
+                ean,
+                sku,
+                _summarize_external_error(exc),
+            )
+            item_result["message"] = _summarize_external_error(exc)
+            if product_row is not None:
+                product_row.error_message = item_result["message"]
         results[index] = item_result
 
     await asyncio.gather(
@@ -3457,7 +3919,9 @@ def _find_source_item_for_product(
         fallback = source_items[index]
         product_identities = _product_identity_values(product)
         fallback_identities = _source_identity_values(fallback)
-        if not product_identities or product_identities.intersection(fallback_identities):
+        if not product_identities or product_identities.intersection(
+            fallback_identities
+        ):
             return fallback
 
         MAPPER_LOGGER.warning(
@@ -3638,7 +4102,9 @@ async def _run_factory_enrichment_one(
             source_item=source_item,
             generated_product=fallback_dump,
         )
-        message = f"AI enrichment failed at index={index} sku={fallback_model.sku}: {exc}"
+        message = (
+            f"AI enrichment failed at index={index} sku={fallback_model.sku}: {exc}"
+        )
         MAPPER_LOGGER.exception(
             "step=category_approval_enrichment_item_failed process_id=%s chunk_id=%s index=%s sku=%s error=%s",
             process_id,
@@ -3673,7 +4139,9 @@ async def _save_factory_enrichment_item_progress(
         by_index = dict(by_index_raw) if isinstance(by_index_raw, dict) else {}
         by_index[str(index)] = enriched_dump
         task["partial_products_by_index"] = by_index
-        task["progress_total"] = max(int(task.get("progress_total") or 0), len(next_products))
+        task["progress_total"] = max(
+            int(task.get("progress_total") or 0), len(next_products)
+        )
         task["progress_completed"] = min(
             int(task.get("progress_total") or len(next_products) or 0),
             len(by_index),
@@ -3691,7 +4159,10 @@ async def _save_factory_enrichment_item_progress(
         chunks = task.get("ai_enrichment_chunks")
         if isinstance(chunks, list):
             for chunk in chunks:
-                if isinstance(chunk, dict) and int(chunk.get("chunkId") or -1) == chunk_id:
+                if (
+                    isinstance(chunk, dict)
+                    and int(chunk.get("chunkId") or -1) == chunk_id
+                ):
                     chunk["status"] = "running"
                     chunk["completed"] = int(chunk.get("completed") or 0) + 1
                     if failure_message:
@@ -3728,7 +4199,10 @@ async def _mark_factory_enrichment_chunk_terminal(
         chunks = task.get("ai_enrichment_chunks")
         if isinstance(chunks, list):
             for chunk in chunks:
-                if isinstance(chunk, dict) and int(chunk.get("chunkId") or -1) == chunk_id:
+                if (
+                    isinstance(chunk, dict)
+                    and int(chunk.get("chunkId") or -1) == chunk_id
+                ):
                     chunk["status"] = status_value
                     chunk["finishedAt"] = now
                     if error:
@@ -3755,7 +4229,8 @@ async def _mark_factory_enrichment_chunk_terminal(
             failed_chunks = [
                 chunk
                 for chunk in chunks
-                if isinstance(chunk, dict) and str(chunk.get("status") or "") == "failed"
+                if isinstance(chunk, dict)
+                and str(chunk.get("status") or "") == "failed"
             ]
             if failed_chunks or completed < total:
                 task["status"] = "FAILED"
@@ -3781,7 +4256,9 @@ async def _mark_factory_enrichment_chunk_terminal(
                     task["issues"] = [
                         *[str(item) for item in failure_list[:100]],
                         *(
-                            [f"{len(failure_list) - 100} more AI enrichment item failures"]
+                            [
+                                f"{len(failure_list) - 100} more AI enrichment item failures"
+                            ]
                             if len(failure_list) > 100
                             else []
                         ),
@@ -3862,7 +4339,6 @@ async def _run_factory_enrichment_task(
     )
 
 
-
 async def _run_factory_enrichment_chunk_task(
     *,
     process_id: str,
@@ -3889,7 +4365,10 @@ async def _run_factory_enrichment_chunk_task(
         chunks = task.get("ai_enrichment_chunks")
         if isinstance(chunks, list):
             for chunk in chunks:
-                if isinstance(chunk, dict) and int(chunk.get("chunkId") or -1) == chunk_id:
+                if (
+                    isinstance(chunk, dict)
+                    and int(chunk.get("chunkId") or -1) == chunk_id
+                ):
                     chunk["status"] = "running"
                     chunk["startedAt"] = now
                     chunk["aiKeySlot"] = ai_key_slot
@@ -4036,7 +4515,11 @@ async def enrich_factory_prepared_products(
         task is not None
         and task.get("status") == "IN_PROGRESS"
         and task.get("current_step")
-        in {"ai_enrichment_queued", "ai_enrichment_chunks_queued", "ai_enrichment_in_progress"}
+        in {
+            "ai_enrichment_queued",
+            "ai_enrichment_chunks_queued",
+            "ai_enrichment_in_progress",
+        }
     ):
         return {
             "success": True,
@@ -4102,7 +4585,9 @@ async def _load_attribute_allowed_value_lookup() -> dict[str, dict[str, str]]:
                     continue
                 values[original.casefold()] = original
                 if item.value_ru:
-                    values[normalize_translation_text(item.value_ru).casefold()] = original
+                    values[normalize_translation_text(item.value_ru).casefold()] = (
+                        original
+                    )
             if values:
                 lookup[attr_key] = values
         return lookup
@@ -4502,9 +4987,10 @@ async def _map_shipping_profiles_to_controller_by_name(
     missing: list[dict[str, str]] = []
     for product in products:
         source_profile_id = str(product.get("shippingProfileID") or "").strip()
-        source_profile_name = source_name_by_id.get(source_profile_id) or str(
-            product.get("shippingProfileName") or ""
-        ).strip()
+        source_profile_name = (
+            source_name_by_id.get(source_profile_id)
+            or str(product.get("shippingProfileName") or "").strip()
+        )
         normalized_name = _normalize_shipping_profile_name(source_profile_name)
         target_profile = target_by_name.get(normalized_name)
         if target_profile:
@@ -4652,9 +5138,7 @@ async def _map_eans_from_counterpart_factory_by_index(
     for index in range(limit):
         product_ean = str(products[index].get("ean") or "").strip()
         source_ean = (
-            _source_item_ean(source_items[index])
-            if index < len(source_items)
-            else ""
+            _source_item_ean(source_items[index]) if index < len(source_items) else ""
         )
         target_ean = _source_item_ean(target_items[index])
         current_ean = product_ean or source_ean
@@ -4678,6 +5162,68 @@ async def _map_eans_from_counterpart_factory_by_index(
         len(source_items),
         len(target_items),
         len(mapped),
+    )
+    return mapped, meta
+
+
+async def _map_eans_from_counterpart_factory(
+    *,
+    afterbuy: AfterbuyService,
+    source_factory_id: str,
+    target_controller: Controller,
+    source_items: list[Any],
+    products: list[dict[str, Any]],
+) -> tuple[dict[str, str], dict[str, Any]]:
+    name_map: dict[str, str] = {}
+    name_meta: dict[str, Any] = {}
+    try:
+        async with SessionLocal() as session:
+            name_map, name_meta = await map_eans_from_import_by_name(
+                session,
+                target_controller=target_controller,
+                products=products,
+            )
+    except Exception as exc:
+        MAPPER_LOGGER.warning(
+            "step=xl_ean_mapping_by_xlsx_name_failed source_factory_id=%s error=%s",
+            source_factory_id,
+            exc,
+        )
+        name_meta = {"strategy": "xlsx_name", "error": str(exc)}
+
+    index_map: dict[str, str] = {}
+    index_meta: dict[str, Any] = {}
+    try:
+        index_map, index_meta = await _map_eans_from_counterpart_factory_by_index(
+            afterbuy=afterbuy,
+            source_factory_id=source_factory_id,
+            target_controller=target_controller,
+            source_items=source_items,
+            products=products,
+        )
+    except Exception as exc:
+        MAPPER_LOGGER.warning(
+            "step=xl_ean_mapping_by_factory_index_failed source_factory_id=%s error=%s",
+            source_factory_id,
+            exc,
+        )
+        index_meta = {"strategy": "factory_index", "error": str(exc)}
+    mapped = dict(index_map)
+    mapped.update(name_map)
+    meta = {
+        "strategy": "xlsx_name_with_factory_index_fallback",
+        "target_account": target_controller.value,
+        "mapped": len(mapped),
+        "xlsx_name": name_meta,
+        "factory_index": index_meta,
+    }
+    MAPPER_LOGGER.info(
+        "step=xl_ean_mapping_combined source_factory_id=%s target_account=%s mapped=%s name_mapped=%s index_mapped=%s",
+        source_factory_id,
+        target_controller.value,
+        len(mapped),
+        len(name_map),
+        len(index_map),
     )
     return mapped, meta
 
@@ -4753,7 +5299,9 @@ async def _build_factory_submit_preview_snapshots(
             ).strip()
             if shipping_profile_id:
                 validated_item["shippingProfileID"] = shipping_profile_id
-                shipping_profile_name = str(item.get("shippingProfileName") or "").strip()
+                shipping_profile_name = str(
+                    item.get("shippingProfileName") or ""
+                ).strip()
                 if shipping_profile_name:
                     validated_item["shippingProfileName"] = shipping_profile_name
             validated.append(validated_item)
@@ -4764,7 +5312,7 @@ async def _build_factory_submit_preview_snapshots(
         xl_validated: list[dict[str, Any]] = []
         xl_validated_models: list[ProductPayload] = []
         if controller == Controller.JV and afterbuy is not None:
-            xl_ean_map, xl_ean_map_meta = await _map_eans_from_counterpart_factory_by_index(
+            xl_ean_map, xl_ean_map_meta = await _map_eans_from_counterpart_factory(
                 afterbuy=afterbuy,
                 source_factory_id=factory_id,
                 target_controller=Controller.XL,
@@ -4776,11 +5324,13 @@ async def _build_factory_submit_preview_snapshots(
                 xl_ean_map,
                 controller=Controller.XL,
             )
-            xl_shipping_profile_map_meta = await _map_shipping_profiles_to_controller_by_name(
-                product_service=product_service,
-                source_controller=controller,
-                target_controller=Controller.XL,
-                products=xl_validated,
+            xl_shipping_profile_map_meta = (
+                await _map_shipping_profiles_to_controller_by_name(
+                    product_service=product_service,
+                    source_controller=controller,
+                    target_controller=Controller.XL,
+                    products=xl_validated,
+                )
             )
             xl_validated_models = [
                 ProductPayload.model_validate(item) for item in xl_validated
@@ -4825,9 +5375,9 @@ async def _build_factory_submit_preview_snapshots(
             "controller": controller.value,
             "factory_id": factory_id,
             "jv_snapshot_path": jv_snapshot_path.as_posix(),
-            "xl_snapshot_path": xl_snapshot_path.as_posix()
-            if xl_snapshot_path is not None
-            else None,
+            "xl_snapshot_path": (
+                xl_snapshot_path.as_posix() if xl_snapshot_path is not None else None
+            ),
             "availability_snapshot_path": availability_snapshot_path.as_posix(),
             "products_count": len(validated_models),
             "xl_products_count": len(xl_validated_models),
@@ -4887,7 +5437,9 @@ async def _run_factory_availability_task(
     await _save_factory_task_state(process_id, task)
 
     availability_errors: list[dict[str, str]] = []
-    availability_queue: asyncio.Queue[tuple[int, dict[str, Any]] | None] = asyncio.Queue()
+    availability_queue: asyncio.Queue[tuple[int, dict[str, Any]] | None] = (
+        asyncio.Queue()
+    )
     availability_lock = asyncio.Lock()
 
     async def _submit_availability(index: int, item: dict[str, Any]) -> None:
@@ -4895,7 +5447,9 @@ async def _run_factory_availability_task(
         sku = str(item.get("sku") or "").strip()
         shipping_profile_id = str(item.get("shippingProfileID") or "").strip()
         quantity = str(item.get("quantity") or "20").strip() or "20"
-        processing_time = str(item.get("processingTime") or "DEFAULT").strip() or "DEFAULT"
+        processing_time = (
+            str(item.get("processingTime") or "DEFAULT").strip() or "DEFAULT"
+        )
         MAPPER_LOGGER.info(
             "step=availability_background_item_start process_id=%s index=%s controller=%s sku=%s shipping_profile_id=%s quantity=%s",
             process_id,
@@ -5118,7 +5672,9 @@ async def _run_factory_submit_task(
             task["heartbeat_at"] = task["updated_at"]
             await _save_factory_task_state(process_id, task)
 
-        products_with_variants = [item for item in products if active_variant_items(item)]
+        products_with_variants = [
+            item for item in products if active_variant_items(item)
+        ]
         ean_pool_assignments = await _fill_missing_variant_eans_from_pool(
             process_id=process_id,
             products=products_with_variants,
@@ -5229,7 +5785,9 @@ async def _run_factory_submit_task(
             ).strip()
             if shipping_profile_id:
                 validated_item["shippingProfileID"] = shipping_profile_id
-                shipping_profile_name = str(item.get("shippingProfileName") or "").strip()
+                shipping_profile_name = str(
+                    item.get("shippingProfileName") or ""
+                ).strip()
                 if shipping_profile_name:
                     validated_item["shippingProfileName"] = shipping_profile_name
             else:
@@ -5244,7 +5802,7 @@ async def _run_factory_submit_task(
 
         if controller == Controller.JV and afterbuy is not None:
             try:
-                xl_ean_map, xl_ean_map_meta = await _map_eans_from_counterpart_factory_by_index(
+                xl_ean_map, xl_ean_map_meta = await _map_eans_from_counterpart_factory(
                     afterbuy=afterbuy,
                     source_factory_id=factory_id,
                     target_controller=Controller.XL,
@@ -5264,11 +5822,13 @@ async def _run_factory_submit_task(
                 xl_ean_map,
                 controller=Controller.XL,
             )
-            xl_shipping_profile_map_meta = await _map_shipping_profiles_to_controller_by_name(
-                product_service=product_service,
-                source_controller=controller,
-                target_controller=Controller.XL,
-                products=xl_validated,
+            xl_shipping_profile_map_meta = (
+                await _map_shipping_profiles_to_controller_by_name(
+                    product_service=product_service,
+                    source_controller=controller,
+                    target_controller=Controller.XL,
+                    products=xl_validated,
+                )
             )
             for index, item in enumerate(xl_validated):
                 model = ProductPayload.model_validate(item)
@@ -5407,10 +5967,9 @@ async def _run_factory_submit_task(
         )
         task["current_step"] = "otto_create_done"
         task["products_count"] = len(validated_models) + len(xl_validated_models)
-        jv_create_done = (
-            create_failed_count == 0
-            and int((update_result or {}).get("succeeded") or 0) >= len(validated_models)
-        )
+        jv_create_done = create_failed_count == 0 and int(
+            (update_result or {}).get("succeeded") or 0
+        ) >= len(validated_models)
         if jv_create_done:
             await _mark_ean_pool_assignments_used(ean_pool_assignments)
         else:
@@ -5438,10 +5997,7 @@ async def _run_factory_submit_task(
                 update_result,
                 xl_update_result,
             )
-        elif (
-            succeeded_count >= len(validated_models)
-            and xl_create_done
-        ):
+        elif succeeded_count >= len(validated_models) and xl_create_done:
             task["availability_state"] = "QUEUED"
             task["availability_progress_total"] = len(availability_payloads)
             task["availability_progress_completed"] = 0
@@ -5509,17 +6065,18 @@ async def preview_factory_submit_payloads(
 
     preview_payload = dict(payload or {})
     if not isinstance(preview_payload.get("products"), list):
-        preview_payload["products"] = task.get("products") or task.get("submitted_products")
+        preview_payload["products"] = task.get("products") or task.get(
+            "submitted_products"
+        )
     preview_payload["controller"] = (
         preview_payload.get("controller") or task.get("controller") or "jv"
     )
     preview_payload["factory_id"] = (
         preview_payload.get("factory_id") or task.get("factory_id") or "unknown"
     )
-    preview_payload["media_base_url"] = (
-        str(preview_payload.get("media_base_url") or "").strip()
-        or str(request.base_url).rstrip("/")
-    )
+    preview_payload["media_base_url"] = str(
+        preview_payload.get("media_base_url") or ""
+    ).strip() or str(request.base_url).rstrip("/")
 
     try:
         result = await _build_factory_submit_preview_snapshots(
@@ -5554,7 +6111,8 @@ async def preview_factory_submit_payloads(
         "xl_products_count": result.get("xl_products_count"),
         "xl_ean_map": result.get("xl_ean_map") or {},
         "xl_ean_map_meta": result.get("xl_ean_map_meta") or {},
-        "xl_shipping_profile_map_meta": result.get("xl_shipping_profile_map_meta") or {},
+        "xl_shipping_profile_map_meta": result.get("xl_shipping_profile_map_meta")
+        or {},
         "ean_pool_assignments": result.get("ean_pool_assignments") or [],
         "ean_pool_preview_released": result.get("ean_pool_preview_released"),
     }
@@ -5609,10 +6167,9 @@ async def submit_factory_prepared_products(
 
     if task is not None:
         submitted_products = [item for item in products if isinstance(item, dict)]
-        media_base_url = (
-            str(payload.get("media_base_url") or "").strip()
-            or str(request.base_url).rstrip("/")
-        )
+        media_base_url = str(payload.get("media_base_url") or "").strip() or str(
+            request.base_url
+        ).rstrip("/")
         queued_products_count = len(
             expand_products_with_variants(
                 submitted_products,
@@ -5637,10 +6194,9 @@ async def submit_factory_prepared_products(
         )
 
     payload_for_job = dict(payload)
-    payload_for_job["media_base_url"] = (
-        str(payload.get("media_base_url") or "").strip()
-        or str(request.base_url).rstrip("/")
-    )
+    payload_for_job["media_base_url"] = str(
+        payload.get("media_base_url") or ""
+    ).strip() or str(request.base_url).rstrip("/")
 
     await enqueue_job(
         "submit_factory_products_task",

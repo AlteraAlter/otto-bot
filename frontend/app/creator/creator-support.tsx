@@ -2047,7 +2047,11 @@ export function CategoryChangeForm({
   compact?: boolean;
   onDraftChange?: (draft: { category: string; dirty: boolean; valid: boolean }) => void;
 }) {
-  const groups = useMemo(() => Object.keys(categoryOptionsByGroup).sort((a, b) => a.localeCompare(b)), [categoryOptionsByGroup]);
+  const groups = useMemo(() => {
+    const values = new Set(Object.keys(categoryOptionsByGroup));
+    if (currentGroup.trim()) values.add(currentGroup.trim());
+    return Array.from(values).sort((a, b) => a.localeCompare(b));
+  }, [categoryOptionsByGroup, currentGroup]);
   const [group, setGroup] = useState(currentGroup);
   const [category, setCategory] = useState(currentCategory);
   const [query, setQuery] = useState(categoryDisplayByValue[currentCategory] || currentCategory);
@@ -2064,6 +2068,14 @@ export function CategoryChangeForm({
       return item.toLocaleLowerCase().includes(normalized) || displayCategory(item).toLocaleLowerCase().includes(normalized);
     }).slice(0, 80);
   }, [categories, query, categoryDisplayByValue]);
+
+  useEffect(() => {
+    setGroup(currentGroup);
+    setCategory(currentCategory);
+    setQuery(categoryDisplayByValue[currentCategory] || currentCategory);
+    setOpen(false);
+    setActiveIndex(0);
+  }, [currentGroup, currentCategory, categoryDisplayByValue]);
 
   useEffect(() => {
     const dirty = group !== currentGroup || category !== currentCategory;

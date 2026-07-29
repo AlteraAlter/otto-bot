@@ -20,6 +20,21 @@ type CategoryListResponse = {
   items?: string[];
 };
 
+export type PriceUpdateItem = {
+  id: string;
+  price?: number | null;
+  recommendedRetailPrice?: number | null;
+  salePrice?: number | null;
+};
+
+export type PriceUpdateController = "auto" | "jv" | "xl";
+
+type PriceUpdateResponse = {
+  items?: unknown[];
+  message?: string;
+  updated?: number;
+};
+
 function isAllCategoriesValue(value: string) {
   const normalized = value.trim().toLowerCase();
   return normalized === "" || normalized === "all" || normalized === "all categories";
@@ -43,6 +58,9 @@ export function useProductDashboard() {
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(
+    () => new Set()
+  );
   const [tablePage, setTablePage] = useState(1);
   const [dbTotal, setDbTotal] = useState(0);
 
@@ -113,6 +131,11 @@ export function useProductDashboard() {
       setDbTotal(
         isObject(payload) && typeof payload.total === "number" ? payload.total : items.length
       );
+      const currentPageIds = new Set(items.map((item) => item.id));
+      setSelectedProductIds(
+        (current) =>
+          new Set(Array.from(current).filter((id) => currentPageIds.has(id)))
+      );
 
       setSelectedId((currentSelectedId) => {
         const nextSelectedId = items.some((item) => item.id === currentSelectedId)
@@ -149,6 +172,68 @@ export function useProductDashboard() {
   const closeProduct = useCallback(() => {
     setIsDetailOpen(false);
     setSelectedId("");
+  }, []);
+
+  const toggleProductSelection = useCallback((productId: string) => {
+    setSelectedProductIds((current) => {
+      const next = new Set(current);
+      if (next.has(productId)) {
+        next.delete(productId);
+      } else {
+        next.add(productId);
+      }
+      return next;
+    });
+  }, []);
+
+  const togglePageSelection = useCallback(() => {
+    setSelectedProductIds((current) => {
+      const currentPageIds = products.map((product) => product.id);
+      const hasEveryVisibleProduct =
+        currentPageIds.length > 0 && currentPageIds.every((id) => current.has(id));
+      if (hasEveryVisibleProduct) {
+        return new Set();
+      }
+      return new Set(currentPageIds);
+    });
+  }, [products]);
+
+  const clearProductSelection = useCallback(() => {
+    setSelectedProductIds(new Set());
+  }, []);
+
+  const updateProductPrices = useCallback(async (
+    items: PriceUpdateItem[],
+    controller: PriceUpdateController = "auto",
+  ) => {
+    if (items.length === 0) {
+      throw new Error("Не выбраны товары для обновления");
+    }
+
+    const response = await fetch("/api/db-products/prices", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ controller, items }),
+      cache: "no-store",
+    });
+    redirectToLoginIfUnauthorized(response.status);
+    const payload = (await response.json().catch(() => null)) as PriceUpdateResponse | null;
+
+    if (!response.ok) {
+      throw new Error(payload?.message ?? `Не удалось обновить цены (${response.status})`);
+    }
+
+    const updatedProducts = (payload?.items ?? [])
+      .map((item, index) => mapProduct(item, index))
+      .filter((item): item is Product => item !== null);
+    if (updatedProducts.length > 0) {
+      const updatedById = new Map(updatedProducts.map((product) => [product.id, product]));
+      setProducts((current) =>
+        current.map((product) => updatedById.get(product.id) ?? product)
+      );
+    }
+    setNotice(`Цены отправлены в OTTO и обновлены локально: ${payload?.updated ?? updatedProducts.length}`);
+    return updatedProducts;
   }, []);
 
   useEffect(() => {
@@ -221,10 +306,12 @@ export function useProductDashboard() {
     kpi,
     notice,
     closeProduct,
+    clearProductSelection,
     openProduct,
     products,
     query,
     selectedId,
+    selectedProductIds,
     selectedProduct,
     setCategoryFilter: (value: string) =>
       setCategoryFilter(isAllCategoriesValue(value) ? "all" : value),
@@ -236,6 +323,9 @@ export function useProductDashboard() {
     sortBy,
     sortOrder,
     tablePage,
+    togglePageSelection,
+    toggleProductSelection,
     totalTablePages,
+    updateProductPrices,
   };
 }

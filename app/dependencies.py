@@ -22,6 +22,9 @@ from app.schemas.enums import RoleEnum
 from app.schemas.userDTO import UserDTO
 from app.services.afterbuy_service import AfterbuyService
 from app.services.product_service import ProductService
+from app.services.extermal_service import ExternalService
+from app.clients.external_otto_client import ExternalOttoClient
+from app.repository.external_api_repository import ExternalApiRepository
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/v1/auth/login")
 
@@ -49,11 +52,28 @@ def get_otto_client() -> OttoClient:
         timeout=settings.otto_timeout_seconds,
     )
 
+@lru_cache
+def get_external_otto_client() -> ExternalOttoClient:
+    
+    return ExternalOttoClient(
+        auth = get_otto_auth(),
+        base_url=settings.otto_base_url
+    )
+
 
 @lru_cache
 def get_product_service() -> ProductService:
     """Create a cached product service wrapper."""
     return ProductService(client=get_otto_client())
+
+@lru_cache
+def get_external_api_service() -> ExternalService:
+    
+    return ExternalService(client=get_external_otto_client())
+
+
+async def get_external_repository(session: AsyncSession = Depends(get_db)) -> ExternalApiRepository:
+    return ExternalApiRepository(session)
 
 
 @lru_cache

@@ -141,6 +141,32 @@ class OttoClient:
             controller=controller,
         )
 
+    async def update_status_with_status(
+        self,
+        payload: dict,
+        controller: Controller | str = Controller.JV,
+    ) -> tuple[int, Any]:
+        """POST active status changes and keep the upstream status code."""
+        return await self._request_with_status(
+            "POST",
+            "/v5/products/active-status",
+            json=payload,
+            controller=controller,
+        )
+
+    async def update_prices_with_status(
+        self,
+        payload: list[dict[str, Any]],
+        controller: Controller | str = Controller.JV,
+    ) -> tuple[int, Any]:
+        """POST product variation price changes and keep the upstream status code."""
+        return await self._request_with_status(
+            "POST",
+            "/v5/products/prices",
+            json=payload,
+            controller=controller,
+        )
+
     async def get_product(self, sku: str) -> ProductResponse:
         """GET a single product by SKU."""
         response = await self._request("GET", f"/v5/products/{sku}")
@@ -262,6 +288,25 @@ class OttoClient:
             "POST",
             "/v1/availability/quantities",
             json=[payload],
+            controller=controller,
+        )
+
+    async def update_quantity_with_status(
+        self,
+        payload: Optional[dict | list] = None,
+        controller: Controller | str = Controller.JV,
+    ) -> tuple[int, Any]:
+        """POST marketplace quantity and keep 207/422 details for callers."""
+        request_payload = payload if isinstance(payload, list) else [payload]
+        LOGGER.info(
+            "step=otto_update_quantity_request controller=%s payload=%s",
+            controller.value if isinstance(controller, Controller) else controller,
+            request_payload,
+        )
+        return await self._request_with_status(
+            "POST",
+            "/v1/availability/quantities",
+            json=request_payload,
             controller=controller,
         )
 

@@ -155,3 +155,20 @@ class AfterbuyClient:
         if row is None:
             row = first_item
         return row if isinstance(row, dict) else None
+
+    async def get_images_by_ean(
+        self,
+        *,
+        session: str,
+        ean: str,
+    ) -> dict[str, Any]:
+        """Fetch image URLs from `/api/images-by-ean?ean=...`."""
+        response = await self.send_request(
+            "GET",
+            "/api/images-by-ean",
+            params={"ean": ean},
+            cookies={"session": session},
+        )
+        response.raise_for_status()
+        result = response.json()
+        return result if isinstance(result, dict) else {"items": result}

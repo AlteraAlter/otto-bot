@@ -110,6 +110,13 @@ export function formatCurrency(value: number | null) {
   }).format(value);
 }
 
+export function processUvp(price: number) {
+  if (price > 5000) return Math.round(price * 1.1 * 100) / 100;
+  if (price >= 2500 && price <= 4999) return Math.round(price * 1.18 * 100) / 100;
+  if (price >= 1000 && price <= 2499) return Math.round(price * 1.25 * 100) / 100;
+  return Math.round(price * 1.35 * 100) / 100;
+}
+
 export function formatDateTime(value: string | null) {
   if (!value) return "-";
 
@@ -130,5 +137,13 @@ export function isActiveStatus(value: string | null) {
   if (!value) return false;
 
   const normalized = value.toLowerCase();
+  if (
+    normalized.includes("inaktiv") ||
+    normalized.includes("inactive") ||
+    normalized === "false" ||
+    normalized === "0"
+  ) {
+    return false;
+  }
   return normalized.includes("aktiv") || normalized.includes("active");
 }
