@@ -1,31 +1,44 @@
 import hashlib
 from copy import deepcopy
 from typing import Any
+from uuid import UUID
 
 from app.clients.external_otto_client import ExternalOttoClient
+from app.infrastructure.rabbitmq_publisher import RabbitMQPublisher
 from app.models.attribute_allowed_values import AttributeAllowedValue
 from app.models.attributes import Attribute
 from app.models.categories import Category
 from app.models.category_group import CategoryGroup
 from app.schemas.external_schemes.until_schemes import (
-    ActiveStatusByEanRequest,
-    ActiveStatusByEanResponse,
     CreateOrUpdateProductVariationRequest,
-    GetProductRequest,
+    ActiveStatusByEanResponse,
+    ActiveStatusByEanRequest,
+    DeliveryInformationRequest,
     ShippingProfileResponse,
+    AvailabilityRequest,
+    DeliveryInformation,
+    GetProductRequest,
+    CreateDeliveryJob,
+    DeliveryRequest,
+    QuantityRequest,
+    Controller,
+    Quantity,
 )
 from app.schemas.product_response import (
-    AttributeSchema,
-    ExternalCategoryItem,
-    ExternalCategoriesResponse,
     ExternalCategoryAttributesResponse,
+    ExternalCategoriesResponse,
+    ExternalCategoryItem,
     OttoCategoryResponse,
+    AttributeSchema,
 )
 from app.repository.external_api_repository import ExternalApiRepository
-from app.schemas.enums import Controller
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+
+import logging
+
+logger = logging.getLogger("external_api")
 
 EXTERNAL_PRODUCT_BRAND_ID_BY_CONTROLLER: dict[str, str] = {
     "jv": "UO4EGHSX",
@@ -87,15 +100,104 @@ class ExternalService:
         self.client = client
 
     async def get_products(self, payload: GetProductRequest, controller: str):
+        logger.info("Клиент принял запрос")
+        
         data = await self.client.get_products(payload, controller)
+
+        logger.info(f"Успешно выполнен запрос. Ответ: {data}")
+
         return data
 
     async def create_or_update_product(
-        self, payload: CreateOrUpdateProductVariationRequest, controller: str
+        self, 
+        payload: CreateOrUpdateProductVariationRequest, 
+        controller: Controller,
+        publisher: RabbitMQPublisher
     ):
+        logger.info("Клиент принял запрос")
+        
+        variation = payload.root[0]
+
+        logger.info("Создание или обновление товара в OTTO: sku=%s", variation.sku)
+        
         prepared_payload = self._prepare_create_or_update_payload(payload, controller)
-        data = await self.client.create_or_update_product(prepared_payload, controller)
-        return data
+        
+        logger.debug("Prepared OTTO payload: %s", prepared_payload)
+        
+        try:
+            response = await self.client.create_or_update_product(prepared_payload, controller)
+        except Exception:
+            logger.exception("Ошибка создания или обновления товара: sku=%s", variation.sku)
+            raise
+        
+        marketplace_job_id = self._extract_marketplace_job_id(response)
+        
+        if marketplace_job_id is None:
+            logger.error(
+                "OTTO не вернул marketplace_job_id: sku=%s response=%s",
+                variation.sku,
+                response,
+            )
+            raise RuntimeError("OTTO response does not contain marketplace_job_id")
+
+        job = self._build_delivery_job(
+            marketplace_job_id,
+            variation.shipping_profile_id,
+            variation.sku,
+            controller=controller
+        )
+
+        try:
+            await publisher.publish(job)
+        except Exception:
+            logger.exception(
+                "Товар отправлен в OTTO, но задача не опубликована: "
+                "marketplace_job_id=%s sku=%s",
+                marketplace_job_id,
+                variation.sku,
+            )
+            raise
+        
+        logger.info(
+            "Задача опубликована: task_id=%s marketplace_job_id=%s sku=%s",
+            job.task_id,
+            marketplace_job_id,
+            variation.sku,
+        )
+        
+        return response
+    
+    def _build_delivery_job(
+        self,
+        marketplace_job_id: UUID,
+        shipping_profile_id: str,
+        sku: str,
+        controller: Controller
+    ) -> CreateDeliveryJob:
+        delivery = DeliveryInformation(
+            shipping_profile_id=shipping_profile_id,
+            sku=sku
+        )
+        quantity = Quantity(
+            quantity=20,
+            sku=sku
+        )
+        
+        quantity_data = QuantityRequest.model_validate(quantity)
+        delivery_data = DeliveryInformationRequest.model_validate(delivery)
+        
+        availability_data = AvailabilityRequest(
+            quantities=quantity_data, 
+            delivery_information=delivery_data
+        )
+    
+        job = CreateDeliveryJob(
+            marketplace_job_id=marketplace_job_id,
+            availability_data=availability_data,
+            controller=controller
+        )
+        
+        return job
 
     def _prepare_create_or_update_payload(
         self,
@@ -118,6 +220,44 @@ class ExternalService:
             self._apply_msrp(product)
 
         return products
+    
+    
+    def _extract_marketplace_job_id(self, payload: dict[str, Any]) -> UUID:
+        href: str = payload["links"][0]["href"]
+        task_id = UUID(href.rstrip("/").rsplit("/", 1)[-1])
+        
+        return task_id
+    
+    
+    async def create_or_update_availability(self, job: CreateDeliveryJob) -> None:
+        availability_data = job.availability_data
+        
+        controller = job.controller
+        
+        quantity_data = availability_data.quantities
+        delivery_information_data = availability_data.delivery_information
+        try:
+            quantity_result = await self.client.update_quantity(quantity_data, controller)
+            delivery_information_result = await self.client.update_product_delivery(
+                delivery_information_data, controller
+            )
+        except Exception:
+            logger.exception(
+                "Ошибка в оркестраторе запроса"
+            )
+            raise
+            
+        logger.info(
+            "Успешно обработал оркестратор запросов: method=%s marketplace_job_id=%s",
+            "create_or_update_availability",
+            job.marketplace_job_id
+        )
+        logger.info(
+            "Ответы от оркестратора: quantity=%s delivery=%s",
+            quantity_result,
+            delivery_information_result
+        )
+
 
     @staticmethod
     def _apply_msrp(product: dict[str, Any]) -> None:

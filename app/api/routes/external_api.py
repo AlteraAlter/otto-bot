@@ -10,15 +10,25 @@ from app.schemas.product_response import (
     ExternalCategoriesResponse,
     ExternalCategoryAttributesResponse,
 )
-from app.dependencies import get_external_api_service, get_external_repository
+from app.dependencies import (
+    get_external_api_service,
+    get_external_repository,
+    get_rabbitmq_publisher
+)
 from app.database import get_db
 from app.services.extermal_service import ExternalService
 from app.repository.external_api_repository import ExternalApiRepository
 from app.schemas.enums import Controller
+from app.infrastructure.rabbitmq_publisher import RabbitMQPublisher
 
 from fastapi import APIRouter, Query, Depends, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Annotated
+
+import logging
+
+
+logger = logging.getLogger("external_api")
 
 router = APIRouter(prefix="/extermal", tags=["external"])
 
@@ -46,11 +56,12 @@ async def get_products(
     page: int = Query(default=0, ge=0),
     limit: int = Query(default=10, ge=1),
     controller: Controller = Query(
-        default=Controller.JV,
+        default=Controller.JV,  
         description="На каком аккаунте операция будет происходить",
     ),
     service: ExternalService = Depends(get_external_api_service),
 ):
+    logger.info("Эндпоинт extermal/get_product")
     payload = GetProductRequest(
         sku=sku,
         productReference=product_reference,
@@ -59,19 +70,28 @@ async def get_products(
         page=page,
         limit=limit,
     )
+    
+    logger.info(f"get_product пэйлоад: {payload}")
     data = await service.get_products(payload, controller)
 
+    logger.info("Роутер возвращает данные")
+    
     return data
 
 
 @router.post("/create_or_update_product")
 async def create_or_update_product(
     payload: Annotated[CreateOrUpdateProductVariationRequest, Body()],
-    controller: Annotated[str, Query()] = "jv",
+    controller: Annotated[Controller, Query()] = Controller.JV,
     service: ExternalService = Depends(get_external_api_service),
     repository: ExternalApiRepository = Depends(get_external_repository),
+    publisher: RabbitMQPublisher = Depends(get_rabbitmq_publisher)
 ):
-    data = await service.create_or_update_product(payload, controller)
+    logger.info(f"Запрос был принят энпоинтом extermal/create_or_update_product.\n payload: {payload}")
+    data = await service.create_or_update_product(payload, controller, publisher)
+    
+    logger.info(f"Ответ от ОТТО: {data}")
+    
     return data
 
 

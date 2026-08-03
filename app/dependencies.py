@@ -6,6 +6,7 @@ instead of being recreated for each injection.
 
 from functools import lru_cache
 
+from fastapi import Request
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +26,7 @@ from app.services.product_service import ProductService
 from app.services.extermal_service import ExternalService
 from app.clients.external_otto_client import ExternalOttoClient
 from app.repository.external_api_repository import ExternalApiRepository
+from app.infrastructure.rabbitmq import RabbitMQPublisher
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/v1/auth/login")
 
@@ -150,3 +152,7 @@ def get_afterbuy_service() -> AfterbuyService:
 def get_afterbuy_login() -> AfterbuyService:
     """Backward-compatible dependency name for Afterbuy access."""
     return get_afterbuy_service()
+
+
+def get_rabbitmq_publisher(request: Request) -> RabbitMQPublisher:
+    return request.app.state.rabbitmq_publisher

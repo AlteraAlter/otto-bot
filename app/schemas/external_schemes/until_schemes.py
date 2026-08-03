@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Any, Literal
+from uuid import UUID, uuid4
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, HttpUrl, RootModel
 
@@ -225,6 +226,7 @@ class ProductVariationRequest(OttoBaseModel):
     )
     sku: str = Field(min_length=1, max_length=13, examples=["4021234231234"])
     ean: str = Field(min_length=8, max_length=13, examples=["4250123456789"])
+    shipping_profile_id: str
     isbn: str | None = None
     upc: str | None = None
     pzn: str | None = None
@@ -332,3 +334,11 @@ class ShippingProfileResponse(RootModel[list[ShippingProfile]]):
     root: list[ShippingProfile] = Field(
         max_length=300, description="Full list of shipping profiles"
     )
+    
+    
+class CreateDeliveryJob(OttoBaseModel):
+    task_id: UUID = Field(default_factory=uuid4)
+    marketplace_job_id: UUID = Field(description="OTTO job id. Used for status retrival")
+    availability_data: AvailabilityRequest
+    controller: Controller
+    

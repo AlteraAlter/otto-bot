@@ -92,6 +92,14 @@ class Settings(BaseSettings):
     deepl_min_interval_seconds: float = 1.25
     deepl_max_retries: int = 6
     deepl_retry_base_delay_seconds: float = 2.0
+    
+    # Rabbitmq
+    rabbitmq_host: str
+    rabbitmq_port: int
+    rabbitmq_app_user: str
+    rabbitmq_app_password: str
+    rabbitmq_virtual_host: str
+    rabbitmq_queue_name: str
 
     compliance: ClassVar = {
         Controller.JV: Compliance(

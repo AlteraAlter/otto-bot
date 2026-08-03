@@ -1,52 +1,82 @@
 import logging
-import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-LOG_FILE = Path(os.getenv("LOG_FILE", "logs/otto_bot.log"))
-if not LOG_FILE.is_absolute():
-    LOG_FILE = Path(__file__).resolve().parents[2] / LOG_FILE
-LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
+BASE_DIR = Path(__file__).resolve().parents[2]
+LOGS_DIR = BASE_DIR / "logs"
+
+MAIN_LOG_FILE = LOGS_DIR / "otto_bot.log"
+EXTERNAL_API_LOG_FILE = LOGS_DIR / "external_api.log"
+
+LOG_LEVEL = logging.INFO
 LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+MAX_LOG_SIZE = 10 * 1024 * 1024  # 10 MB
+BACKUP_COUNT = 5
 
-def _resolve_level(level_name: str | None) -> int:
-    level = (level_name or "INFO").upper()
-    return getattr(logging, level, logging.INFO)
+
+def create_file_handler(
+    filename: Path,
+    formatter: logging.Formatter,
+) -> RotatingFileHandler:
+    handler = RotatingFileHandler(
+        filename=filename,
+        maxBytes=MAX_LOG_SIZE,
+        backupCount=BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    handler.setLevel(LOG_LEVEL)
+    handler.setFormatter(formatter)
+
+    return handler
 
 
 def setup_logging() -> None:
-    """Configure application logging for production and local debugging."""
-    level = _resolve_level(os.getenv("LOG_LEVEL"))
-    formatter = logging.Formatter(LOG_FORMAT, DATE_FORMAT)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    console_handler.setLevel(level)
-
-    file_handler = RotatingFileHandler(
-        filename=LOG_FILE,
-        maxBytes=int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024))),
-        backupCount=int(os.getenv("LOG_BACKUP_COUNT", "5")),
-        encoding="utf-8",
+    formatter = logging.Formatter(
+        fmt=LOG_FORMAT,
+        datefmt=DATE_FORMAT,
     )
-    file_handler.setFormatter(formatter)
-    file_handler.setLevel(level)
 
+    # Вывод логов в терминал
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(LOG_LEVEL)
+    console_handler.setFormatter(formatter)
+
+    # Основной файл logs/otto_bot.log
+    main_file_handler = create_file_handler(
+        MAIN_LOG_FILE,
+        formatter,
+    )
+
+    # Отдельный файл logs/external_api.log
+    external_api_handler = create_file_handler(
+        EXTERNAL_API_LOG_FILE,
+        formatter,
+    )
+
+    # Главный логгер приложения
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
-    root_logger.setLevel(level)
+    root_logger.setLevel(LOG_LEVEL)
     root_logger.addHandler(console_handler)
-    root_logger.addHandler(file_handler)
+    root_logger.addHandler(main_file_handler)
 
-    logging.getLogger("httpx").setLevel(os.getenv("HTTPX_LOG_LEVEL", "WARNING"))
-    logging.getLogger("httpcore").setLevel(os.getenv("HTTPX_LOG_LEVEL", "WARNING"))
-    logging.getLogger("sqlalchemy.engine").setLevel(
-        os.getenv("SQLALCHEMY_LOG_LEVEL", "WARNING")
-    )
+    # Отдельный логгер external_api
+    external_api_logger = logging.getLogger("external_api")
+    external_api_logger.handlers.clear()
+    external_api_logger.setLevel(LOG_LEVEL)
+    external_api_logger.addHandler(external_api_handler)
+    external_api_logger.propagate = False
+
+    # Убираем лишний шум библиотек
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 
 setup_logging()

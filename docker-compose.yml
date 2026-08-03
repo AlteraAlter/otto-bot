@@ -40,6 +40,29 @@ services:
       retries: 10
     restart: unless-stopped
 
+  rabbitmq:
+    image: rabbitmq:4-management
+    container_name: otto-bot-rabbitmq
+    hostname: rabbitmq
+    restart: unless-stopped
+    env_file:
+      - docker.env
+    
+    volumes: 
+      - rabbitmq-data:/var/lib/rabbitmq
+    
+    ports:
+      - "127.0.0.1:15670:15672"
+
+    expose:
+      - "5672"
+
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: .
@@ -153,3 +176,4 @@ volumes:
   postgres-data:
   redis-data:
   mongodb-data:
+  rabbitmq-data:
